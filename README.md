@@ -1,128 +1,297 @@
-<p align="center">
-	<img alt="logo" src="https://oscimg.oschina.net/oscnet/up-d3d0a9303e11d522a06cd263f3079027715.png">
-</p>
-<h1 align="center" style="margin: 30px 0 30px; font-weight: bold;">RuoYi v3.9.2</h1>
-<h4 align="center">基于SpringBoot+Vue前后端分离的Java快速开发框架</h4>
-<p align="center">
-	<a href="https://gitee.com/y_project/RuoYi-Vue/stargazers"><img src="https://gitee.com/y_project/RuoYi-Vue/badge/star.svg?theme=dark"></a>
-	<a href="https://gitee.com/y_project/RuoYi-Vue"><img src="https://img.shields.io/badge/RuoYi-v3.9.2-brightgreen.svg"></a>
-	<a href="https://gitee.com/y_project/RuoYi-Vue/blob/master/LICENSE"><img src="https://img.shields.io/github/license/mashape/apistatus.svg"></a>
-</p>
+# QTools 后端（青兔在线工具箱）
 
-## QTools 二次开发说明
+> 基于若依 RuoYi-Vue-springboot3 3.9.2 二次开发的后端，为青兔在线工具箱的前台用户站（QTools-C）与后台管理端（QTools-M）提供接口。
 
-本项目基于 [RuoYi-Vue-springboot3](https://gitee.com/y_project/RuoYi-Vue) v3.9.2 二次开发，作为「简易在线工具箱」的后端：
+## 简介
 
-- **模块/包重命名**：`ruoyi-*` → `qtools-*`，包名 `com.ruoyi` → `com.qtools`
-- **新增业务模块 `qtools-tool`**：对外提供两个匿名公开接口
-  - `GET  /api/toolInfo/list`：工具列表（字段 `id / tool_name / tool_desc / tool_route / icon / sort`）
-  - `POST /api/toolVisit/add`：工具访问埋点，请求体 `{"toolId": 1}`
-- **建表脚本**：`sql/qtools/tool_init.sql`（`tool_info`、`tool_visit` + 3 条初始化数据），执行方式 `mysql -uroot -p qtools < sql/qtools/tool_init.sql`
-- **本地私密配置**：数据库密码、`token.secret` 等**不入库**。复制 `qtools-admin/src/main/resources/application-secret.yml.example` 为同目录的 `application-secret.yml` 并填入真实值（该文件已被 `.gitignore` 排除）；部署时改用环境变量 `SPRING_DATASOURCE_DRUID_MASTER_PASSWORD`、`TOKEN_SECRET`。
-- **配套前端**：用户访问站 QTools-C（Vue3 + Element Plus，`/api/...` 直连本后端）、管理后台 QTools-M（RuoYi-Vue3，`/dev-api` 代理到本后端 8080）
+- 本仓库是「青兔在线工具箱」的后端服务，技术栈为 Java 17 + Spring Boot 3 + MyBatis + MySQL + Redis。
+- 前台用户站 QTools-C 通过两个匿名接口读取工具列表、上报访问埋点；管理后台 QTools-M 使用若依自带的登录与系统管理接口（用户 / 角色 / 菜单 / 字典 / 定时任务 / 代码生成等）。
+- 相对上游若依，本仓库做了两件事：① 模块与包整体重命名（`ruoyi-*` → `qtools-*`，`com.ruoyi` → `com.qtools`）；② 新增业务模块 `qtools-tool`（工具列表 + 访问埋点）。
+- 工具的基础数据由 `sql/qtools/tool_init.sql` 初始化（JSON 格式化、文本字数统计、随机密码生成共 3 条）。
+- 当前**管理端没有「工具列表管理」页面**，工具数据通过 SQL 脚本与数据库维护；`qtools-tool` 只提供前台所需的公开查询与埋点写入。
 
-## 平台简介
+## 相关仓库
 
-若依是一套全部开源的快速开发平台，毫无保留给个人及企业免费使用。
+| 仓库 | 角色 | 技术栈 / 说明 | 地址 |
+| :--- | :--- | :--- | :--- |
+| **QTools** | 后端（本项目） | Spring Boot 3 / Java 17，默认端口 8080 | https://github.com/haha0614/QTools |
+| **QTools-C** | 前台用户站 | Vue3 + Vite + Element Plus，开发端口 5173 | https://github.com/haha0614/QTools-C |
+| **QTools-M** | 管理后台 | 若依 Vue3 前端，开发端口 80 | https://github.com/haha0614/QTools-M |
 
-* 本仓库为RuoYi-Vue的Spring Boot 3 的版本，保持同步更新。
-* 前端采用Vue、Element（提供 Vue2/Vue3/TS 多版本）。
-* 后端采用Spring Boot、Spring Security、Redis & Jwt。
-* 基于Jwt的Token认证，支持多终端（Web、App、小程序）无缝接入。
-* 支持加载动态权限菜单，多方式轻松权限控制，细粒度到按钮级别。
-* 内置强大代码生成器，一键生成前后端代码（java、vue、xml、sql），支持 CRUD 下载。
-* 阿里云折扣场：[点我进入](http://aly.ruoyi.vip)，腾讯云秒杀场：[点我进入](http://txy.ruoyi.vip)&nbsp;&nbsp;
+## 技术栈
 
-# 版本分支
+| 类别 | 版本 | 说明 |
+| :--- | :--- | :--- |
+| Spring Boot | 3.5.16 | 父 POM `spring-boot.version`（`pom.xml:20`） |
+| Java | 17 | 编译级别 `java.version=17`（`pom.xml:19`） |
+| 构建 | Maven（多模块） | 父坐标 `com.qtools:qtools:3.9.2`（`pom.xml:7-9`） |
+| 数据库 | MySQL 8 | 库名 `qtools`，JDBC 驱动 `com.mysql.cj.jdbc.Driver` |
+| 缓存 | Redis | 默认 `localhost:6379`、db 0、无密码（`application.yml:75-81`） |
+| 连接池 | Druid 1.2.28 | 含监控台 `/druid/*` |
+| 持久层 | MyBatis + PageHelper 2.1.1 | mapper XML 位于各模块 `resources/mapper/**` |
+| 接口文档 | springdoc-openapi 2.9.0 | Swagger UI：`/swagger-ui.html` |
+| 认证 | Spring Security + JWT（jjwt 0.9.1） | Token 请求头 `Authorization` |
+| 验证码 | Kaptcha 2.3.3 | 类型由 `qtools.captchaType` 控制（默认 `math`） |
+| 代码生成 | Velocity 2.3 | `/tool/gen` |
 
-RuoYi-Vue 后端项目提供 Spring Boot 2.x / 3.x / 4.x 多版本分支的并行维护
+## 模块结构
 
-| 名称              | 说明                      | 地址                                                    |
-| :---------------- | :------------------------ | :------------------------------------------------------ |
-| master 默认分支   | Spring Boot 4.x (JDK 17+) | https://gitee.com/y_project/RuoYi-Vue                   |
-| springboot3 分支  | Spring Boot 3.x (JDK 17+) | https://gitee.com/y_project/RuoYi-Vue/tree/springboot3  |
-| springboot2 分支  | Spring Boot 2.x (JDK 8+)  | https://gitee.com/y_project/RuoYi-Vue/tree/springboot2  |  
+| 模块 | 职责 |
+| :--- | :--- |
+| `qtools-admin` | 启动模块 + Web 层（`com.qtools.web.controller.*`），产物 `qtools-admin/target/qtools-admin.jar` |
+| `qtools-common` | 通用工具、常量、注解、异常、Redis / 文件 / HTTP 等 |
+| `qtools-framework` | 安全（Spring Security + JWT）、多数据源与 Druid、拦截器、AOP |
+| `qtools-system` | 若依系统管理业务（用户 / 角色 / 菜单 / 部门 / 岗位 / 字典 / 参数 / 通知公告） |
+| `qtools-quartz` | 定时任务 |
+| `qtools-generator` | 代码生成（`/tool/gen`） |
+| `qtools-tool` | **本项目新增的业务模块**：工具列表与访问埋点（`com.qtools.tool.*`，mapper XML 在 `resources/mapper/tool/`） |
 
-RuoYi-Vue 前端项目提供 Vue 2.x / 3.x / JavaScript / TypeScript 版本，均可混用搭配
+关键目录（只列接手时最需要看的）：
 
-| 项目名称      | **RuoYi-Vue2** | **RuoYi-Vue3** | **RuoYi-Vue3-TypeScript**   |
-| :---          | :---           | :---           | :---                        |
-| **前端框架**  | Vue 2         | Vue 3          | Vue 3                       |
-| **脚本语言**  | JavaScript    | JavaScript     | TypeScript                  |
-| **构建工具**  | Vue CLI       | Vite           | Vite                        |
-| **UI 组件库** | Element UI    | Element Plus   | Element Plus                |
-| **状态管理**  | Vuex          | Pinia          | Pinia                       |
-| **路由管理**  | Vue Router 3  | Vue Router 4   | Vue Router 4                |
-| **核心特点**  | 1. 技术栈经典稳定<br>2. 社区资料丰富<br>3. 当前维护重心已转移 | 1. 现代前端技术栈<br>2. 开发体验与性能更优<br>3. 官方主推的活跃版本 | 1. 类型加持，减少沟通成本<br>2. 开发时有提示，效率更高<br>3. 多人协作企业级开发项目 |
-| **仓库地址**  | [RuoYi-Vue2](https://gitcode.com/yangzongzhuan/RuoYi-Vue2) | [RuoYi-Vue3](https://gitcode.com/yangzongzhuan/RuoYi-Vue3) | [RuoYi-Vue3-TypeScript](https://gitcode.com/yangzongzhuan/RuoYi-Vue3/tree/typescript) |
+```text
+QTools/
+├── pom.xml                                  # 父 POM：com.qtools:qtools:3.9.2，java.version=17
+├── qtools-admin/                            # 启动模块 + Web 层
+│   └── src/main/
+│       ├── java/com/qtools/
+│       │   ├── QToolsApplication.java        # 启动类
+│       │   └── web/controller/              # system / monitor / common / tool 四组控制器
+│       └── resources/
+│           ├── application.yml               # 端口、Redis、token、springdoc、xss 等
+│           ├── application-druid.yml         # 数据源、连接池、Druid 监控台
+│           ├── application-secret.yml.example # 私密配置模板（真实值不入库，复制为 application-secret.yml）
+│           ├── logback.xml                   # 控制台彩色 + 文件日志（logs/）
+│           ├── banner.txt                    # 启动横幅（应用版本 / Spring Boot 版本）
+│           └── mybatis/mybatis-config.xml
+├── qtools-common/                           # 通用工具 / 常量 / 注解 / 异常 / Redis、文件、HTTP
+├── qtools-framework/                        # 安全、数据源、拦截器、AOP
+│   └── src/main/java/com/qtools/framework/config/
+│       ├── SecurityConfig.java              # Spring Security 放行规则
+│       └── properties/PermitAllUrlProperties.java  # 扫描 @Anonymous 自动加入白名单
+├── qtools-system/                           # 若依系统管理业务
+├── qtools-quartz/                           # 定时任务
+├── qtools-generator/                        # 代码生成
+├── qtools-tool/                            # 本项目新增业务模块
+│   └── src/main/
+│       ├── java/com/qtools/tool/
+│       │   ├── controller/                  # ToolInfoController、ToolVisitController（均 @Anonymous）
+│       │   ├── service/ + service/impl/     # IToolInfoService / IToolVisitService 及其实现
+│       │   ├── mapper/                      # ToolInfoMapper、ToolVisitMapper
+│       │   └── domain/                      # ToolInfo、ToolVisit、dto/ToolVisitAddDTO
+│       └── resources/mapper/tool/           # ToolInfoMapper.xml、ToolVisitMapper.xml
+├── sql/
+│   ├── ry_20260417.sql                      # 若依基础表 + 菜单/字典初始数据
+│   ├── quartz.sql                           # 定时任务表
+│   └── qtools/tool_init.sql                 # 本项目：tool_info / tool_visit + 3 条工具数据
+├── ry.bat / ry.sh                           # 若依自带的启停脚本（注意下方说明）
+├── bin/                                     # 若依自带的 clean/package/run 批处理
+├── doc/                                     # 若依环境使用手册
+└── LICENSE                                  # MIT
+```
 
-## 内置功能
+## 接口说明
 
-1.  用户管理：用户是系统操作者，该功能主要完成系统用户配置。
-2.  部门管理：配置系统组织机构（公司、部门、小组），树结构展现支持数据权限。
-3.  岗位管理：配置系统用户所属担任职务。
-4.  菜单管理：配置系统菜单，操作权限，按钮权限标识等。
-5.  角色管理：角色菜单权限分配、设置角色按机构进行数据范围权限划分。
-6.  字典管理：对系统中经常使用的一些较为固定的数据进行维护。
-7.  参数管理：对系统动态配置常用参数。
-8.  通知公告：系统通知公告信息发布维护。
-9.  操作日志：系统正常操作日志记录和查询；系统异常信息日志记录和查询。
-10. 登录日志：系统登录日志记录查询包含登录异常。
-11. 在线用户：当前系统中活跃用户状态监控。
-12. 定时任务：在线（添加、修改、删除)任务调度包含执行结果日志。
-13. 代码生成：前后端代码的生成（java、html、xml、sql）支持CRUD下载 。
-14. 系统接口：根据业务代码自动生成相关的api接口文档。
-15. 服务监控：监视当前系统CPU、内存、磁盘、堆栈等相关信息。
-16. 缓存监控：对系统的缓存信息查询，命令统计等。
-17. 在线构建器：拖动表单元素生成相应的HTML代码。
-18. 连接池监视：监视当前系统数据库连接池状态，可进行分析SQL找出系统性能瓶颈。
+统一响应约定：`code = 200` 表示成功，`msg` 为提示信息；业务数据放在 `data` 中。出错时由全局异常处理器返回 `code = 500` 与错误提示。
 
-## 在线体验
+### 1. 查询工具列表（匿名）
 
-- admin/admin123  
-- 陆陆续续收到一些打赏，为了更好的体验已用于演示服务器升级。谢谢各位小伙伴。
+- 方法与路径：`GET /api/toolInfo/list`
+- 控制器：`com.qtools.tool.controller.ToolInfoController`（`qtools-tool/src/main/java/com/qtools/tool/controller/ToolInfoController.java`）
+- 匿名放行：控制器类上标注 `@Anonymous`，由 `qtools-framework` 的 `PermitAllUrlProperties` 自动把该类下所有接口加入 Spring Security 的 `permitAll` 白名单，无需改动 `SecurityConfig`。
+- 查询规则：只返回 `status = '0'`（正常）的记录，按 `sort asc, id asc` 排序（`ToolInfoMapper.xml:31-35`）。
 
-演示地址：http://vue.ruoyi.vip  
-文档地址：http://doc.ruoyi.vip
+请求：
 
-## 演示图
+```bash
+curl http://localhost:8080/api/toolInfo/list
+```
 
-<table>
-    <tr>
-        <td><img src="https://oscimg.oschina.net/oscnet/cd1f90be5f2684f4560c9519c0f2a232ee8.jpg"/></td>
-        <td><img src="https://oscimg.oschina.net/oscnet/1cbcf0e6f257c7d3a063c0e3f2ff989e4b3.jpg"/></td>
-    </tr>
-    <tr>
-        <td><img src="https://oscimg.oschina.net/oscnet/up-8074972883b5ba0622e13246738ebba237a.png"/></td>
-        <td><img src="https://oscimg.oschina.net/oscnet/up-9f88719cdfca9af2e58b352a20e23d43b12.png"/></td>
-    </tr>
-    <tr>
-        <td><img src="https://oscimg.oschina.net/oscnet/up-39bf2584ec3a529b0d5a3b70d15c9b37646.png"/></td>
-        <td><img src="https://oscimg.oschina.net/oscnet/up-936ec82d1f4872e1bc980927654b6007307.png"/></td>
-    </tr>
-	<tr>
-        <td><img src="https://oscimg.oschina.net/oscnet/up-b2d62ceb95d2dd9b3fbe157bb70d26001e9.png"/></td>
-        <td><img src="https://oscimg.oschina.net/oscnet/up-d67451d308b7a79ad6819723396f7c3d77a.png"/></td>
-    </tr>	 
-    <tr>
-        <td><img src="https://oscimg.oschina.net/oscnet/5e8c387724954459291aafd5eb52b456f53.jpg"/></td>
-        <td><img src="https://oscimg.oschina.net/oscnet/644e78da53c2e92a95dfda4f76e6d117c4b.jpg"/></td>
-    </tr>
-	<tr>
-        <td><img src="https://oscimg.oschina.net/oscnet/up-8370a0d02977eebf6dbf854c8450293c937.png"/></td>
-        <td><img src="https://oscimg.oschina.net/oscnet/up-49003ed83f60f633e7153609a53a2b644f7.png"/></td>
-    </tr>
-	<tr>
-        <td><img src="https://oscimg.oschina.net/oscnet/up-d4fe726319ece268d4746602c39cffc0621.png"/></td>
-        <td><img src="https://oscimg.oschina.net/oscnet/up-c195234bbcd30be6927f037a6755e6ab69c.png"/></td>
-    </tr>
-    <tr>
-        <td><img src="https://oscimg.oschina.net/oscnet/b6115bc8c31de52951982e509930b20684a.jpg"/></td>
-        <td><img src="https://oscimg.oschina.net/oscnet/up-5e4daac0bb59612c5038448acbcef235e3a.png"/></td>
-    </tr>
-</table>
+响应示例：
 
+```json
+{
+  "code": 200,
+  "msg": "操作成功",
+  "data": [
+    {
+      "id": 1,
+      "tool_name": "JSON格式化工具",
+      "tool_desc": "JSON格式化、压缩、语法校验",
+      "tool_route": "/tool/json",
+      "icon": "Document",
+      "sort": 1,
+      "status": "0"
+    }
+  ]
+}
+```
 
-## 若依前后端分离交流群
+字段说明（JSON 字段名固定为下划线风格，由 `ToolInfo` 上的 `@JsonProperty` 显式指定，Java 字段仍为驼峰）：
 
-QQ群： [![加入QQ群](https://img.shields.io/badge/已满-937441-blue.svg)](https://jq.qq.com/?_wv=1027&k=5bVB1og) [![加入QQ群](https://img.shields.io/badge/已满-887144332-blue.svg)](https://jq.qq.com/?_wv=1027&k=5eiA4DH) [![加入QQ群](https://img.shields.io/badge/已满-180251782-blue.svg)](https://jq.qq.com/?_wv=1027&k=5AxMKlC) [![加入QQ群](https://img.shields.io/badge/已满-104180207-blue.svg)](https://jq.qq.com/?_wv=1027&k=51G72yr) [![加入QQ群](https://img.shields.io/badge/已满-186866453-blue.svg)](https://jq.qq.com/?_wv=1027&k=VvjN2nvu) [![加入QQ群](https://img.shields.io/badge/已满-201396349-blue.svg)](https://jq.qq.com/?_wv=1027&k=5vYAqA05) [![加入QQ群](https://img.shields.io/badge/已满-101456076-blue.svg)](https://jq.qq.com/?_wv=1027&k=kOIINEb5) [![加入QQ群](https://img.shields.io/badge/已满-101539465-blue.svg)](https://jq.qq.com/?_wv=1027&k=UKtX5jhs) [![加入QQ群](https://img.shields.io/badge/已满-264312783-blue.svg)](https://jq.qq.com/?_wv=1027&k=EI9an8lJ) [![加入QQ群](https://img.shields.io/badge/已满-167385320-blue.svg)](https://jq.qq.com/?_wv=1027&k=SWCtLnMz) [![加入QQ群](https://img.shields.io/badge/已满-104748341-blue.svg)](https://jq.qq.com/?_wv=1027&k=96Dkdq0k) [![加入QQ群](https://img.shields.io/badge/已满-160110482-blue.svg)](https://jq.qq.com/?_wv=1027&k=0fsNiYZt) [![加入QQ群](https://img.shields.io/badge/已满-170801498-blue.svg)](https://jq.qq.com/?_wv=1027&k=7xw4xUG1) [![加入QQ群](https://img.shields.io/badge/已满-108482800-blue.svg)](https://jq.qq.com/?_wv=1027&k=eCx8eyoJ) [![加入QQ群](https://img.shields.io/badge/已满-101046199-blue.svg)](https://jq.qq.com/?_wv=1027&k=SpyH2875) [![加入QQ群](https://img.shields.io/badge/已满-136919097-blue.svg)](https://jq.qq.com/?_wv=1027&k=tKEt51dz) [![加入QQ群](https://img.shields.io/badge/已满-143961921-blue.svg)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=0vBbSb0ztbBgVtn3kJS-Q4HUNYwip89G&authKey=8irq5PhutrZmWIvsUsklBxhj57l%2F1nOZqjzigkXZVoZE451GG4JHPOqW7AW6cf0T&noverify=0&group_code=143961921) [![加入QQ群](https://img.shields.io/badge/已满-174951577-blue.svg)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=ZFAPAbp09S2ltvwrJzp7wGlbopsc0rwi&authKey=HB2cxpxP2yspk%2Bo3WKTBfktRCccVkU26cgi5B16u0KcAYrVu7sBaE7XSEqmMdFQp&noverify=0&group_code=174951577) [![加入QQ群](https://img.shields.io/badge/已满-161281055-blue.svg)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=Fn2aF5IHpwsy8j6VlalNJK6qbwFLFHat&authKey=uyIT%2B97x2AXj3odyXpsSpVaPMC%2Bidw0LxG5MAtEqlrcBcWJUA%2FeS43rsF1Tg7IRJ&noverify=0&group_code=161281055) [![加入QQ群](https://img.shields.io/badge/已满-138988063-blue.svg)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=XIzkm_mV2xTsUtFxo63bmicYoDBA6Ifm&authKey=dDW%2F4qsmw3x9govoZY9w%2FoWAoC4wbHqGal%2BbqLzoS6VBarU8EBptIgPKN%2FviyC8j&noverify=0&group_code=138988063) [![加入QQ群](https://img.shields.io/badge/已满-151450850-blue.svg)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=DkugnCg68PevlycJSKSwjhFqfIgrWWwR&authKey=pR1Pa5lPIeGF%2FFtIk6d%2FGB5qFi0EdvyErtpQXULzo03zbhopBHLWcuqdpwY241R%2F&noverify=0&group_code=151450850) [![加入QQ群](https://img.shields.io/badge/已满-224622315-blue.svg)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=F58bgRa-Dp-rsQJThiJqIYv8t4-lWfXh&authKey=UmUs4CVG5OPA1whvsa4uSespOvyd8%2FAr9olEGaWAfdLmfKQk%2FVBp2YU3u2xXXt76&noverify=0&group_code=224622315) [![加入QQ群](https://img.shields.io/badge/已满-287842588-blue.svg)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=Nxb2EQ5qozWa218Wbs7zgBnjLSNk_tVT&authKey=obBKXj6SBKgrFTJZx0AqQnIYbNOvBB2kmgwWvGhzxR67RoRr84%2Bus5OadzMcdJl5&noverify=0&group_code=287842588) [![加入QQ群](https://img.shields.io/badge/已满-187944233-blue.svg)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=numtK1M_I4eVd2Gvg8qtbuL8JgX42qNh&authKey=giV9XWMaFZTY%2FqPlmWbkB9g3fi0Ev5CwEtT9Tgei0oUlFFCQLDp4ozWRiVIzubIm&noverify=0&group_code=187944233) [![加入QQ群](https://img.shields.io/badge/已满-228578329-blue.svg)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=G6r5KGCaa3pqdbUSXNIgYloyb8e0_L0D&authKey=4w8tF1eGW7%2FedWn%2FHAypQksdrML%2BDHolQSx7094Agm7Luakj9EbfPnSTxSi2T1LQ&noverify=0&group_code=228578329) [![加入QQ群](https://img.shields.io/badge/已满-191164766-blue.svg)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=GsOo-OLz53J8y_9TPoO6XXSGNRTgbFxA&authKey=R7Uy%2Feq%2BZsoKNqHvRKhiXpypW7DAogoWapOawUGHokJSBIBIre2%2FoiAZeZBSLuBc&noverify=0&group_code=191164766) [![加入QQ群](https://img.shields.io/badge/已满-174569686-blue.svg)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=PmYavuzsOthVqfdAPbo4uAeIbu7Ttjgc&authKey=p52l8%2FXa4PS1JcEmS3VccKSwOPJUZ1ZfQ69MEKzbrooNUljRtlKjvsXf04bxNp3G&noverify=0&group_code=174569686) [![加入QQ群](https://img.shields.io/badge/已满-127358632-blue.svg)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=M9y5NjAl44lAL_Vh2crmEehZU_PMU6KS&authKey=ZSDz8hEREWSaPuxQV3gEwqGIaGjfRNnkB4rJjf0IvXhrSUGSGwQFmBA%2Boe8HFxyl&noverify=0&group_code=127358632) [![加入QQ群](https://img.shields.io/badge/113071109-blue.svg)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=UGnoqRcFRxUaX-JAUNrSDbPimKrllp4x&authKey=Bbzf8Bc0XaQhq5c4QOg46Uqngd%2FvtIixrLvCM1EkPf41diqKXKZqXVwAxHTxJ8R1&noverify=0&group_code=113071109) 点击按钮入群。
+| JSON 字段 | 类型 | 说明 |
+| :--- | :--- | :--- |
+| `id` | number | 工具 ID |
+| `tool_name` | string | 工具名称 |
+| `tool_desc` | string | 工具描述 |
+| `tool_route` | string | 前台访问路由，如 `/tool/json` |
+| `icon` | string | 前端 Element Plus 图标组件名 |
+| `sort` | number | 显示顺序（升序） |
+| `status` | string | 状态：`0` 正常、`1` 停用（接口只返回 `0`） |
+
+### 2. 记录工具访问埋点（匿名）
+
+- 方法与路径：`POST /api/toolVisit/add`
+- 控制器：`com.qtools.tool.controller.ToolVisitController`（`qtools-tool/src/main/java/com/qtools/tool/controller/ToolVisitController.java`）
+- 匿名放行：同上，类上标注 `@Anonymous`。
+- 请求体：`{"toolId": 1}`；`toolId` 为必填（`ToolVisitAddDTO` 上 `@NotNull(message = "toolId不能为空")`）。
+- 落库：写入 `tool_visit` 表（`tool_id`、`ip`、`user_agent`、`create_time`）。**不校验 `toolId` 是否真实存在于 `tool_info`**。
+
+成功：
+
+```bash
+curl -X POST http://localhost:8080/api/toolVisit/add \
+  -H "Content-Type: application/json" \
+  -d '{"toolId":1}'
+```
+
+```json
+{ "code": 200, "msg": "操作成功" }
+```
+
+`toolId` 为空或缺失时，参数校验失败，由全局异常处理器返回：
+
+```json
+{ "code": 500, "msg": "toolId不能为空" }
+```
+
+## 快速开始
+
+### 1. 前置依赖
+
+| 依赖 | 要求 |
+| :--- | :--- |
+| JDK | 17 |
+| Maven | 3.8+（能访问 Maven 中央仓库或阿里云镜像，见 `pom.xml` 的 `repositories`） |
+| MySQL | 8.x，库名 `qtools`，字符集 `utf8mb4` |
+| Redis | `localhost:6379`、db 0、无密码（与 `application.yml` 默认一致） |
+
+### 2. 建库与导入 SQL
+
+`sql/` 下三个脚本的执行顺序**不能颠倒**：若依基础表在前，本项目建表脚本在后。
+
+```bash
+mysql -uroot -p -e "create database qtools default charset utf8mb4;"
+mysql -uroot -p qtools < sql/ry_20260417.sql       # 若依基础表 + 菜单/字典初始数据
+mysql -uroot -p qtools < sql/quartz.sql            # 定时任务表
+mysql -uroot -p qtools < sql/qtools/tool_init.sql  # 本项目：tool_info / tool_visit + 3 条工具数据(id 1/2/3)
+```
+
+`tool_init.sql` 使用 `create table if not exists` 与 `insert ... on duplicate key update`，可重复执行。
+
+### 3. 配置私密文件
+
+数据库密码、Druid 控制台口令、`token.secret` 都不入库，仓库里只有模板：
+
+```bash
+# Windows
+copy qtools-admin\src\main\resources\application-secret.yml.example qtools-admin\src\main\resources\application-secret.yml
+# Linux / macOS
+cp qtools-admin/src/main/resources/application-secret.yml.example qtools-admin/src/main/resources/application-secret.yml
+```
+
+然后在 `application-secret.yml` 中填入三项真实值（占位符只是示例，请自行替换）：
+
+- `spring.datasource.druid.master.password`：MySQL 密码
+- `spring.datasource.druid.statViewServlet.login-password`：Druid 监控台口令
+- `token.secret`：JWT 签名密钥（模板里附了随机生成命令）
+
+`application-secret.yml` 已被 `.gitignore` 排除（`.gitignore:52`），不会提交。部署到服务器时建议改用环境变量（见「配置说明」）。
+
+### 4. 打包与启动
+
+```bash
+mvn -DskipTests -pl qtools-admin -am package     # 产物：qtools-admin/target/qtools-admin.jar
+java -jar qtools-admin/target/qtools-admin.jar   # 默认 8080 端口
+```
+
+- `-am` 会连带构建 `qtools-admin` 依赖的其它模块；若只想构建单模块，需先把其它模块 `install` 到本地仓库。
+- 若依自带的启停脚本也可使用：Linux/macOS 用 `./ry.sh start|stop|restart|status`，Windows 用 `ry.bat`（用法见文件内注释）。
+  **注意**：两个脚本里的 `AppName` 目前仍是重命名前的 `ruoyi-admin.jar`（`ry.sh:3`、`ry.bat:3`），用脚本启动前请改成本项目产物名 `qtools-admin.jar`。
+- 默认管理员账号 **`admin / admin123`**（若依默认值），**首次登录后请立即修改密码**。
+
+### 5. 验证
+
+```bash
+curl http://localhost:8080/api/toolInfo/list
+curl -X POST http://localhost:8080/api/toolVisit/add -H "Content-Type: application/json" -d '{"toolId":1}'
+curl http://localhost:8080/captchaImage
+```
+
+- 工具列表接口返回 `code: 200` 且 `data` 有 3 条数据，说明数据库与 `tool_info` 数据正常。
+- 埋点接口返回 `code: 200` 后，可查 `tool_visit` 表确认记录写入。
+- 接口文档：<http://localhost:8080/swagger-ui.html>；Druid 监控台：<http://localhost:8080/druid/>。
+
+## 配置说明
+
+### 配置文件清单
+
+| 文件 | 作用 | 关键配置项 |
+| :--- | :--- | :--- |
+| `qtools-admin/src/main/resources/application.yml` | 主配置 | `server.port: 8080`、`spring.profiles.active: druid`、Redis（`localhost:6379` / db 0 / 无密码）、`token.header: Authorization`、`token.expireTime: 30`（分钟）、`springdoc`（`/swagger-ui.html`，扫描包 `com.qtools.web.controller.tool, com.qtools.tool.controller`）、`xss` 过滤（`urlPatterns: /system/*,/monitor/*,/tool/*`）、`qtools.profile`（上传目录） |
+| `qtools-admin/src/main/resources/application-druid.yml` | 数据源与连接池 | 驱动 `com.mysql.cj.jdbc.Driver`、主库 `jdbc:mysql://localhost:3306/qtools?...`、`initialSize: 5` / `minIdle: 10` / `maxActive: 20` / `maxWait: 60000`、慢 SQL 阈值 `slow-sql-millis: 1000`、Druid 监控台 `url-pattern: /druid/*`、`login-username: qtools` |
+| `qtools-admin/src/main/resources/application-secret.yml`（本地创建，不入库） | 私密值 | 数据库密码、Druid 控制台口令、`token.secret` |
+| `application-secret.yml.example` | 私密配置模板 | 同上三项的占位符与生成命令 |
+| `qtools-admin/src/main/resources/logback.xml` | 日志 | 控制台彩色输出；文件日志写入相对目录 `logs/` |
+| `qtools-admin/src/main/resources/banner.txt` | 启动横幅 | 显示应用版本（`qtools.version`）与 Spring Boot 版本 |
+
+### 密钥外置与环境变量
+
+主配置通过 `spring.config.import: optional:classpath:application-secret.yml`（`application.yml:52`）可选加载私密文件；文件缺失时不报错，但**缺少必填值会导致启动失败**（预期行为，避免误用默认密钥）。
+
+部署时用环境变量替代私密文件（Spring Boot 宽松绑定：全部大写、`.` 换成 `_`、`-` 删除）：
+
+| 配置项 | 本地（`application-secret.yml`） | 环境变量 |
+| :--- | :--- | :--- |
+| MySQL 密码 | `spring.datasource.druid.master.password` | `SPRING_DATASOURCE_DRUID_MASTER_PASSWORD` |
+| JWT 密钥 | `token.secret` | `TOKEN_SECRET` |
+| Druid 控制台口令 | `spring.datasource.druid.statViewServlet.login-password` | 本地私密文件中配置即可（生产环境建议直接关闭监控台） |
+
+本仓库不保存任何真实密码：`application.yml` 与 `application-druid.yml` 中只有 URL、用户名与注释说明，密码一律由私密文件或环境变量注入。
+
+### 日志与入口地址
+
+- 日志：控制台带颜色（时间-绿、级别-高亮、线程-黄、类名-青）；文件日志写入相对工作目录的 `logs/`，为 `sys-info.log`、`sys-error.log`、`sys-user.log`（按天滚动，保留 60 天）。以 `java -jar` 启动时，日志目录即当前工作目录下的 `logs/`。
+- 接口文档：`/swagger-ui.html`（OpenAPI JSON 在 `/v3/api-docs`）。
+- Druid 监控台：`/druid/*`，用户名 `qtools`，口令见私密配置。
+- 上述路径已在 `SecurityConfig` 中放行（`SecurityConfig.java:106`）。
+
+## 二次开发改动清单（相对若依）
+
+相对上游 RuoYi-Vue-springboot3 3.9.2，本仓库的改动如下，接手时可据此判断哪些文件"和若依文档不一致"：
+
+1. **模块与包重命名**：`ruoyi-*` → `qtools-*`，`com.ruoyi` → `com.qtools`（含各模块 `pom.xml` 的 `groupId`、`parent` 与源码目录）。父 POM 仍是 `com.qtools:qtools:3.9.2`。
+2. **新增业务模块 `qtools-tool`**：工具列表与访问埋点两个匿名接口（`ToolInfoController` / `ToolVisitController`）、`tool_info` 与 `tool_visit` 两张表的建表脚本 `sql/qtools/tool_init.sql`。`qtools-admin` 已依赖该模块。
+3. **修复重命名遗留**：验证码生成器实现类（`CaptchaConfig` 中的 `com.qtools.framework.config.KaptchaTextCreator`，`CaptchaConfig.java:66`）、`Constants` 的 JSON 白名单与定时任务白名单/违规黑名单（`Constants.java:161-172`）、`generator.yml` 的生成包名与作者（`generator.yml:4,6`）、`banner.txt` 的版本占位符（`banner.txt:1-2`）。
+4. **日志**：控制台改为彩色输出；文件日志路径改为相对目录 `logs/`（`logback.xml:4`），不再使用上游以 `/` 开头的绝对路径。
+5. **密钥外置**：数据库密码、Druid 控制台口令、`token.secret` 从 `application-secret.yml`（`.gitignore` 已排除）或环境变量注入，配置文件中不留真实值。
+6. **已知残留**：`ry.sh` / `ry.bat` 中的 `AppName` 仍为 `ruoyi-admin.jar`，使用时需改为 `qtools-admin.jar`。
+
+## 常见问题
+
+1. **启动或首次访问数据库报 `Access denied for user 'root'@'localhost'`**
+   没有 `application-secret.yml` 也没设环境变量，Druid 拿到的密码为空。按「快速开始 · 3」补齐数据库密码；确认 `application-druid.yml` 中的库名/用户名与本地一致。
+2. **启动报 `Could not resolve placeholder 'token.secret'`**
+   `TokenService` 用 `@Value("${token.secret}")` 且没有默认值（`TokenService.java:42`），密钥缺失时启动中断。在 `application-secret.yml` 里填 `token.secret`，或设置环境变量 `TOKEN_SECRET`。
+3. **验证码 / 登录接口报 Redis 连接异常**
+   本地没启动 Redis。默认连接 `localhost:6379`、db 0、无密码（`application.yml:75-81`）；Redis 不在本机或改过端口时改这里。应用启动本身不依赖 Redis，两个匿名接口也不经过 Redis。
+4. **Druid 监控台 `/druid/*` 安全**
+   生产环境建议把 `spring.datasource.druid.statViewServlet.enabled` 设为 `false`，或至少配置 `allow` 白名单/限制来源 IP；默认用户名 `qtools`，口令在私密配置中。
+5. **新增公开接口在哪放行？**
+   在控制器类或方法上标注 `@Anonymous` 即可，`PermitAllUrlProperties` 会自动把该 URL 加入 Spring Security 的 `permitAll` 白名单；不要为了单个业务接口放宽 `SecurityConfig` 的整体匹配规则。
+6. **`./ry.sh start` 或 `ry.bat` 启动失败**
+   脚本内的 `AppName` 还是 `ruoyi-admin.jar`（`ry.sh:3`、`ry.bat:3`），与实际产物 `qtools-admin.jar` 不一致。改成实际产物名，或直接用 `java -jar qtools-admin/target/qtools-admin.jar`。
+
+## 许可与致谢
+
+- 本项目基于 [RuoYi-Vue](https://gitee.com/y_project/RuoYi-Vue)（springboot3 分支，v3.9.2）二次开发，遵循 **MIT License**（见仓库根目录 `LICENSE`，版权声明保留上游 `Copyright (c) 2018 RuoYi`）。
+- 感谢若依（RuoYi）作者与社区提供的开源后台框架；使用本仓库时请同样保留上游的版权与许可声明。
