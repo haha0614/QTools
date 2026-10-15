@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    工具访问埋点表 tool_visit 映射文件。
+    V1 只提供埋点写入，不提供查询（统计后续版本再加）。
+-->
+<mapper namespace="com.qtools.tool.mapper.ToolVisitMapper">
+
+    <resultMap type="com.qtools.tool.domain.ToolVisit" id="ToolVisitResult">
+        <id     property="id"         column="id"         />
+        <result property="toolId"     column="tool_id"    />
+        <result property="ip"         column="ip"         />
+        <result property="userAgent"  column="user_agent" />
+        <result property="createTime" column="create_time" />
+    </resultMap>
+
+    <!-- 新增一条访问埋点记录；tool_id 不做外键校验，允许前端兜底 id -->
+    <insert id="insertToolVisit" parameterType="com.qtools.tool.domain.ToolVisit" useGeneratedKeys="true" keyProperty="id">
+        insert into tool_visit (tool_id, ip, user_agent, create_time)
+        values (#{toolId}, #{ip}, #{userAgent}, #{createTime})
+    </insert>
+
+</mapper>

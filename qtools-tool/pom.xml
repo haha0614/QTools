@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <artifactId>qtools</artifactId>
+        <groupId>com.qtools</groupId>
+        <version>3.9.2</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>qtools-tool</artifactId>
+
+    <description>
+        tool工具模块
+    </description>
+
+    <dependencies>
+
+        <!-- 通用工具（已传递提供 spring-web、validation、mybatis、jackson 等依赖） -->
+        <dependency>
+            <groupId>com.qtools</groupId>
+            <artifactId>qtools-common</artifactId>
+        </dependency>
+
+    </dependencies>
+
+</project>

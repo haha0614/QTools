@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    工具信息表 tool_info 映射文件。
+    仅提供前台公开接口所需的"正常状态工具列表"查询，V1 不做完整 CRUD。
+    下划线字段 <-> 驼峰属性 通过下面的 resultMap 完成映射。
+-->
+<mapper namespace="com.qtools.tool.mapper.ToolInfoMapper">
+
+    <resultMap type="com.qtools.tool.domain.ToolInfo" id="ToolInfoResult">
+        <id     property="id"         column="id"          />
+        <result property="toolName"   column="tool_name"   />
+        <result property="toolDesc"   column="tool_desc"   />
+        <result property="toolRoute"  column="tool_route"  />
+        <result property="icon"       column="icon"        />
+        <result property="sort"       column="sort"        />
+        <result property="status"     column="status"      />
+        <result property="createTime" column="create_time" />
+        <result property="updateTime" column="update_time" />
+    </resultMap>
+
+    <!-- 公共查询列 -->
+    <sql id="selectToolInfoVo">
+        select id, tool_name, tool_desc, tool_route, icon, sort, status, create_time, update_time
+        from tool_info
+    </sql>
+
+    <!-- 查询正常状态（status = '0'）的工具列表，按 sort 升序 -->
+    <select id="selectEnabledToolList" resultMap="ToolInfoResult">
+        <include refid="selectToolInfoVo"/>
+        where status = '0'
+        order by sort asc, id asc
+    </select>
+
+</mapper>
