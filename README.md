@@ -216,7 +216,7 @@ java -jar qtools-admin/target/qtools-admin.jar   # 默认 8080 端口
 
 - `-am` 会连带构建 `qtools-admin` 依赖的其它模块；若只想构建单模块，需先把其它模块 `install` 到本地仓库。
 - 若依自带的启停脚本也可使用：Linux/macOS 用 `./ry.sh start|stop|restart|status`，Windows 用 `ry.bat`（用法见文件内注释）。
-  **注意**：两个脚本里的 `AppName` 目前仍是重命名前的 `ruoyi-admin.jar`（`ry.sh:3`、`ry.bat:3`），用脚本启动前请改成本项目产物名 `qtools-admin.jar`。
+  两个脚本的 `AppName` 已改为本项目产物名 `qtools-admin.jar`，把产物放到脚本同级目录即可。（脚本以 `java -jar qtools-admin.jar` 方式启动，jar 名由脚本内的 `AppName` 决定。）
 - 默认管理员账号 **`admin / admin123`**（若依默认值），**首次登录后请立即修改密码**。
 
 ### 5. 验证
@@ -274,7 +274,7 @@ curl http://localhost:8080/captchaImage
 3. **修复重命名遗留**：验证码生成器实现类（`CaptchaConfig` 中的 `com.qtools.framework.config.KaptchaTextCreator`，`CaptchaConfig.java:66`）、`Constants` 的 JSON 白名单与定时任务白名单/违规黑名单（`Constants.java:161-172`）、`generator.yml` 的生成包名与作者（`generator.yml:4,6`）、`banner.txt` 的版本占位符（`banner.txt:1-2`）。
 4. **日志**：控制台改为彩色输出；文件日志路径改为相对目录 `logs/`（`logback.xml:4`），不再使用上游以 `/` 开头的绝对路径。
 5. **密钥外置**：数据库密码、Druid 控制台口令、`token.secret` 从 `application-secret.yml`（`.gitignore` 已排除）或环境变量注入，配置文件中不留真实值。
-6. **已知残留**：`ry.sh` / `ry.bat` 中的 `AppName` 仍为 `ruoyi-admin.jar`，使用时需改为 `qtools-admin.jar`。
+6. **启停脚本**：`ry.sh` / `ry.bat` 的 `AppName` 由上游的 `ruoyi-admin.jar` 改为本项目产物名 `qtools-admin.jar`，脚本可直接使用。
 
 ## 常见问题
 
@@ -288,8 +288,6 @@ curl http://localhost:8080/captchaImage
    生产环境建议把 `spring.datasource.druid.statViewServlet.enabled` 设为 `false`，或至少配置 `allow` 白名单/限制来源 IP；默认用户名 `qtools`，口令在私密配置中。
 5. **新增公开接口在哪放行？**
    在控制器类或方法上标注 `@Anonymous` 即可，`PermitAllUrlProperties` 会自动把该 URL 加入 Spring Security 的 `permitAll` 白名单；不要为了单个业务接口放宽 `SecurityConfig` 的整体匹配规则。
-6. **`./ry.sh start` 或 `ry.bat` 启动失败**
-   脚本内的 `AppName` 还是 `ruoyi-admin.jar`（`ry.sh:3`、`ry.bat:3`），与实际产物 `qtools-admin.jar` 不一致。改成实际产物名，或直接用 `java -jar qtools-admin/target/qtools-admin.jar`。
 
 ## 许可与致谢
 
