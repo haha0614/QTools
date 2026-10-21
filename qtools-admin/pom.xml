@@ -60,9 +60,31 @@
             <artifactId>qtools-tool</artifactId>
         </dependency>
 
+        <!-- 媒体站模块-->
+        <dependency>
+            <groupId>com.qtools</groupId>
+            <artifactId>qtools-media</artifactId>
+        </dependency>
+
+        <!-- 用户端账号模块（/api/app/**，独立 JWT）-->
+        <dependency>
+            <groupId>com.qtools</groupId>
+            <artifactId>qtools-app</artifactId>
+        </dependency>
+
     </dependencies>
 
     <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <!-- 本地私密配置不打进 jar（含数据库密码）：启动时用 spring.config.additional-location 指定外部文件，生产用环境变量 -->
+                    <exclude>application-secret.yml</exclude>
+                </excludes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>

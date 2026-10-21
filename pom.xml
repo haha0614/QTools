@@ -177,6 +177,20 @@
                 <version>${qtools.version}</version>
             </dependency>
 
+            <!-- 媒体站模块-->
+            <dependency>
+                <groupId>com.qtools</groupId>
+                <artifactId>qtools-media</artifactId>
+                <version>${qtools.version}</version>
+            </dependency>
+
+            <!-- 用户端账号模块（独立于若依后台身份）-->
+            <dependency>
+                <groupId>com.qtools</groupId>
+                <artifactId>qtools-app</artifactId>
+                <version>${qtools.version}</version>
+            </dependency>
+
         </dependencies>
     </dependencyManagement>
 
@@ -188,6 +202,8 @@
         <module>qtools-generator</module>
         <module>qtools-common</module>
         <module>qtools-tool</module>
+        <module>qtools-media</module>
+        <module>qtools-app</module>
     </modules>
     <packaging>pom</packaging>
 
