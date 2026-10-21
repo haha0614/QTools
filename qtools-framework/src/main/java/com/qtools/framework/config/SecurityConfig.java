@@ -104,6 +104,13 @@ public class SecurityConfig
                     // 静态资源，可匿名访问
                     .requestMatchers(HttpMethod.GET, "/", "/*.html", "/**.html", "/**.css", "/**.js", "/profile/**").permitAll()
                     .requestMatchers("/swagger-ui.html", "/v3/api-docs/**", "/swagger-ui/**", "/druid/**").permitAll()
+                    // SPA 单端口托管（M4-A）：管理端接口与框架接口保持过滤器级鉴权
+                    .requestMatchers("/api/media/admin/**", "/system/**", "/monitor/**", "/common/**",
+                                     "/quartz/**", "/tool/gen/**", "/test/**").authenticated()
+                    // 其余 GET 交给前端路由与静态资源；未命中的路径由 MVC 返回 JSON 404，而不是被吞成 HTML
+                    .requestMatchers(HttpMethod.GET, "/**").permitAll()
+                    // 非 GET 的 /api 写操作仍默认鉴权
+                    .requestMatchers("/api/**").authenticated()
                     // 除上面外的所有请求全部需要鉴权认证
                     .anyRequest().authenticated();
             })
