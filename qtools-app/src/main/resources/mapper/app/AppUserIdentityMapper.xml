@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 用户端登录身份表 app_user_identity 映射文件（M5） -->
+<mapper namespace="com.qtools.app.mapper.AppUserIdentityMapper">
+
+    <resultMap type="com.qtools.app.domain.AppUserIdentity" id="AppUserIdentityResult">
+        <id     property="id"         column="id"         />
+        <result property="userId"     column="user_id"    />
+        <result property="type"       column="type"       />
+        <result property="identifier" column="identifier" />
+        <result property="verified"   column="verified"   />
+        <result property="createdAt"  column="created_at" />
+    </resultMap>
+
+    <select id="selectByUserId" resultMap="AppUserIdentityResult">
+        select id, user_id, type, identifier, verified, created_at
+        from app_user_identity
+        where user_id = #{userId}
+        order by id
+    </select>
+
+    <insert id="insert" parameterType="com.qtools.app.domain.AppUserIdentity" useGeneratedKeys="true" keyProperty="id">
+        insert into app_user_identity (user_id, type, identifier, verified)
+        values (#{userId}, #{type}, #{identifier}, #{verified})
+    </insert>
+
+</mapper>

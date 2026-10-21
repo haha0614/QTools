@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 用户端账号表 app_user 映射文件（M5） -->
+<mapper namespace="com.qtools.app.mapper.AppUserMapper">
+
+    <resultMap type="com.qtools.app.domain.AppUser" id="AppUserResult">
+        <id     property="id"           column="id"            />
+        <result property="username"     column="username"      />
+        <result property="nickname"     column="nickname"      />
+        <result property="avatar"       column="avatar"        />
+        <result property="passwordHash" column="password_hash" />
+        <result property="status"       column="status"        />
+        <result property="inviteCode"   column="invite_code"   />
+        <result property="registerIp"   column="register_ip"   />
+        <result property="createdAt"    column="created_at"    />
+        <result property="lastLoginAt"  column="last_login_at" />
+    </resultMap>
+
+    <sql id="selectUserColumns">
+        id, username, nickname, avatar, password_hash, status, invite_code, register_ip, created_at, last_login_at
+    </sql>
+
+    <select id="selectById" resultMap="AppUserResult">
+        select <include refid="selectUserColumns"/> from app_user where id = #{id}
+    </select>
+
+    <select id="selectByUsername" resultMap="AppUserResult">
+        select <include refid="selectUserColumns"/> from app_user where username = #{username}
+    </select>
+
+    <select id="selectByIdentity" resultMap="AppUserResult">
+        select u.id, u.username, u.nickname, u.avatar, u.password_hash, u.status, u.invite_code,
+               u.register_ip, u.created_at, u.last_login_at
+        from app_user u
+        inner join app_user_identity i on i.user_id = u.id
+        where i.type = #{type} and i.identifier = #{identifier}
+        limit 1
+    </select>
+
+    <insert id="insert" parameterType="com.qtools.app.domain.AppUser" useGeneratedKeys="true" keyProperty="id">
+        insert into app_user (username, nickname, avatar, password_hash, status, invite_code, register_ip)
+        values (#{username}, #{nickname}, #{avatar,jdbcType=LONGVARCHAR}, #{passwordHash,jdbcType=VARCHAR},
+                #{status}, #{inviteCode,jdbcType=VARCHAR}, #{registerIp,jdbcType=VARCHAR})
+    </insert>
+
+    <update id="updateLastLogin">
+        update app_user set last_login_at = now() where id = #{id}
+    </update>
+
+</mapper>

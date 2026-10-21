@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <artifactId>qtools</artifactId>
+        <groupId>com.qtools</groupId>
+        <version>3.9.2</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>qtools-app</artifactId>
+
+    <description>
+        用户端账号模块（M5：独立 app_* 表 / 独立 JWT / AppJwtFilter / /api/app/auth/**，与若依后台完全隔离）
+    </description>
+
+    <dependencies>
+
+        <!-- 通用工具（传递提供 spring-web、security-crypto(BCrypt)、jjwt、mybatis、jackson、validation） -->
+        <dependency>
+            <groupId>com.qtools</groupId>
+            <artifactId>qtools-common</artifactId>
+        </dependency>
+
+    </dependencies>
+
+</project>

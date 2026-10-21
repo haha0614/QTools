@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 邀请码表 app_invite_code 映射文件（M5） -->
+<mapper namespace="com.qtools.app.mapper.AppInviteCodeMapper">
+
+    <resultMap type="com.qtools.app.domain.AppInviteCode" id="AppInviteCodeResult">
+        <id     property="id"        column="id"         />
+        <result property="code"      column="code"       />
+        <result property="maxUses"   column="max_uses"   />
+        <result property="usedCount" column="used_count" />
+        <result property="expiresAt" column="expires_at" />
+        <result property="createdBy" column="created_by" />
+        <result property="createdAt" column="created_at" />
+    </resultMap>
+
+    <select id="selectByCode" resultMap="AppInviteCodeResult">
+        select id, code, max_uses, used_count, expires_at, created_by, created_at
+        from app_invite_code
+        where code = #{code}
+    </select>
+
+    <!-- 条件写在 where 里，并发下也不会超发（不会出现 used_count > max_uses） -->
+    <update id="increaseUsedCount">
+        update app_invite_code
+        set used_count = used_count + 1
+        where code = #{code}
+          and used_count &lt; max_uses
+          and (expires_at is null or expires_at &gt; now())
+    </update>
+
+</mapper>

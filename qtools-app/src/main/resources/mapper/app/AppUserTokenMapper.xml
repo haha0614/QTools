@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 用户端登录会话表 app_user_token 映射文件（M5） -->
+<mapper namespace="com.qtools.app.mapper.AppUserTokenMapper">
+
+    <insert id="insert" parameterType="com.qtools.app.domain.AppUserToken" useGeneratedKeys="true" keyProperty="id">
+        insert into app_user_token (user_id, token_id, user_agent, ip, expires_at)
+        values (#{userId}, #{tokenId}, #{userAgent,jdbcType=VARCHAR}, #{ip,jdbcType=VARCHAR}, #{expiresAt})
+    </insert>
+
+    <!-- 会话有效性唯一的权威判定：未撤销 + 未过期 -->
+    <select id="countValidJti" resultType="int">
+        select count(1) from app_user_token
+        where token_id = #{jti} and revoked = 0 and expires_at &gt; now()
+    </select>
+
+    <update id="revoke">
+        update app_user_token set revoked = 1 where token_id = #{jti} and revoked = 0
+    </update>
+
+</mapper>

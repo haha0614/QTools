@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 匿名设备认领映射文件（M5；只触碰 media_owner 一表的 user_id 列） -->
+<mapper namespace="com.qtools.app.mapper.AppOwnerMapper">
+
+    <!-- 只允许「未绑定」或「已绑到自己」的情况下改写，别的账号绑过的设备原样不动 -->
+    <update id="claimOwner">
+        update media_owner
+        set user_id = #{userId}
+        where owner_key = #{ownerKey}
+          and (user_id is null or user_id = #{userId})
+    </update>
+
+    <select id="selectOwnerUserId" resultType="java.lang.Long">
+        select user_id from media_owner where owner_key = #{ownerKey}
+    </select>
+
+    <select id="countOwner" resultType="int">
+        select count(1) from media_owner where owner_key = #{ownerKey}
+    </select>
+
+</mapper>

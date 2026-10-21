@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 用户端验证码表 app_user_verify_code 映射文件（M5 建表 / M6 启用） -->
+<mapper namespace="com.qtools.app.mapper.AppVerifyCodeMapper">
+
+    <resultMap type="com.qtools.app.domain.AppVerifyCode" id="AppVerifyCodeResult">
+        <id     property="id"        column="id"        />
+        <result property="channel"   column="channel"   />
+        <result property="target"    column="target"    />
+        <result property="purpose"   column="purpose"   />
+        <result property="codeHash"  column="code_hash" />
+        <result property="attempts"  column="attempts"  />
+        <result property="used"      column="used"      />
+        <result property="expiresAt" column="expires_at"/>
+    </resultMap>
+
+    <select id="selectLatest" resultMap="AppVerifyCodeResult">
+        select id, channel, target, purpose, code_hash, attempts, used, expires_at
+        from app_user_verify_code
+        where channel = #{channel} and target = #{target} and purpose = #{purpose} and used = 0
+        order by id desc
+        limit 1
+    </select>
+
+    <update id="increaseAttempts">
+        update app_user_verify_code set attempts = attempts + 1 where id = #{id}
+    </update>
+
+    <update id="markUsed">
+        update app_user_verify_code set used = 1 where id = #{id} and used = 0
+    </update>
+
+</mapper>
