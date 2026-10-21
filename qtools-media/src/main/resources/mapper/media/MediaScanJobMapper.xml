@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 媒体扫描任务表 media_scan_job 映射文件（M3 管理端「重建索引」） -->
+<mapper namespace="com.qtools.media.mapper.MediaScanJobMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaScanJob" id="MediaScanJobResult">
+        <id     property="id"         column="id"          />
+        <result property="type"       column="type"        />
+        <result property="status"     column="status"      />
+        <result property="total"      column="total"       />
+        <result property="done"       column="done"        />
+        <result property="startedAt"  column="started_at"  />
+        <result property="finishedAt" column="finished_at" />
+        <result property="log"        column="log"         />
+    </resultMap>
+
+    <insert id="insertJob" parameterType="com.qtools.media.domain.MediaScanJob"
+            useGeneratedKeys="true" keyProperty="id">
+        insert into media_scan_job (type, status, total, done, started_at)
+        values (#{type}, #{status}, 0, 0, now())
+    </insert>
+
+    <select id="countRunning" resultType="int">
+        select count(*) from media_scan_job where status = 'running'
+    </select>
+
+    <select id="selectLatest" resultMap="MediaScanJobResult">
+        select id, type, status, total, done, started_at, finished_at, log
+        from media_scan_job
+        order by id desc
+        limit 1
+    </select>
+
+    <select id="selectJobById" resultMap="MediaScanJobResult">
+        select id, type, status, total, done, started_at, finished_at, log
+        from media_scan_job
+        where id = #{id}
+    </select>
+
+    <select id="selectRecentJobs" resultMap="MediaScanJobResult">
+        select id, type, status, total, done, started_at, finished_at
+        from media_scan_job
+        order by id desc
+        limit #{limit}
+    </select>
+
+    <update id="updateProgress">
+        update media_scan_job set total = #{total}, done = #{done} where id = #{id}
+    </update>
+
+    <update id="finishJob">
+        update media_scan_job
+        set status = #{status}, total = #{total}, done = #{done}, log = #{log}, finished_at = #{finishedAt}
+        where id = #{id}
+    </update>
+
+</mapper>

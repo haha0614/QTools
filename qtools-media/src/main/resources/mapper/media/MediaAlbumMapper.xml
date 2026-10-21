@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 媒体相册表 media_album 映射文件（M1 只读） -->
+<mapper namespace="com.qtools.media.mapper.MediaAlbumMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaAlbum" id="MediaAlbumResult">
+        <id     property="id"         column="id"          />
+        <result property="personId"   column="person_id"   />
+        <result property="title"      column="title"       />
+        <result property="dir"        column="dir"         />
+        <result property="photoCount" column="photo_count" />
+        <result property="bytes"      column="bytes"       />
+        <result property="coverPath"  column="cover_path"  />
+        <result property="note"       column="note"        />
+        <result property="sort"       column="sort"        />
+        <result property="mtime"      column="mtime"       />
+    </resultMap>
+
+    <sql id="selectAlbumVo">
+        select id, person_id, title, dir, photo_count, bytes, cover_path, note, sort, mtime
+        from media_album
+    </sql>
+
+    <select id="selectAlbumList" resultMap="MediaAlbumResult">
+        <include refid="selectAlbumVo"/>
+        where hidden = 0
+        order by sort asc, id asc
+    </select>
+
+    <select id="selectAlbumById" parameterType="String" resultMap="MediaAlbumResult">
+        <include refid="selectAlbumVo"/>
+        where id = #{id} and hidden = 0
+    </select>
+
+    <select id="selectMaxMtime" resultType="java.util.Date">
+        select max(mtime) from media_album where hidden = 0
+    </select>
+
+</mapper>

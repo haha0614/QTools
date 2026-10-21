@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 媒体图片表 media_photo 映射文件（M1 只读） -->
+<mapper namespace="com.qtools.media.mapper.MediaPhotoMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaPhoto" id="MediaPhotoResult">
+        <id     property="id"      column="id"       />
+        <result property="albumId" column="album_id" />
+        <result property="seq"     column="seq"      />
+        <result property="relPath" column="rel_path" />
+        <result property="bytes"   column="bytes"    />
+        <result property="w"       column="w"        />
+        <result property="h"       column="h"        />
+        <result property="isBig"   column="is_big"   />
+    </resultMap>
+
+    <select id="selectPhotoList" resultMap="MediaPhotoResult">
+        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big
+        from media_photo p
+        inner join media_album a on a.id = p.album_id and a.hidden = 0
+        where p.hidden = 0
+        order by p.album_id asc, p.seq asc
+    </select>
+
+    <select id="selectPhotoListByAlbumId" parameterType="String" resultMap="MediaPhotoResult">
+        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big
+        from media_photo p
+        inner join media_album a on a.id = p.album_id and a.hidden = 0
+        where p.hidden = 0 and p.album_id = #{albumId}
+        order by p.seq asc
+    </select>
+
+    <select id="countPhotoByAlbumAndSeq" resultType="int">
+        select count(*)
+        from media_photo p
+        inner join media_album a on a.id = p.album_id and a.hidden = 0
+        where p.album_id = #{albumId} and p.seq = #{seq} and p.hidden = 0
+    </select>
+
+</mapper>

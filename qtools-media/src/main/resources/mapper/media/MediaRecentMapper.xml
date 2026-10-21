@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 媒体最近浏览表 media_recent 映射文件（M2）；幂等策略同 MediaFavoriteMapper -->
+<mapper namespace="com.qtools.media.mapper.MediaRecentMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaUserItem" id="MediaRecentItemResult">
+        <result property="kind"       column="kind"       />
+        <result property="targetId"   column="target_id"  />
+        <result property="albumId"    column="album_id"   />
+        <result property="seq"        column="seq"        />
+        <result property="title"      column="title"      />
+        <result property="pos"        column="pos"        />
+        <result property="dur"        column="dur"        />
+        <result property="happenedAt" column="happened_at"/>
+    </resultMap>
+
+    <sql id="exactWhere">
+        owner_key = #{ownerKey} and kind = #{kind}
+        <choose>
+            <when test="kind == 'video'">
+                and target_id = #{targetId}
+            </when>
+            <otherwise>
+                and album_id = #{albumId} and seq = #{seq}
+            </otherwise>
+        </choose>
+    </sql>
+
+    <insert id="insertIfAbsent">
+        insert into media_recent (owner_key, kind, target_id, album_id, seq, pos, dur)
+        select #{ownerKey}, #{kind}, #{targetId,jdbcType=VARCHAR}, #{albumId,jdbcType=VARCHAR},
+               #{seq,jdbcType=INTEGER}, #{pos,jdbcType=DECIMAL}, #{dur,jdbcType=DECIMAL}
+        from dual
+        where not exists (select 1 from media_recent where <include refid="exactWhere"/>)
+    </insert>
+
+    <update id="touch">
+        update media_recent
+           set pos = #{pos,jdbcType=DECIMAL},
+               dur = #{dur,jdbcType=DECIMAL},
+               updated_at = current_timestamp(3)
+         where <include refid="exactWhere"/>
+    </update>
+
+    <delete id="deleteExact">
+        delete from media_recent where <include refid="exactWhere"/>
+    </delete>
+
+    <select id="selectItemList" resultMap="MediaRecentItemResult">
+        select r.kind, r.target_id, r.album_id, r.seq, r.pos, r.dur,
+               r.updated_at as happened_at,
+               coalesce(v.title, a.title) as title
+        from media_recent r
+        left join media_video v on r.kind = 'video' and v.id = r.target_id
+        left join media_album a on r.kind = 'photo' and a.id = r.album_id
+        where r.owner_key = #{ownerKey} and r.kind = #{kind}
+        order by r.updated_at desc, r.id desc
+        limit #{limit}
+    </select>
+
+    <select id="countByOwner" resultType="int">
+        select count(*) from media_recent where owner_key = #{ownerKey} and kind = #{kind}
+    </select>
+
+    <delete id="trim">
+        delete from media_recent
+         where owner_key = #{ownerKey} and kind = #{kind}
+           and id not in (select id from (
+                 select id from media_recent
+                  where owner_key = #{ownerKey} and kind = #{kind}
+                  order by updated_at desc, id desc
+                  limit #{keep}) k)
+    </delete>
+
+</mapper>

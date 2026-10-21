@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 媒体所有者表 media_owner 映射文件（M2） -->
+<mapper namespace="com.qtools.media.mapper.MediaOwnerMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaOwner" id="MediaOwnerResult">
+        <id     property="id"          column="id"           />
+        <result property="ownerKey"    column="owner_key"    />
+        <result property="displayName" column="display_name" />
+        <result property="avatar"      column="avatar"       />
+        <result property="userId"      column="user_id"      />
+        <result property="createdAt"   column="created_at"   />
+        <result property="lastSeen"    column="last_seen"    />
+    </resultMap>
+
+    <insert id="insertIgnore">
+        insert ignore into media_owner (owner_key) values (#{ownerKey})
+    </insert>
+
+    <update id="updateLastSeen">
+        update media_owner set last_seen = now() where owner_key = #{ownerKey}
+    </update>
+
+    <update id="updateDisplayName">
+        update media_owner set display_name = #{displayName,jdbcType=VARCHAR} where owner_key = #{ownerKey}
+    </update>
+
+    <update id="updateAvatar">
+        update media_owner set avatar = #{avatar,jdbcType=LONGVARCHAR} where owner_key = #{ownerKey}
+    </update>
+
+    <select id="selectOwnerByKey" resultMap="MediaOwnerResult">
+        select id, owner_key, display_name, avatar, user_id, created_at, last_seen
+        from media_owner
+        where owner_key = #{ownerKey}
+    </select>
+
+</mapper>

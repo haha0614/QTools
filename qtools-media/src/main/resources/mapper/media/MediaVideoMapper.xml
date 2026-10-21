@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    媒体视频表 media_video 映射文件。
+    M1 只读：不提供写入语句。下划线字段 <-> 驼峰属性由 resultMap 完成映射。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaVideoMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaVideo" id="MediaVideoResult">
+        <id     property="id"         column="id"          />
+        <result property="folder"     column="folder"      />
+        <result property="relPath"    column="rel_path"    />
+        <result property="title"      column="title"       />
+        <result property="size"       column="size"        />
+        <result property="dur"        column="dur"         />
+        <result property="w"          column="w"           />
+        <result property="h"          column="h"           />
+        <result property="vcodec"     column="vcodec"      />
+        <result property="browserOk"  column="browser_ok"  />
+        <result property="posterPath" column="poster_path" />
+        <result property="docPath"    column="doc_path"    />
+        <result property="subPath"    column="sub_path"    />
+        <result property="mtime"      column="mtime"       />
+    </resultMap>
+
+    <resultMap type="com.qtools.media.domain.MediaVideoTag" id="MediaVideoTagResult">
+        <result property="videoId" column="video_id" />
+        <result property="facet"   column="facet"    />
+        <result property="name"    column="name"     />
+    </resultMap>
+
+    <resultMap type="com.qtools.media.domain.MediaVideoActor" id="MediaVideoActorResult">
+        <result property="videoId" column="video_id" />
+        <result property="name"    column="name"     />
+    </resultMap>
+
+    <sql id="selectVideoVo">
+        select id, folder, rel_path, title, size, dur, w, h, vcodec, browser_ok,
+               poster_path, doc_path, sub_path, mtime
+        from media_video
+    </sql>
+
+    <select id="selectVideoList" resultMap="MediaVideoResult">
+        <include refid="selectVideoVo"/>
+        where hidden = 0
+        order by folder asc, title asc, id asc
+    </select>
+
+    <select id="selectVideoById" parameterType="String" resultMap="MediaVideoResult">
+        <include refid="selectVideoVo"/>
+        where id = #{id} and hidden = 0
+    </select>
+
+    <select id="selectTagList" resultMap="MediaVideoTagResult">
+        select t.video_id, t.facet, t.name
+        from media_video_tag t
+        inner join media_video v on v.id = t.video_id and v.hidden = 0
+        order by t.video_id asc, t.facet asc, t.name asc
+    </select>
+
+    <select id="selectActorList" resultMap="MediaVideoActorResult">
+        select a.video_id, a.name
+        from media_video_actor a
+        inner join media_video v on v.id = a.video_id and v.hidden = 0
+        order by a.video_id asc, a.name asc
+    </select>
+
+    <select id="selectTagListByVideoId" parameterType="String" resultMap="MediaVideoTagResult">
+        select video_id, facet, name
+        from media_video_tag
+        where video_id = #{videoId}
+        order by facet asc, name asc
+    </select>
+
+    <select id="selectActorListByVideoId" parameterType="String" resultMap="MediaVideoActorResult">
+        select video_id, name
+        from media_video_actor
+        where video_id = #{videoId}
+        order by name asc
+    </select>
+
+    <select id="selectMaxMtime" resultType="java.util.Date">
+        select max(mtime) from media_video where hidden = 0
+    </select>
+
+</mapper>

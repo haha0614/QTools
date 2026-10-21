@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    媒体收藏表 media_favorite 映射文件（M2）
+
+    表上 uk_fav (owner_key,kind,target_id,album_id,seq) 含 NULL 列：
+      video 行 -> (owner, 'video', <id>,   NULL,   NULL)
+      photo 行 -> (owner, 'photo', NULL,   <album>, <seq>)
+    MySQL 唯一索引把 NULL 视为互不相等，因此 video 行之间、photo 行之间的
+    ON DUPLICATE KEY 永远不触发（写多少次都是新行）。这里统一用「按 kind 分支的
+    精确匹配」+ INSERT ... WHERE NOT EXISTS 兜住幂等。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaFavoriteMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaUserItem" id="MediaUserItemResult">
+        <result property="kind"       column="kind"       />
+        <result property="targetId"   column="target_id"  />
+        <result property="albumId"    column="album_id"   />
+        <result property="seq"        column="seq"        />
+        <result property="title"      column="title"      />
+        <result property="happenedAt" column="happened_at"/>
+    </resultMap>
+
+    <!-- 唯一性判定：video 只看 target_id，photo 只看 album_id+seq（与业务唯一键一致） -->
+    <sql id="exactWhere">
+        owner_key = #{ownerKey} and kind = #{kind}
+        <choose>
+            <when test="kind == 'video'">
+                and target_id = #{targetId}
+            </when>
+            <otherwise>
+                and album_id = #{albumId} and seq = #{seq}
+            </otherwise>
+        </choose>
+    </sql>
+
+    <insert id="insertIfAbsent">
+        insert into media_favorite (owner_key, kind, target_id, album_id, seq)
+        select #{ownerKey}, #{kind}, #{targetId,jdbcType=VARCHAR}, #{albumId,jdbcType=VARCHAR},
+               #{seq,jdbcType=INTEGER}
+        from dual
+        where not exists (select 1 from media_favorite where <include refid="exactWhere"/>)
+    </insert>
+
+    <update id="touch">
+        update media_favorite set created_at = current_timestamp(3) where <include refid="exactWhere"/>
+    </update>
+
+    <delete id="deleteExact">
+        delete from media_favorite where <include refid="exactWhere"/>
+    </delete>
+
+    <select id="selectItemList" resultMap="MediaUserItemResult">
+        select f.kind, f.target_id, f.album_id, f.seq, f.created_at as happened_at,
+               coalesce(v.title, a.title) as title
+        from media_favorite f
+        left join media_video v on f.kind = 'video' and v.id = f.target_id
+        left join media_album a on f.kind = 'photo' and a.id = f.album_id
+        where f.owner_key = #{ownerKey}
+        order by f.created_at desc, f.id desc
+        limit #{limit}
+    </select>
+
+    <select id="countByOwner" resultType="int">
+        select count(*) from media_favorite where owner_key = #{ownerKey}
+        <if test="kind != null"> and kind = #{kind}</if>
+    </select>
+
+    <delete id="prune">
+        delete from media_favorite
+         where owner_key = #{ownerKey}
+           and id not in (select id from (
+                 select id from media_favorite
+                  where owner_key = #{ownerKey}
+                  order by created_at desc, id desc
+                  limit #{keep}) k)
+    </delete>
+
+</mapper>

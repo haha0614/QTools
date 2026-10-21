@@ -1,0 +1,1259 @@
+package com.qtools.media.service.impl;
+
+import java.io.IOException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import com.github.pagehelper.PageInfo;
+import com.qtools.common.core.page.TableDataInfo;
+import com.qtools.common.utils.DateUtils;
+import com.qtools.common.utils.StringUtils;
+import com.qtools.media.domain.MediaAlbum;
+import com.qtools.media.domain.MediaPerson;
+import com.qtools.media.domain.MediaPhoto;
+import com.qtools.media.domain.MediaVideo;
+import com.qtools.media.domain.MediaVideoActor;
+import com.qtools.media.domain.MediaVideoTag;
+import com.qtools.media.exception.MediaException;
+import com.qtools.media.mapper.MediaAdminMapper;
+import com.qtools.media.mapper.MediaPersonMapper;
+import com.qtools.media.mapper.MediaVideoMapper;
+import com.qtools.media.service.IMediaAdminService;
+import com.qtools.media.service.IMediaFileService;
+import com.qtools.media.service.IMediaIndexService;
+
+/**
+ * 管理端媒体库 服务实现
+ *
+ * <p>软删安全规则（与方案 §7「删除一律软删」对齐）：</p>
+ * <ol>
+ *   <li>源路径先过 {@link IMediaFileService} 的白名单校验：必须在媒体根内、必须不是站内目录
+ *       {@code _媒体站}（回收站本身就在站内目录下，因此永远不可能成为软删目标）；</li>
+ *   <li>只用 {@link Files#move} 移动到 {@code _媒体站/trash/<kind>/<id>__<原名>}，成功后才置
+ *       {@code hidden=1}；全程没有任何 delete 调用；</li>
+ *   <li>目标已存在时加时间戳后缀，绝不覆盖；</li>
+ *   <li>相册软删会移动整个物理目录，因此先检查该目录是否被其它相册共用
+ *       （念念 144 本共用 {@code 写真/念念 Nian Nian}），共用时 409 拒绝，否则会一次毁掉 144 册。</li>
+ * </ol>
+ *
+ * @author qtools
+ */
+@Service
+public class MediaAdminServiceImpl implements IMediaAdminService
+{
+    private static final Logger log = LoggerFactory.getLogger(MediaAdminServiceImpl.class);
+
+    private static final String KIND_VIDEO = "video";
+
+    private static final String KIND_ALBUM = "album";
+
+    private static final String KIND_PHOTO = "photo";
+
+    /** 相册详情里带的图片张数上限 */
+    private static final int DETAIL_PHOTO_LIMIT = 20;
+
+    private static final String DATE_PATTERN = "yyyy-MM-dd HH:mm:ss";
+
+    private static final DateTimeFormatter SUFFIX_FORMAT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+
+    /** id 前缀分隔符：trash/<kind>/<id>__<原名> */
+    private static final String TRASH_SEP = "__";
+
+    /** 重复软删时嵌在文件名里的时间戳（yyyyMMddHHmmss，必要时带 _n 序号） */
+    private static final Pattern TRASH_STAMP = Pattern.compile("^\\d{14}(_\\d+)?$");
+
+    /** 回收站类目的固定顺序（列表 / 统计共用） */
+    private static final List<String> TRASH_KINDS = List.of(KIND_VIDEO, KIND_ALBUM, KIND_PHOTO);
+
+    /** 回收站列表默认页大小 / 上限（磁盘枚举后内存分页，防一次拉全量） */
+    private static final int TRASH_PAGE_SIZE = 20;
+
+    private static final int TRASH_PAGE_MAX = 200;
+
+    /** 首次软删无内嵌时间戳 → 视为最早（排序键为空串），与 restore 的取法保持一致 */
+    private static final Comparator<TrashEntry> TRASH_ORDER =
+            Comparator.comparing(entry -> entry.stamp() == null ? "" : entry.stamp());
+
+    @Autowired
+    private MediaAdminMapper mediaAdminMapper;
+
+    @Autowired
+    private MediaVideoMapper mediaVideoMapper;
+
+    @Autowired
+    private MediaPersonMapper mediaPersonMapper;
+
+    @Autowired
+    private IMediaFileService mediaFileService;
+
+    @Autowired
+    private IMediaIndexService mediaIndexService;
+
+    // ------------------------------------------------------------------ 列表
+
+    @Override
+    public TableDataInfo selectVideoPage(String keyword, String folder, String person, String vcodec,
+            String hidden, String sort)
+    {
+        List<MediaVideo> rows = mediaAdminMapper.selectVideoPage(trimToNull(keyword), trimToNull(folder),
+                trimToNull(person), trimToNull(vcodec), normalizeHidden(hidden), trimToNull(sort));
+        long total = new PageInfo<>(rows).getTotal();
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (MediaVideo video : rows)
+        {
+            out.add(videoRow(video));
+        }
+        return dataTable(out, total);
+    }
+
+    @Override
+    public TableDataInfo selectAlbumPage(String keyword, Long personId, String hidden, String sort)
+    {
+        List<MediaAlbum> rows = mediaAdminMapper.selectAlbumPage(trimToNull(keyword), personId,
+                normalizeHidden(hidden), trimToNull(sort));
+        long total = new PageInfo<>(rows).getTotal();
+        Map<Long, String> personNames = loadPersonNames();
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (MediaAlbum album : rows)
+        {
+            out.add(albumRow(album, personNames));
+        }
+        return dataTable(out, total);
+    }
+
+    @Override
+    public TableDataInfo selectPhotoPage(String albumId)
+    {
+        if (StringUtils.isEmpty(albumId))
+        {
+            throw MediaException.badRequest("missing albumId");
+        }
+        List<MediaPhoto> rows = mediaAdminMapper.selectPhotoPage(albumId);
+        long total = new PageInfo<>(rows).getTotal();
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (MediaPhoto photo : rows)
+        {
+            out.add(photoRow(photo));
+        }
+        return dataTable(out, total);
+    }
+
+    // ------------------------------------------------------------------ 详情
+
+    @Override
+    public Map<String, Object> selectDetail(String kind, String id)
+    {
+        requireKind(kind);
+        if (StringUtils.isEmpty(id))
+        {
+            throw MediaException.badRequest("missing id");
+        }
+        if (KIND_VIDEO.equals(kind))
+        {
+            MediaVideo video = mediaAdminMapper.selectVideoAnyById(id);
+            if (video == null)
+            {
+                throw MediaException.notFound("video not found");
+            }
+            Map<String, Object> node = videoRow(video);
+            List<List<String>> tags = new ArrayList<>();
+            for (MediaVideoTag tag : mediaVideoMapper.selectTagListByVideoId(id))
+            {
+                tags.add(List.of(tag.getFacet(), tag.getName()));
+            }
+            List<String> actors = new ArrayList<>();
+            for (MediaVideoActor actor : mediaVideoMapper.selectActorListByVideoId(id))
+            {
+                actors.add(actor.getName());
+            }
+            node.put("doc", video.getDocPath());
+            node.put("sub", video.getSubPath());
+            node.put("tags", tags);
+            node.put("actors", actors);
+            return node;
+        }
+        if (KIND_ALBUM.equals(kind))
+        {
+            MediaAlbum album = mediaAdminMapper.selectAlbumAnyById(id);
+            if (album == null)
+            {
+                throw MediaException.notFound("album not found");
+            }
+            Map<String, Object> node = albumRow(album, loadPersonNames());
+            node.put("note", album.getNote());
+            node.put("sort", album.getSort());
+            List<Map<String, Object>> photos = new ArrayList<>();
+            for (MediaPhoto photo : mediaAdminMapper.selectPhotoHeadByAlbumId(id, DETAIL_PHOTO_LIMIT))
+            {
+                photos.add(photoRow(photo));
+            }
+            node.put("photos", photos);
+            return node;
+        }
+        MediaPhoto photo = resolvePhoto(id, null, null);
+        return photoRow(photo);
+    }
+
+    // ------------------------------------------------------------------ 隐藏位
+
+    @Override
+    public Map<String, Object> updateHidden(String kind, String id, Boolean hidden, String albumId, Integer seq)
+    {
+        requireKind(kind);
+        if (hidden == null)
+        {
+            throw MediaException.badRequest("missing hidden");
+        }
+        int flag = hidden ? 1 : 0;
+        int updated;
+        String echoId;
+        if (KIND_VIDEO.equals(kind))
+        {
+            requireVideo(id);
+            updated = mediaAdminMapper.updateVideoHidden(id, flag);
+            echoId = id;
+        }
+        else if (KIND_ALBUM.equals(kind))
+        {
+            requireAlbum(id);
+            updated = mediaAdminMapper.updateAlbumHidden(id, flag);
+            echoId = id;
+        }
+        else
+        {
+            MediaPhoto photo = resolvePhoto(id, trimToNull(albumId), seq);
+            updated = mediaAdminMapper.updatePhotoHidden(photo.getId(), flag);
+            echoId = photo.getAlbumId() + ":" + photo.getSeq();
+        }
+        mediaIndexService.invalidateSnapshot();
+        log.info("管理端设置隐藏位 kind={} id={} hidden={} rows={}", kind, echoId, flag, updated);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("updated", updated);
+        out.put("kind", kind);
+        out.put("id", echoId);
+        out.put("hidden", hidden);
+        return out;
+    }
+
+    // ------------------------------------------------------------------ 软删 / 恢复
+
+    @Override
+    public Map<String, Object> delete(String kind, String id)
+    {
+        requireKind(kind);
+        Path source;
+        String rel;
+        String trashId;
+        if (KIND_VIDEO.equals(kind))
+        {
+            MediaVideo video = requireVideo(id);
+            rel = video.getRelPath();
+            source = mediaFileService.resolveMedia(rel);
+            trashId = video.getId();
+        }
+        else if (KIND_ALBUM.equals(kind))
+        {
+            MediaAlbum album = requireAlbum(id);
+            int shared = mediaAdminMapper.countAlbumByDir(album.getDir(), album.getId());
+            if (shared > 0)
+            {
+                // 念念 144 本相册共用同一物理目录：移动目录会连带删掉其它 143 本
+                throw MediaException.conflict("目录 " + album.getDir() + " 被 " + shared
+                        + " 本其它相册共用，不能单独软删；请先给这些相册分目录或改用隐藏");
+            }
+            rel = album.getDir();
+            source = mediaFileService.resolveMediaDir(rel);
+            trashId = album.getId();
+        }
+        else
+        {
+            MediaPhoto photo = resolvePhoto(id, null, null);
+            rel = photo.getRelPath();
+            source = mediaFileService.resolveMedia(rel);
+            trashId = String.valueOf(photo.getId());
+        }
+
+        Path targetDir = mediaFileService.resolveTrashDir(kind);
+        Path target = uniqueTarget(targetDir, trashId, source.getFileName().toString());
+        try
+        {
+            Files.move(source, target);
+        }
+        catch (IOException e)
+        {
+            log.error("软删移动失败 kind={} id={} {} -> {}", kind, trashId, source, target, e);
+            throw new MediaException(500, "移动失败（跨盘或文件被占用）：" + e.getMessage());
+        }
+
+        int updated = setHidden(kind, trashId, 1);
+        mediaIndexService.invalidateSnapshot();
+        log.info("管理端软删 kind={} id={} {} -> {} rows={}", kind, trashId, source, target, updated);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("moved", true);
+        out.put("kind", kind);
+        out.put("id", trashId);
+        out.put("from", rel);
+        out.put("to", mediaFileService.relativize(target));
+        out.put("updated", updated);
+        out.put("hidden", true);
+        return out;
+    }
+
+    @Override
+    public Map<String, Object> restore(String kind, String id)
+    {
+        requireKind(kind);
+        Path source = null;
+        String storedId;
+        String rel;
+        if (KIND_VIDEO.equals(kind))
+        {
+            MediaVideo video = requireVideo(id);
+            storedId = video.getId();
+            rel = video.getRelPath();
+        }
+        else if (KIND_ALBUM.equals(kind))
+        {
+            MediaAlbum album = requireAlbum(id);
+            storedId = album.getId();
+            rel = album.getDir();
+        }
+        else
+        {
+            MediaPhoto photo = resolvePhoto(id, null, null);
+            storedId = String.valueOf(photo.getId());
+            rel = photo.getRelPath();
+        }
+
+        // 回收站里以该 id 开头的条目；名字里带时间戳后缀的排在后面，即最近一次软删
+        List<TrashEntry> candidates = listTrashEntries(kind, storedId);
+        if (candidates.isEmpty())
+        {
+            throw MediaException.notFound("回收站中没有该对象（" + storedId + "）");
+        }
+        source = candidates.get(candidates.size() - 1).path();
+
+        Path destination = mediaFileService.resolveWriteTarget(rel);
+        if (Files.exists(destination))
+        {
+            throw MediaException.conflict("原路径已存在，未覆盖：" + rel);
+        }
+        try
+        {
+            if (destination.getParent() != null)
+            {
+                Files.createDirectories(destination.getParent());
+            }
+            Files.move(source, destination);
+        }
+        catch (IOException e)
+        {
+            log.error("恢复移动失败 kind={} id={} {} -> {}", kind, storedId, source, destination, e);
+            throw new MediaException(500, "移动失败（跨盘或文件被占用）：" + e.getMessage());
+        }
+
+        int updated = setHidden(kind, storedId, 0);
+        mediaIndexService.invalidateSnapshot();
+        log.info("管理端恢复 kind={} id={} {} -> {} rows={}", kind, storedId, source, destination, updated);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("restored", true);
+        out.put("kind", kind);
+        out.put("id", storedId);
+        out.put("from", mediaFileService.relativize(source));
+        out.put("to", rel);
+        out.put("updated", updated);
+        out.put("hidden", false);
+        return out;
+    }
+
+    // ------------------------------------------------------------------ 回收站
+
+    @Override
+    public TableDataInfo selectTrashPage(String kind, String keyword, int pageNum, int pageSize)
+    {
+        String kindFilter = normalizeTrashKind(kind);
+        String needle = trimToNull(keyword);
+        List<Map<String, Object>> rows = new ArrayList<>();
+        // 磁盘为准：同 id 多份软删各占一行，按 deletedAt 倒序（最近删的在最前）
+        for (TrashEntry entry : scanTrash(kindFilter, true))
+        {
+            Map<String, Object> row = trashRow(entry);
+            if (needle != null && !trashMatches(row, needle))
+            {
+                continue;
+            }
+            rows.add(row);
+        }
+        long total = rows.size();
+        int size = pageSize <= 0 ? TRASH_PAGE_SIZE : Math.min(pageSize, TRASH_PAGE_MAX);
+        int page = Math.max(1, pageNum);
+        int from = Math.min((page - 1) * size, rows.size());
+        int to = Math.min(from + size, rows.size());
+        return dataTable(new ArrayList<>(rows.subList(from, to)), total);
+    }
+
+    @Override
+    public Map<String, Object> trashStats()
+    {
+        Map<String, Object> byKind = new LinkedHashMap<>();
+        for (String kind : TRASH_KINDS)
+        {
+            long count = 0L;
+            long bytes = 0L;
+            for (TrashEntry entry : scanTrash(kind))
+            {
+                count++;
+                bytes += entry.bytes();
+            }
+            Map<String, Object> node = new LinkedHashMap<>();
+            node.put("count", count);
+            node.put("bytes", bytes);
+            byKind.put(kind, node);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        // 与 /stats 的 trashCount / trashBytes 同源（同两个方法），不另算一套口径
+        out.put("count", trashCount());
+        out.put("bytes", trashBytes());
+        out.put("byKind", byKind);
+        return out;
+    }
+
+    @Override
+    public Map<String, Object> purgeTrash(String kind, String id, String trashRel)
+    {
+        requireKind(kind);
+        Path target;
+        if (StringUtils.isNotEmpty(trashRel))
+        {
+            // 前端回传的 trashRel 优先：同 id 多份时能精确指定要彻底删掉哪一条
+            target = resolveTrashTarget(kind, trashRel);
+        }
+        else
+        {
+            if (StringUtils.isEmpty(id))
+            {
+                throw MediaException.badRequest("missing id");
+            }
+            List<TrashEntry> entries = listTrashEntries(kind, id);
+            if (entries.isEmpty())
+            {
+                throw MediaException.notFound("回收站中没有该对象（" + id + "）");
+            }
+            target = requireTrashObject(kind, entries.get(entries.size() - 1).path());
+        }
+
+        long bytes = dirBytes(target);
+        boolean isDir = Files.isDirectory(target);
+        try
+        {
+            deleteRecursively(target);
+        }
+        catch (IOException e)
+        {
+            log.error("回收站彻底删除失败 kind={} id={} {}", kind, id, target, e);
+            throw new MediaException(500, "彻底删除失败：" + e.getMessage());
+        }
+        mediaIndexService.invalidateSnapshot();
+        log.info("管理端彻底删除 kind={} id={} {} bytes={} isDir={}", kind, id, target, bytes, isDir);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("purged", true);
+        out.put("kind", kind);
+        out.put("id", id);
+        out.put("isDir", isDir);
+        out.put("trashRel", mediaFileService.relativize(target));
+        out.put("bytes", bytes);
+        out.put("freed", bytes);
+        return out;
+    }
+
+    /** 回收站一行：{kind,id,name,originalRel,orphan,trashRel,bytes,deletedAt,isDir,thumbUrl} */
+    private Map<String, Object> trashRow(TrashEntry entry)
+    {
+        String originalRel = null;
+        String thumbUrl = null;
+        if (KIND_VIDEO.equals(entry.kind()))
+        {
+            MediaVideo video = lookupVideo(entry.id());
+            if (video != null)
+            {
+                originalRel = video.getRelPath();
+                thumbUrl = "/api/media/thumb/v/" + video.getId();
+            }
+        }
+        else if (KIND_ALBUM.equals(entry.kind()))
+        {
+            MediaAlbum album = lookupAlbum(entry.id());
+            if (album != null)
+            {
+                originalRel = album.getDir();
+                if (StringUtils.isNotEmpty(album.getCoverPath()))
+                {
+                    thumbUrl = "/api/media/thumb/p/" + album.getId() + "/" + coverSeq(album.getCoverPath());
+                }
+            }
+        }
+        else
+        {
+            MediaPhoto photo = lookupPhoto(entry.id());
+            if (photo != null)
+            {
+                originalRel = photo.getRelPath();
+                thumbUrl = thumbUrl(photo.getAlbumId(), photo.getSeq());
+            }
+        }
+
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("kind", entry.kind());
+        row.put("id", entry.id());
+        row.put("name", entry.name());
+        row.put("originalRel", originalRel);
+        // DB 里查不到（记录已删）→ 原路径未知，只能按磁盘对象处理
+        row.put("orphan", originalRel == null);
+        row.put("trashRel", mediaFileService.relativize(entry.path()));
+        row.put("bytes", entry.bytes());
+        row.put("deletedAt", formatDate(entry.deletedAt()));
+        row.put("isDir", entry.isDir());
+        row.put("thumbUrl", thumbUrl);
+        return row;
+    }
+
+    private static boolean trashMatches(Map<String, Object> row, String needle)
+    {
+        String lower = needle.toLowerCase();
+        for (String key : List.of("name", "originalRel", "id", "kind"))
+        {
+            Object value = row.get(key);
+            if (value != null && String.valueOf(value).toLowerCase().contains(lower))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 可空查询：回收站里的条目常常已经没有 DB 记录（孤儿），查不到就返回 null */
+    private MediaVideo lookupVideo(String id)
+    {
+        return StringUtils.isEmpty(id) ? null : mediaAdminMapper.selectVideoAnyById(id);
+    }
+
+    private MediaAlbum lookupAlbum(String id)
+    {
+        return StringUtils.isEmpty(id) ? null : mediaAdminMapper.selectAlbumAnyById(id);
+    }
+
+    private MediaPhoto lookupPhoto(String id)
+    {
+        if (id == null || !id.matches("^\\d{1,19}$"))
+        {
+            return null;
+        }
+        return mediaAdminMapper.selectPhotoAnyById(Long.valueOf(id));
+    }
+
+    /** 相册封面路径（thumbs/p/<id>/0000.jpg）→ 缩略图序号，取不到给 0000 */
+    private static String coverSeq(String coverPath)
+    {
+        Matcher matcher = Pattern.compile("/(\\d+)\\.[A-Za-z0-9]+$").matcher(coverPath.replace('\\', '/'));
+        return matcher.find() ? matcher.group(1) : "0000";
+    }
+
+    // ------------------------------------------------------------------ 统计 / 人物
+
+    @Override
+    public Map<String, Object> stats()
+    {
+        Map<String, Object> counts = mediaAdminMapper.selectCounts();
+        List<Map<String, Object>> byFolder = new ArrayList<>();
+        for (Map<String, Object> row : mediaAdminMapper.selectFolderStats())
+        {
+            Map<String, Object> node = new LinkedHashMap<>();
+            node.put("name", row.get("name"));
+            node.put("count", longOf(row.get("count")));
+            node.put("bytes", longOf(row.get("bytes")));
+            byFolder.add(node);
+        }
+        List<Map<String, Object>> byPerson = new ArrayList<>();
+        for (Map<String, Object> row : mediaAdminMapper.selectPersonStats())
+        {
+            Map<String, Object> node = new LinkedHashMap<>();
+            node.put("name", row.get("name"));
+            node.put("albums", longOf(row.get("albums")));
+            node.put("photos", longOf(row.get("photos")));
+            byPerson.add(node);
+        }
+
+        long videoBytes = longOf(counts.get("videoBytes"));
+        long albumBytes = longOf(counts.get("albumBytes"));
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("videos", longOf(counts.get("videos")));
+        out.put("albums", longOf(counts.get("albums")));
+        out.put("photos", longOf(counts.get("photos")));
+        out.put("people", longOf(counts.get("people")));
+        out.put("totalBytes", videoBytes + albumBytes);
+        out.put("videoBytes", videoBytes);
+        out.put("albumBytes", albumBytes);
+        out.put("hiddenVideos", longOf(counts.get("hiddenVideos")));
+        out.put("hiddenAlbums", longOf(counts.get("hiddenAlbums")));
+        out.put("hiddenPhotos", longOf(counts.get("hiddenPhotos")));
+        out.put("byFolder", byFolder);
+        out.put("byPerson", byPerson);
+        out.put("trashBytes", trashBytes());
+        out.put("trashCount", trashCount());
+        return out;
+    }
+
+    @Override
+    public List<Map<String, Object>> people()
+    {
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> row : mediaAdminMapper.selectPersonStats())
+        {
+            Map<String, Object> node = new LinkedHashMap<>();
+            node.put("id", longOf(row.get("id")));
+            node.put("name", row.get("name"));
+            node.put("albumCount", longOf(row.get("albums")));
+            node.put("photoCount", longOf(row.get("photos")));
+            out.add(node);
+        }
+        return out;
+    }
+
+    @Override
+    public Map<String, Object> updateAlbumPerson(String albumId, Long personId)
+    {
+        MediaAlbum album = requireAlbum(albumId);
+        if (personId != null)
+        {
+            boolean exists = false;
+            for (MediaPerson person : mediaPersonMapper.selectPersonList())
+            {
+                if (person.getId().equals(personId))
+                {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists)
+            {
+                throw MediaException.notFound("person not found: " + personId);
+            }
+        }
+        int updated = mediaAdminMapper.updateAlbumPerson(albumId, personId);
+        mediaIndexService.invalidateSnapshot();
+        log.info("管理端改相册人物 album={} personId={} rows={}", albumId, personId, updated);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("updated", updated);
+        out.put("id", albumId);
+        out.put("personId", personId);
+        return out;
+    }
+
+    // ------------------------------------------------------------------ 行整形
+
+    private Map<String, Object> videoRow(MediaVideo video)
+    {
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("id", video.getId());
+        node.put("title", video.getTitle());
+        node.put("folder", video.getFolder());
+        node.put("relPath", video.getRelPath());
+        node.put("size", video.getSize());
+        node.put("dur", video.getDur());
+        node.put("w", video.getW());
+        node.put("h", video.getH());
+        node.put("vcodec", video.getVcodec());
+        node.put("browserOk", video.getBrowserOk() != null && video.getBrowserOk() != 0);
+        node.put("poster", video.getPosterPath());
+        node.put("hidden", video.getHidden() != null && video.getHidden() != 0);
+        node.put("mtime", formatDate(video.getMtime()));
+        return node;
+    }
+
+    private Map<String, Object> albumRow(MediaAlbum album, Map<Long, String> personNames)
+    {
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("id", album.getId());
+        node.put("title", album.getTitle());
+        node.put("dir", album.getDir());
+        node.put("personId", album.getPersonId());
+        node.put("person", album.getPersonId() == null ? null : personNames.get(album.getPersonId()));
+        node.put("photoCount", album.getPhotoCount());
+        node.put("bytes", album.getBytes());
+        node.put("hidden", album.getHidden() != null && album.getHidden() != 0);
+        node.put("cover", album.getCoverPath());
+        return node;
+    }
+
+    private Map<String, Object> photoRow(MediaPhoto photo)
+    {
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("id", photo.getId());
+        node.put("seq", photo.getSeq());
+        node.put("relPath", photo.getRelPath());
+        node.put("bytes", photo.getBytes());
+        node.put("isBig", photo.getIsBig() != null && photo.getIsBig() != 0);
+        node.put("hidden", photo.getHidden() != null && photo.getHidden() != 0);
+        node.put("thumbUrl", thumbUrl(photo.getAlbumId(), photo.getSeq()));
+        return node;
+    }
+
+    private static String thumbUrl(String albumId, Integer seq)
+    {
+        if (albumId == null || seq == null)
+        {
+            return null;
+        }
+        return "/api/media/thumb/p/" + albumId + "/" + String.format("%04d", seq);
+    }
+
+    // ------------------------------------------------------------------ 工具
+
+    private MediaVideo requireVideo(String id)
+    {
+        MediaVideo video = StringUtils.isEmpty(id) ? null : mediaAdminMapper.selectVideoAnyById(id);
+        if (video == null)
+        {
+            throw MediaException.notFound("video not found: " + id);
+        }
+        return video;
+    }
+
+    private MediaAlbum requireAlbum(String id)
+    {
+        MediaAlbum album = StringUtils.isEmpty(id) ? null : mediaAdminMapper.selectAlbumAnyById(id);
+        if (album == null)
+        {
+            throw MediaException.notFound("album not found: " + id);
+        }
+        return album;
+    }
+
+    /**
+     * photo 定位：优先 albumId+seq，其次纯数字 photoId，再次 {@code <albumId>:<seq>}
+     */
+    private MediaPhoto resolvePhoto(String id, String albumId, Integer seq)
+    {
+        if (StringUtils.isNotEmpty(albumId) && seq != null)
+        {
+            MediaPhoto photo = mediaAdminMapper.selectPhotoByAlbumSeq(albumId, seq);
+            if (photo == null)
+            {
+                throw MediaException.notFound("photo not found: " + albumId + ":" + seq);
+            }
+            return photo;
+        }
+        String trimmed = StringUtils.isEmpty(id) ? null : id.trim();
+        if (trimmed == null)
+        {
+            throw MediaException.badRequest("missing photo id");
+        }
+        if (trimmed.matches("^\\d{1,19}$"))
+        {
+            MediaPhoto photo = mediaAdminMapper.selectPhotoAnyById(Long.valueOf(trimmed));
+            if (photo == null)
+            {
+                throw MediaException.notFound("photo not found: " + trimmed);
+            }
+            return photo;
+        }
+        int cut = trimmed.indexOf(':');
+        if (cut > 0)
+        {
+            String album = trimmed.substring(0, cut);
+            String seqText = trimmed.substring(cut + 1);
+            if (seqText.matches("^\\d{1,6}$"))
+            {
+                MediaPhoto photo = mediaAdminMapper.selectPhotoByAlbumSeq(album, Integer.valueOf(seqText));
+                if (photo == null)
+                {
+                    throw MediaException.notFound("photo not found: " + trimmed);
+                }
+                return photo;
+            }
+        }
+        throw MediaException.badRequest("photo 需要 photoId 或 albumId + seq");
+    }
+
+    /** 软删/恢复后回写 hidden 位 */
+    private int setHidden(String kind, String storedId, int flag)
+    {
+        if (KIND_VIDEO.equals(kind))
+        {
+            return mediaAdminMapper.updateVideoHidden(storedId, flag);
+        }
+        if (KIND_ALBUM.equals(kind))
+        {
+            return mediaAdminMapper.updateAlbumHidden(storedId, flag);
+        }
+        return mediaAdminMapper.updatePhotoHidden(Long.valueOf(storedId), flag);
+    }
+
+    /** 回收站目标名：{@code <id>__<原名>}，已存在时加时间戳后缀，绝不覆盖 */
+    private Path uniqueTarget(Path dir, String id, String baseName)
+    {
+        Path target = dir.resolve(id + TRASH_SEP + baseName);
+        if (!Files.exists(target))
+        {
+            return target;
+        }
+        String stamp = LocalDateTime.now().format(SUFFIX_FORMAT);
+        target = dir.resolve(id + TRASH_SEP + stamp + TRASH_SEP + baseName);
+        int n = 1;
+        while (Files.exists(target))
+        {
+            target = dir.resolve(id + TRASH_SEP + stamp + "_" + n + TRASH_SEP + baseName);
+            n++;
+        }
+        return target;
+    }
+
+    /**
+     * 回收站里该 id 的所有条目，按「软删先后」升序返回（最后一个是最近一次）
+     *
+     * <p>坑：<b>不能按文件名字典序判断新旧</b>。文件名形如 {@code <id>__<原名>}（首次软删）或
+     * {@code <id>__<yyyyMMddHHmmss>__<原名>}（同 id 再次软删），而原名常是中文/emoji：
+     * 字典序里 '2' 排在汉字前面，带时间戳的新条目会被误判成旧的，恢复时就会把旧文件
+     * （甚至同名占位文件）搬回原位。解析统一交给 {@link #parseTrashEntry}，没有时间戳的一律视为最早。</p>
+     */
+    private List<TrashEntry> listTrashEntries(String kind, String id)
+    {
+        List<TrashEntry> found = new ArrayList<>();
+        for (TrashEntry entry : scanTrash(kind))
+        {
+            if (id.equals(entry.id()))
+            {
+                found.add(entry);
+            }
+        }
+        if (found.size() > 1)
+        {
+            log.warn("回收站里存在 {} 个同 id 条目，将取最近一次：{}", found.size(), found);
+        }
+        return found;
+    }
+
+    /** 某类（或全部）回收站条目，按软删先后升序；newestFirst 时倒序（列表展示用） */
+    private List<TrashEntry> scanTrash(String kindFilter, boolean newestFirst)
+    {
+        List<TrashEntry> found = new ArrayList<>();
+        for (String kind : "all".equals(kindFilter) ? TRASH_KINDS : List.of(kindFilter))
+        {
+            found.addAll(scanTrash(kind));
+        }
+        found.sort(TRASH_ORDER);
+        if (newestFirst)
+        {
+            found.sort(TRASH_ORDER.reversed());
+        }
+        return found;
+    }
+
+    /** 某一类的全部回收站条目，按软删先后升序 */
+    private List<TrashEntry> scanTrash(String kind)
+    {
+        Path dir = mediaFileService.resolveTrashDir(kind);
+        List<TrashEntry> found = new ArrayList<>();
+        try (Stream<Path> stream = Files.list(dir))
+        {
+            for (Path path : stream.toList())
+            {
+                found.add(parseTrashEntry(kind, path));
+            }
+        }
+        catch (IOException e)
+        {
+            throw new MediaException(500, "回收站不可读: " + dir);
+        }
+        found.sort(TRASH_ORDER);
+        return found;
+    }
+
+    /**
+     * 解析回收站条目 —— 软删 / 恢复 / 列回收站<b>唯一</b>的解析入口
+     *
+     * <p>文件名两种形态：{@code <id>__<原名>}（首次软删）与
+     * {@code <id>__<yyyyMMddHHmmss>[_n]__<原名>}（同 id 再次软删，由
+     * {@link #uniqueTarget} 造）。restore 用 stamp 选最近一次软删，列表接口用同一个 stamp
+     * 算 deletedAt，两处必须是同一个时间戳来源。</p>
+     */
+    private static TrashEntry parseTrashEntry(String kind, Path path)
+    {
+        String fileName = path.getFileName().toString();
+        String id = null;
+        String stamp = null;
+        String name = fileName;
+        int cut = fileName.indexOf(TRASH_SEP);
+        if (cut > 0)
+        {
+            id = fileName.substring(0, cut);
+            String rest = fileName.substring(cut + TRASH_SEP.length());
+            int end = rest.indexOf(TRASH_SEP);
+            String head = end < 0 ? rest : rest.substring(0, end);
+            if (TRASH_STAMP.matcher(head).matches())
+            {
+                stamp = head;
+                name = end < 0 ? rest : rest.substring(end + TRASH_SEP.length());
+            }
+            else
+            {
+                name = rest;
+            }
+        }
+        boolean isDir = Files.isDirectory(path);
+        long bytes = isDir ? dirBytes(path) : fileBytes(path);
+        // 首次软删的文件名里没有时间戳 → 退回文件时间（排序仍按 TRASH_ORDER 视为最早）
+        Date deletedAt = stamp == null ? fileTime(path) : parseStamp(stamp);
+        return new TrashEntry(kind, id, name, stamp, path, isDir, bytes, deletedAt);
+    }
+
+    /**
+     * 前端回传的 trashRel（相对媒体根，如 {@code _媒体站/trash/photo/463__x.jpg}）→ 真实路径
+     *
+     * <p>彻底删除是唯一会真删文件的入口，所以这里按「绝对路径 / 盘符 / UNC / .. 逃逸 /
+     * 符号链接逃逸」逐层拒绝：必须落在 {@code trash/<kind>} 之下，且 realpath 之后仍在其中。</p>
+     */
+    private Path resolveTrashTarget(String kind, String rel)
+    {
+        if (rel == null || rel.isEmpty() || rel.indexOf('\0') >= 0)
+        {
+            throw MediaException.forbidden();
+        }
+        char first = rel.charAt(0);
+        if (first == '/' || first == '\\')
+        {
+            throw MediaException.forbidden();
+        }
+        if (rel.length() > 1 && rel.charAt(1) == ':' && Character.isLetter(first))
+        {
+            throw MediaException.forbidden();
+        }
+        Path trashRoot = realTrashRoot();
+        Path target;
+        try
+        {
+            target = mediaFileService.mediaRoot().resolve(rel).normalize();
+        }
+        catch (InvalidPathException e)
+        {
+            throw MediaException.forbidden();
+        }
+        if (!target.startsWith(trashRoot))
+        {
+            // 含任何 .. 逃出 trash 的写法都在这里被拦下
+            throw MediaException.forbidden();
+        }
+        return requireTrashObject(kind, target);
+    }
+
+    /** 目标必须存在、realpath 之后仍落在 {@code trash/<kind>} 之下、且不是 kind 目录本身 */
+    private Path requireTrashObject(String kind, Path target)
+    {
+        Path kindDir = realTrashRoot().resolve(kind);
+        Path real;
+        try
+        {
+            real = target.toRealPath();
+        }
+        catch (IOException e)
+        {
+            throw MediaException.notFound("回收站中没有该对象: " + target.getFileName());
+        }
+        if (!real.startsWith(kindDir) || real.equals(kindDir))
+        {
+            throw MediaException.forbidden();
+        }
+        return real;
+    }
+
+    /** 回收站根 realpath（trashPath 配置本身已限制在 _媒体站 下） */
+    private Path realTrashRoot()
+    {
+        Path trash = mediaFileService.trashRoot();
+        try
+        {
+            return Files.exists(trash) ? trash.toRealPath() : trash;
+        }
+        catch (IOException e)
+        {
+            throw new MediaException(500, "回收站不可访问: " + trash);
+        }
+    }
+
+    /** 彻底删除：文件直接删，目录递归删（回收站里的目录来自相册软删） */
+    private static void deleteRecursively(Path target) throws IOException
+    {
+        if (!Files.isDirectory(target))
+        {
+            Files.delete(target);
+            return;
+        }
+        Files.walkFileTree(target, new SimpleFileVisitor<>()
+        {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException
+            {
+                Files.delete(file);
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException
+            {
+                if (exc != null)
+                {
+                    throw exc;
+                }
+                Files.delete(dir);
+                return FileVisitResult.CONTINUE;
+            }
+        });
+    }
+
+    /** 时间戳（yyyyMMddHHmmss[_n]）→ Date；解析失败返回 null（不阻塞列表） */
+    private static Date parseStamp(String stamp)
+    {
+        try
+        {
+            LocalDateTime time = LocalDateTime.parse(stamp.substring(0, 14), SUFFIX_FORMAT);
+            return Date.from(time.atZone(ZoneId.systemDefault()).toInstant());
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
+
+    private static Date fileTime(Path path)
+    {
+        try
+        {
+            return new Date(Files.getLastModifiedTime(path).toMillis());
+        }
+        catch (IOException e)
+        {
+            return null;
+        }
+    }
+
+    private static long fileBytes(Path path)
+    {
+        try
+        {
+            return Files.isRegularFile(path) ? Files.size(path) : 0L;
+        }
+        catch (IOException e)
+        {
+            return 0L;
+        }
+    }
+
+    /** 目录递归字节数（相册软删会把整个物理目录搬进回收站） */
+    private static long dirBytes(Path path)
+    {
+        if (!Files.isDirectory(path))
+        {
+            return fileBytes(path);
+        }
+        try (Stream<Path> stream = Files.walk(path))
+        {
+            return stream.filter(Files::isRegularFile).mapToLong(MediaAdminServiceImpl::fileBytes).sum();
+        }
+        catch (IOException e)
+        {
+            log.warn("回收站目录字节统计失败 {}: {}", path, e.getMessage());
+            return 0L;
+        }
+    }
+
+    /** kind 过滤：空/all/* → all，其余必须是 video / album / photo */
+    private static String normalizeTrashKind(String kind)
+    {
+        String value = trimToNull(kind);
+        if (value == null)
+        {
+            return "all";
+        }
+        String lower = value.toLowerCase();
+        if ("all".equals(lower) || "*".equals(lower))
+        {
+            return "all";
+        }
+        requireKind(lower);
+        return lower;
+    }
+
+    private long trashBytes()
+    {
+        Path trash = mediaFileService.trashRoot();
+        if (!Files.isDirectory(trash))
+        {
+            return 0L;
+        }
+        try (Stream<Path> stream = Files.walk(trash))
+        {
+            return stream.filter(Files::isRegularFile).mapToLong(path -> {
+                try
+                {
+                    return Files.size(path);
+                }
+                catch (IOException e)
+                {
+                    return 0L;
+                }
+            }).sum();
+        }
+        catch (IOException e)
+        {
+            log.warn("回收站字节统计失败: {}", e.getMessage());
+            return 0L;
+        }
+    }
+
+    /** 回收站对象数 = trash/<kind>/ 下直接子项数（一次软删 = 一个对象） */
+    private long trashCount()
+    {
+        Path trash = mediaFileService.trashRoot();
+        if (!Files.isDirectory(trash))
+        {
+            return 0L;
+        }
+        long count = 0L;
+        try (Stream<Path> kinds = Files.list(trash))
+        {
+            for (Path kindDir : kinds.filter(Files::isDirectory).toList())
+            {
+                try (Stream<Path> entries = Files.list(kindDir))
+                {
+                    count += entries.count();
+                }
+            }
+        }
+        catch (IOException e)
+        {
+            log.warn("回收站对象统计失败: {}", e.getMessage());
+        }
+        return count;
+    }
+
+    private Map<Long, String> loadPersonNames()
+    {
+        Map<Long, String> names = new LinkedHashMap<>();
+        for (MediaPerson person : mediaPersonMapper.selectPersonList())
+        {
+            names.put(person.getId(), person.getName());
+        }
+        return names;
+    }
+
+    private static void requireKind(String kind)
+    {
+        if (!KIND_VIDEO.equals(kind) && !KIND_ALBUM.equals(kind) && !KIND_PHOTO.equals(kind))
+        {
+            throw MediaException.badRequest("kind 只能是 video / album / photo");
+        }
+    }
+
+    /** hidden 过滤参数：all/空 = 不过滤，true/1 = 已隐藏，false/0 = 未隐藏 */
+    private static String normalizeHidden(String hidden)
+    {
+        if (StringUtils.isEmpty(hidden))
+        {
+            return null;
+        }
+        String value = hidden.trim().toLowerCase();
+        if ("all".equals(value) || "*".equals(value))
+        {
+            return null;
+        }
+        if ("1".equals(value) || "true".equals(value))
+        {
+            return "1";
+        }
+        if ("0".equals(value) || "false".equals(value))
+        {
+            return "0";
+        }
+        throw MediaException.badRequest("hidden 只能是 true/false/all");
+    }
+
+    private static String trimToNull(String value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private static long longOf(Object value)
+    {
+        if (value == null)
+        {
+            return 0L;
+        }
+        if (value instanceof Number number)
+        {
+            return number.longValue();
+        }
+        try
+        {
+            return Long.parseLong(value.toString());
+        }
+        catch (NumberFormatException e)
+        {
+            return 0L;
+        }
+    }
+
+    private static String formatDate(Date date)
+    {
+        return date == null ? null : DateUtils.parseDateToStr(DATE_PATTERN, date);
+    }
+
+    /** 与 BaseController#getDataTable 输出一致，但 total 由本层在行整形前取好 */
+    private static TableDataInfo dataTable(List<?> rows, long total)
+    {
+        TableDataInfo table = new TableDataInfo(rows, total);
+        table.setCode(200);
+        table.setMsg("查询成功");
+        return table;
+    }
+
+    /**
+     * 回收站条目（磁盘为准）：{@code trash/<kind>/<id>__<原名>}
+     *
+     * @param id        文件名校验出的对象 id（文件名没有 {@code __} 时为 null，按孤儿处理）
+     * @param name      原名（文件名里 id/时间戳之后的部分）
+     * @param stamp     文件名内嵌的软删时间戳；首次软删没有时间戳时为 null（视为最早）
+     * @param deletedAt 展示用的删除时间：有时间戳取时间戳，否则取文件时间
+     */
+    private record TrashEntry(String kind, String id, String name, String stamp, Path path, boolean isDir,
+            long bytes, Date deletedAt)
+    {
+    }
+}

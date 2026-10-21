@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    管理端媒体库映射文件（M3）。
+
+    与 M1 只读 mapper 的区别：这里的查询 不过滤 hidden（管理端要能看到已隐藏/已软删的行），
+    因此 resultMap 里多一列 hidden。分页由 PageHelper 负责，不写 count 语句。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaAdminMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaVideo" id="MediaAdminVideoResult">
+        <id     property="id"         column="id"          />
+        <result property="folder"     column="folder"      />
+        <result property="relPath"    column="rel_path"    />
+        <result property="title"      column="title"       />
+        <result property="size"       column="size"        />
+        <result property="dur"        column="dur"         />
+        <result property="w"          column="w"           />
+        <result property="h"          column="h"           />
+        <result property="vcodec"     column="vcodec"      />
+        <result property="browserOk"  column="browser_ok"  />
+        <result property="posterPath" column="poster_path" />
+        <result property="docPath"    column="doc_path"    />
+        <result property="subPath"    column="sub_path"    />
+        <result property="hidden"     column="hidden"      />
+        <result property="mtime"      column="mtime"       />
+    </resultMap>
+
+    <resultMap type="com.qtools.media.domain.MediaAlbum" id="MediaAdminAlbumResult">
+        <id     property="id"         column="id"          />
+        <result property="personId"   column="person_id"   />
+        <result property="title"      column="title"       />
+        <result property="dir"        column="dir"         />
+        <result property="photoCount" column="photo_count" />
+        <result property="bytes"      column="bytes"       />
+        <result property="coverPath"  column="cover_path"  />
+        <result property="note"       column="note"        />
+        <result property="sort"       column="sort"        />
+        <result property="hidden"     column="hidden"      />
+        <result property="mtime"      column="mtime"       />
+    </resultMap>
+
+    <resultMap type="com.qtools.media.domain.MediaPhoto" id="MediaAdminPhotoResult">
+        <id     property="id"      column="id"       />
+        <result property="albumId" column="album_id" />
+        <result property="seq"     column="seq"      />
+        <result property="relPath" column="rel_path" />
+        <result property="bytes"   column="bytes"    />
+        <result property="w"       column="w"        />
+        <result property="h"       column="h"        />
+        <result property="isBig"   column="is_big"   />
+        <result property="hidden"  column="hidden"   />
+    </resultMap>
+
+    <!-- 列表 -->
+
+    <select id="selectVideoPage" resultMap="MediaAdminVideoResult">
+        select v.id, v.folder, v.rel_path, v.title, v.size, v.dur, v.w, v.h, v.vcodec,
+               v.browser_ok, v.poster_path, v.doc_path, v.sub_path, v.hidden, v.mtime
+        from media_video v
+        <where>
+            <if test="hidden != null and hidden != ''">
+                and v.hidden = #{hidden}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                and (v.title like concat('%', #{keyword}, '%') or v.rel_path like concat('%', #{keyword}, '%'))
+            </if>
+            <if test="folder != null and folder != ''">
+                and v.folder = #{folder}
+            </if>
+            <if test="vcodec != null and vcodec != ''">
+                and v.vcodec like concat('%', #{vcodec}, '%')
+            </if>
+            <if test="person != null and person != ''">
+                and exists (select 1 from media_video_actor a where a.video_id = v.id and a.name = #{person})
+            </if>
+        </where>
+        order by
+        <choose>
+            <when test="sort == 'size-desc'">v.size desc,</when>
+            <when test="sort == 'dur-desc'">v.dur desc,</when>
+            <when test="sort == 'mtime-desc'">v.mtime desc,</when>
+            <when test="sort == 'title'">v.title asc,</when>
+            <otherwise>v.folder asc, v.title asc,</otherwise>
+        </choose>
+        v.id asc
+    </select>
+
+    <select id="selectAlbumPage" resultMap="MediaAdminAlbumResult">
+        select a.id, a.person_id, a.title, a.dir, a.photo_count, a.bytes, a.cover_path,
+               a.note, a.sort, a.hidden, a.mtime
+        from media_album a
+        <where>
+            <if test="hidden != null and hidden != ''">
+                and a.hidden = #{hidden}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                and (a.title like concat('%', #{keyword}, '%') or a.dir like concat('%', #{keyword}, '%'))
+            </if>
+            <if test="personId != null">
+                and a.person_id = #{personId}
+            </if>
+        </where>
+        order by
+        <choose>
+            <when test="sort == 'photoCount-desc'">a.photo_count desc,</when>
+            <when test="sort == 'bytes-desc'">a.bytes desc,</when>
+            <when test="sort == 'title'">a.title asc,</when>
+            <otherwise>a.sort asc,</otherwise>
+        </choose>
+        a.id asc
+    </select>
+
+    <select id="selectPhotoPage" resultMap="MediaAdminPhotoResult">
+        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big, p.hidden
+        from media_photo p
+        where p.album_id = #{albumId}
+        order by p.seq asc
+    </select>
+
+    <!-- 单行 -->
+
+    <select id="selectVideoAnyById" resultMap="MediaAdminVideoResult">
+        select id, folder, rel_path, title, size, dur, w, h, vcodec, browser_ok,
+               poster_path, doc_path, sub_path, hidden, mtime
+        from media_video
+        where id = #{id}
+    </select>
+
+    <select id="selectAlbumAnyById" resultMap="MediaAdminAlbumResult">
+        select id, person_id, title, dir, photo_count, bytes, cover_path, note, sort, hidden, mtime
+        from media_album
+        where id = #{id}
+    </select>
+
+    <select id="selectPhotoAnyById" resultMap="MediaAdminPhotoResult">
+        select id, album_id, seq, rel_path, bytes, w, h, is_big, hidden
+        from media_photo
+        where id = #{id}
+    </select>
+
+    <select id="selectPhotoByAlbumSeq" resultMap="MediaAdminPhotoResult">
+        select id, album_id, seq, rel_path, bytes, w, h, is_big, hidden
+        from media_photo
+        where album_id = #{albumId} and seq = #{seq}
+    </select>
+
+    <select id="selectPhotoHeadByAlbumId" resultMap="MediaAdminPhotoResult">
+        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big, p.hidden
+        from media_photo p
+        where p.album_id = #{albumId}
+        order by p.seq asc
+        limit #{limit}
+    </select>
+
+    <select id="countAlbumByDir" resultType="int">
+        select count(*)
+        from media_album
+        where dir = #{dir} and id &lt;&gt; #{excludeId}
+    </select>
+
+    <!-- 写入 -->
+
+    <update id="updateVideoHidden">
+        update media_video set hidden = #{hidden} where id = #{id}
+    </update>
+
+    <update id="updateAlbumHidden">
+        update media_album set hidden = #{hidden} where id = #{id}
+    </update>
+
+    <update id="updatePhotoHidden">
+        update media_photo set hidden = #{hidden} where id = #{id}
+    </update>
+
+    <update id="updateAlbumPerson">
+        update media_album set person_id = #{personId} where id = #{id}
+    </update>
+
+    <!-- 统计 -->
+
+    <select id="selectCounts" resultType="java.util.LinkedHashMap">
+        select
+            (select count(*) from media_video where hidden = 0)              as videos,
+            (select count(*) from media_album where hidden = 0)              as albums,
+            (select count(*) from media_photo p inner join media_album a on a.id = p.album_id and a.hidden = 0
+                where p.hidden = 0)                                          as photos,
+            (select count(*) from media_person where hidden = 0)             as people,
+            (select count(*) from media_video where hidden = 1)              as hiddenVideos,
+            (select count(*) from media_album where hidden = 1)              as hiddenAlbums,
+            (select count(*) from media_photo where hidden = 1)              as hiddenPhotos,
+            (select coalesce(sum(size), 0) from media_video where hidden = 0) as videoBytes,
+            (select coalesce(sum(bytes), 0) from media_album where hidden = 0) as albumBytes
+    </select>
+
+    <select id="selectFolderStats" resultType="java.util.LinkedHashMap">
+        select folder as `name`, count(*) as `count`, coalesce(sum(size), 0) as `bytes`
+        from media_video
+        where hidden = 0
+        group by folder
+        order by 2 desc, 1 asc
+    </select>
+
+    <select id="selectPersonStats" resultType="java.util.LinkedHashMap">
+        select p.id                                             as `id`,
+               p.name                                           as `name`,
+               count(case when a.hidden = 0 then 1 end)          as `albums`,
+               coalesce(sum(case when a.hidden = 0 then a.photo_count else 0 end), 0) as `photos`
+        from media_person p
+        left join media_album a on a.person_id = p.id
+        where p.hidden = 0
+        group by p.id, p.name, p.sort
+        order by p.sort asc, p.id asc
+    </select>
+
+</mapper>

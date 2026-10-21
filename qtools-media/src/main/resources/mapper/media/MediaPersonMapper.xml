@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 媒体人物表 media_person 映射文件（M1 只读） -->
+<mapper namespace="com.qtools.media.mapper.MediaPersonMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaPerson" id="MediaPersonResult">
+        <id     property="id"   column="id"   />
+        <result property="name" column="name" />
+        <result property="sort" column="sort" />
+    </resultMap>
+
+    <select id="selectPersonList" resultMap="MediaPersonResult">
+        select id, name, sort
+        from media_person
+        where hidden = 0
+        order by sort asc, id asc
+    </select>
+
+</mapper>
