@@ -17,21 +17,29 @@ rem Probe npm.cmd specifically: bare "where npm" can return the extensionless sh
 for /f "delims=" %%N in ('where npm.cmd 2^>nul') do (
     if not defined NPM set "NPM=%%N"
 )
-rem Prefer the portable node shipped on this drive (..\..\..\tools\node), so the
+rem Prefer the portable node shipped on this drive (..\..\tools\node), so the
 rem build keeps working on another machine without Node installed.
 if not defined NPM if exist "%PROJ_ROOT%\..\..\tools\node\npm.cmd" (
     set "NPM=%PROJ_ROOT%\..\..\tools\node\npm.cmd"
 )
 if defined NPM (
     echo [build-web] npm found: %NPM%
-) else if exist "D:\Tools\Node\npm.cmd" (
-    set "NPM=D:\Tools\Node\npm.cmd"
-    echo [build-web] npm not on PATH, falling back to %NPM%
 ) else (
-    echo [ERROR] npm not found: neither on PATH nor at D:\Tools\Node\npm.cmd
-    echo [ERROR] install Node.js, or add npm.cmd to PATH, then re-run.
+    echo [ERROR] npm not found: neither on PATH nor in tools\node\npm.cmd
+    echo [ERROR] install Node.js, or put the portable node under tools\node, then re-run.
     exit /b 1
 )
+
+rem npm itself is only a script: the real work is done by node.exe in the same
+rem directory, and node_modules\.bin\vite.cmd invokes a bare "node". So the npm
+rem directory must be on PATH, otherwise the portable setup fails with
+rem   '"node"' is not recognized as an internal or external command
+for %%I in ("%NPM%") do set "NODE_DIR=%%~dpI"
+if defined NODE_DIR set "PATH=%NODE_DIR%;%PATH%"
+if not exist "%NODE_DIR%node.exe" (
+    echo [WARN] node.exe not found next to "%NPM%"; the build may fail with "node is not recognized".
+)
+echo [build-web] node dir on PATH: %NODE_DIR%
 
 if not exist "%USER_DIR%\package.json" (
     echo [ERROR] missing %USER_DIR%\package.json
