@@ -46,7 +46,7 @@ insert into tool_info (id, tool_name, tool_desc, tool_route, icon, sort, status,
 (1, 'JSON格式化工具', 'JSON格式化、压缩、语法校验', '/tool/json',       'Document', 1, '0', now(), now()),
 (2, '文本字数统计',   '统计汉字、字符、行数，可清除空格', '/tool/text-count', 'EditPen',  2, '0', now(), now()),
 (3, '随机密码生成',   '自定义长度，支持大小写、数字、符号', '/tool/pwd-gen',  'Key',      3, '0', now(), now()),
-  (4, '媒体站',         '视频与图片库：卡片墙、相册分组、收藏与断点续播', '/media/index.html', 'VideoCamera', 100, '0', now(), now())
+  (4, '媒体站',         '视频与图片库：卡片墙、相册分组、收藏与断点续播', '/media', 'VideoCamera', 100, '0', now(), now())
 on duplicate key update
   tool_name   = values(tool_name),
   tool_desc   = values(tool_desc),

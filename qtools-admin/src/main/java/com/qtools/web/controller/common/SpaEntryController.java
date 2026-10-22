@@ -29,11 +29,16 @@ public class SpaEntryController
         return "forward:/index.html";
     }
 
-    /** 媒体站目录：手输 /media 或 /media/ 时补到视频站首页，避免 404 */
+    /**
+     * 媒体站入口：{@code /media} 与 {@code /media/} 交给用户端 SPA 的 history 路由
+     * （Vue Router 里 /media 是视频库、/media/photos 是图片站、/media/me 是我的）。
+     *
+     * <p>旧的手写静态页仍然存在，可通过 /media/index.html 等精确路径直接访问，便于回滚。</p>
+     */
     @GetMapping({ "/media", "/media/" })
     public String mediaEntry()
     {
-        return "redirect:/media/index.html";
+        return "forward:/index.html";
     }
 
     /**

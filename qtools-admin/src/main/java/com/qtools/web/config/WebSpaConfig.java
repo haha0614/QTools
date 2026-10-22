@@ -19,8 +19,8 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
  *
  * <p>四段映射彼此独立，互不回落：</p>
  * <ul>
- * <li>{@code /media/**} → {@code userDist/media}：媒体前端页面（M4-B 产物）。找不到就 404，
- * <b>不做</b> SPA 回落，且与接口前缀 {@code /api/media/**} 分属不同路径，不会互相吞;</li>
+ * <li>{@code /media/**}：媒体站前端。真实文件（app.js/app.css 等）由静态资源直接命中，
+ * 前端路由（{@code /media/photos}、{@code /media/me}）回落 index.html；接口前缀 {@code /api/media/**} 仍返回 JSON;</li>
  * <li>{@code /assets/**}、{@code /static/**}、{@code <adminPath>/static/**}：带 content hash 的
  * 构建产物，给一年强缓存;</li>
  * <li>{@code /**} 与 {@code <adminPath>/**}：SPA 静态文件，缺失时回落各自 index.html
@@ -41,7 +41,7 @@ public class WebSpaConfig implements WebMvcConfigurer
     private static final CacheControl NO_CACHE = CacheControl.noCache();
 
     /** 这些前缀属于接口或框架端点，绝不回落到 index.html */
-    static final String[] API_PREFIXES = { "api", "system", "monitor", "common", "quartz", "tool/gen", "test", "profile", "druid", "v3", "swagger-ui", "media", "actuator" };
+    static final String[] API_PREFIXES = { "api", "system", "monitor", "common", "quartz", "tool/gen", "test", "profile", "druid", "v3", "swagger-ui", "actuator" };
 
     /** 用户端 SPA 构建产物目录 */
     @Value("${qtools.web.userDist:}")
@@ -64,10 +64,9 @@ public class WebSpaConfig implements WebMvcConfigurer
 
         if (userRoot != null)
         {
-            // 媒体前端页面：显式映射、不回落，找不到即 404
-            registry.addResourceHandler("/media/**")
-                    .addResourceLocations(userRoot.resolve("media").toUri().toString())
-                    .setCacheControl(NO_CACHE);
+            // 媒体前端页面不再单独映射：改由下面的 /** 统一处理，
+            // 以便 /media/photos、/media/me 这类前端路由能得到 SPA 回落，
+            // 而 /media/app.js 等真实文件仍由 ResourceHandler 直接命中。
 
             registry.addResourceHandler("/assets/**")
                     .addResourceLocations(userRoot.resolve("assets").toUri().toString())
