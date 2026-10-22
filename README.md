@@ -5,10 +5,10 @@
 ## 简介
 
 - 本仓库是「青兔在线工具箱」的后端服务，技术栈为 Java 17 + Spring Boot 3 + MyBatis + MySQL + Redis。
-- 前台用户站 QTools-C 通过两个匿名接口读取工具列表、上报访问埋点；管理后台 QTools-M 使用若依自带的登录与系统管理接口（用户 / 角色 / 菜单 / 字典 / 定时任务 / 代码生成等）。
-- 相对上游若依，本仓库做了两件事：① 模块与包整体重命名（`ruoyi-*` → `qtools-*`，`com.ruoyi` → `com.qtools`）；② 新增业务模块 `qtools-tool`（工具列表 + 访问埋点）。
+- 前台用户站 QTools-C 通过两个**匿名**接口读取工具列表、上报访问埋点；管理后台 QTools-M 使用若依自带的登录与系统管理接口（用户 / 角色 / 菜单 / 字典 / 定时任务 / 代码生成等），另有工具维护接口 `/api/qtool/info/**`（走若依后台鉴权，权限串 `qtool:admin:*`，**不是**匿名接口）。
+- 相对上游若依，本仓库做了两件事：① 模块与包整体重命名（`ruoyi-*` → `qtools-*`，`com.ruoyi` → `com.qtools`）；② 新增业务模块 `qtools-tool`（前台工具列表 + 访问埋点 + 后台工具维护）。
 - 工具的基础数据由 `sql/qtools/tool_init.sql` 初始化（JSON 格式化、文本字数统计、随机密码生成共 3 条）。
-- 当前**管理端没有「工具列表管理」页面**，工具数据通过 SQL 脚本与数据库维护；`qtools-tool` 只提供前台所需的公开查询与埋点写入。
+- 管理端已有工具维护页面（`QTools-M/src/views/qtool/index.vue`、`view.vue`，接口封装在 `src/api/qtool/info.js`），对接后端 `/api/qtool/info/**`；仓库内**未附**这批页面的菜单/权限 SQL，菜单需在「系统管理 · 菜单管理」里自行配置后才会出现在侧边栏。
 
 ## 相关仓库
 
@@ -26,7 +26,7 @@
 | Java | 17 | 编译级别 `java.version=17`（`pom.xml:19`） |
 | 构建 | Maven（多模块） | 父坐标 `com.qtools:qtools:3.9.2`（`pom.xml:7-9`） |
 | 数据库 | MySQL 8 | 库名 `qtools`，JDBC 驱动 `com.mysql.cj.jdbc.Driver` |
-| 缓存 | Redis | 默认 `localhost:6379`、db 0、无密码（`application.yml:75-81`） |
+| 缓存 | Redis | 默认 `localhost:6379`、db 0；口令项 `spring.data.redis.password` 由 `secret.yml` 提供（当前为空）（`application.yml:155-177`） |
 | 连接池 | Druid 1.2.28 | 含监控台 `/druid/*` |
 | 持久层 | MyBatis + PageHelper 2.1.1 | mapper XML 位于各模块 `resources/mapper/**` |
 | 接口文档 | springdoc-openapi 2.9.0 | Swagger UI：`/swagger-ui.html` |
@@ -59,7 +59,7 @@ QTools/
 │       └── resources/
 │           ├── application.yml               # 端口、Redis、token、springdoc、xss 等
 │           ├── application-druid.yml         # 数据源、连接池、Druid 监控台
-│           ├── application-secret.yml.example # 私密配置模板（真实值不入库，复制为 application-secret.yml）
+│           ├── secret.yml.example            # 私密配置模板（真实值不入库，复制为 secret.yml）
 │           ├── logback.xml                   # 控制台彩色 + 文件日志（logs/）
 │           ├── banner.txt                    # 启动横幅（应用版本 / Spring Boot 版本）
 │           └── mybatis/mybatis-config.xml
@@ -74,11 +74,11 @@ QTools/
 ├── qtools-tool/                            # 本项目新增业务模块
 │   └── src/main/
 │       ├── java/com/qtools/tool/
-│       │   ├── controller/                  # ToolInfoController、ToolVisitController（均 @Anonymous）
-│       │   ├── service/ + service/impl/     # IToolInfoService / IToolVisitService 及其实现
-│       │   ├── mapper/                      # ToolInfoMapper、ToolVisitMapper
+│       │   ├── controller/                  # ToolInfoController、ToolVisitController（均 @Anonymous）+ ToolAdminController（后台维护，需鉴权）
+│       │   ├── service/ + service/impl/     # IToolInfoService / IToolVisitService / IToolAdminService 及其实现
+│       │   ├── mapper/                      # ToolInfoMapper、ToolVisitMapper、ToolAdminMapper
 │       │   └── domain/                      # ToolInfo、ToolVisit、dto/ToolVisitAddDTO
-│       └── resources/mapper/tool/           # ToolInfoMapper.xml、ToolVisitMapper.xml
+│       └── resources/mapper/tool/           # ToolInfoMapper.xml、ToolVisitMapper.xml、ToolAdminMapper.xml
 ├── sql/
 │   ├── ry_20260417.sql                      # 若依基础表 + 菜单/字典初始数据
 │   ├── quartz.sql                           # 定时任务表
@@ -115,9 +115,9 @@ curl http://localhost:8080/api/toolInfo/list
   "data": [
     {
       "id": 1,
-      "tool_name": "JSON格式化工具",
-      "tool_desc": "JSON格式化、压缩、语法校验",
-      "tool_route": "/tool/json",
+      "toolName": "JSON格式化工具",
+      "toolDesc": "JSON格式化、压缩、语法校验",
+      "toolRoute": "/tool/json",
       "icon": "Document",
       "sort": 1,
       "status": "0"
@@ -126,14 +126,14 @@ curl http://localhost:8080/api/toolInfo/list
 }
 ```
 
-字段说明（JSON 字段名固定为下划线风格，由 `ToolInfo` 上的 `@JsonProperty` 显式指定，Java 字段仍为驼峰）：
+字段说明（JSON 字段名为**驼峰**，由 `ToolInfo` 上的 `@JsonProperty` 显式指定，与 Java 字段同名；`tool_info` 表的物理列名仍是下划线风格，由 `ToolInfoMapper.xml` 的 `resultMap` 映射）：
 
 | JSON 字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
 | `id` | number | 工具 ID |
-| `tool_name` | string | 工具名称 |
-| `tool_desc` | string | 工具描述 |
-| `tool_route` | string | 前台访问路由，如 `/tool/json` |
+| `toolName` | string | 工具名称 |
+| `toolDesc` | string | 工具描述 |
+| `toolRoute` | string | 前台访问路由，如 `/tool/json` |
 | `icon` | string | 前端 Element Plus 图标组件名 |
 | `sort` | number | 显示顺序（升序） |
 | `status` | string | 状态：`0` 正常、`1` 停用（接口只返回 `0`） |
@@ -164,6 +164,27 @@ curl -X POST http://localhost:8080/api/toolVisit/add \
 { "code": 500, "msg": "toolId不能为空" }
 ```
 
+### 3. 工具维护（后台，需鉴权）
+
+- 控制器：`com.qtools.tool.controller.ToolAdminController`（`qtools-tool/src/main/java/com/qtools/tool/controller/ToolAdminController.java`），类级 `@RequestMapping("/api/qtool/info")`。
+- **与上面两个接口性质不同**：本控制器**没有** `@Anonymous`，每个方法都带 `@PreAuthorize("@ss.hasPermi('...')")`，走若依后台鉴权链——未携带有效后台 token 或权限不足时，按若依默认拒绝（不会进入 `permitAll` 白名单）。写操作另带 `@Log`，记入若依操作日志。
+- 响应字段与匿名列表接口一致（同一个 `ToolInfo` 实体，驼峰命名）。
+
+| 方法 | 路径 | 权限串 | 说明 | 代码位置 |
+| :--- | :--- | :--- | :--- | :--- |
+| GET | `/api/qtool/info/list` | `qtool:admin:list` | 分页查询（`startPage()` → `TableDataInfo`）；过滤条件：`toolName` 模糊匹配，`toolDesc` / `toolRoute` / `icon` / `sort` / `status` 精确匹配 | `ToolAdminController.java:41-48` |
+| POST | `/api/qtool/info/export` | `qtool:admin:export` | 导出 Excel（`ExcelUtil`，sheet 名「工具信息数据」） | `ToolAdminController.java:53-61` |
+| GET | `/api/qtool/info/{id}` | `qtool:admin:query` | 按 id 查详情 | `ToolAdminController.java:66-71` |
+| POST | `/api/qtool/info` | `qtool:admin:add` | 新增 | `ToolAdminController.java:76-82` |
+| PUT | `/api/qtool/info` | `qtool:admin:edit` | 修改 | `ToolAdminController.java:87-93` |
+| DELETE | `/api/qtool/info/{ids}` | `qtool:admin:remove` | 批量删除（路径参数为 id 数组） | `ToolAdminController.java:98-104` |
+
+- 配套实现：`IToolAdminService` / `ToolAdminServiceImpl`；`ToolAdminMapper.java` + `resources/mapper/tool/ToolAdminMapper.xml`（6 个语句：`selectToolInfoList` / `selectToolInfoById` / `insertToolInfo` / `updateToolInfo` / `deleteToolInfoById` / `deleteToolInfoByIds`）。
+- 管理端页面：`QTools-M/src/views/qtool/index.vue`（列表 + 搜索 + 新增 / 修改 / 删除 / 导出按钮）、`view.vue`（详情抽屉），接口封装在 `QTools-M/src/api/qtool/info.js`。
+- **已知不一致（待修）**：管理端导出按钮请求的是 `tool/info/export`（`index.vue:309`），与后端的 `/api/qtool/info/export` 不一致，点导出会打不到本接口；页面上的 `v-hasPermi` 用的是 `tool:info:*`，与后端校验的 `qtool:admin:*` 也不同，配菜单权限时以**后端**的 `qtool:admin:*` 为准。
+
+> 前端字段交叉印证：`QTools-C/src/views/Home.vue` 的 `FALLBACK_TOOLS` 与合并逻辑用的是 `toolName` / `toolDesc` / `toolRoute` / `icon` / `sort`（驼峰），与后端序列化一致。
+
 ## 快速开始
 
 ### 1. 前置依赖
@@ -190,22 +211,25 @@ mysql -uroot -p qtools < sql/qtools/tool_init.sql  # 本项目：tool_info / too
 
 ### 3. 配置私密文件
 
-数据库密码、Druid 控制台口令、`token.secret` 都不入库，仓库里只有模板：
+数据库密码、Redis 口令、后台与用户端的 JWT 密钥都不入库，仓库里只有模板 `secret.yml.example`：
 
 ```bash
 # Windows
-copy qtools-admin\src\main\resources\application-secret.yml.example qtools-admin\src\main\resources\application-secret.yml
+copy qtools-admin\src\main\resources\secret.yml.example qtools-admin\src\main\resources\secret.yml
 # Linux / macOS
-cp qtools-admin/src/main/resources/application-secret.yml.example qtools-admin/src/main/resources/application-secret.yml
+cp qtools-admin/src/main/resources/secret.yml.example qtools-admin/src/main/resources/secret.yml
 ```
 
-然后在 `application-secret.yml` 中填入三项真实值（占位符只是示例，请自行替换）：
+然后在 `secret.yml` 中填入以下键的真实值（占位符只是示例，请自行替换）：
 
-- `spring.datasource.druid.master.password`：MySQL 密码
-- `spring.datasource.druid.statViewServlet.login-password`：Druid 监控台口令
-- `token.secret`：JWT 签名密钥（模板里附了随机生成命令）
+| 键 | 用途 | 备注 |
+| :--- | :--- | :--- |
+| `spring.datasource.druid.master.password` | MySQL 密码 | 可用环境变量 `SPRING_DATASOURCE_DRUID_MASTER_PASSWORD` 覆盖 |
+| `spring.data.redis.password` | Redis 口令 | 便携 Redis 默认无密码，**留空即可** |
+| `token.secret` | 若依后台 JWT 签名密钥（`/login`、`sys_user`） | 模板附了随机生成命令；可用 `TOKEN_SECRET` 覆盖 |
+| `qtools.app.jwt.secret` | 用户端（`/api/app/**`）独立 JWT 密钥 | **必须与 `token.secret` 不同**；缺失、短于 32 字节或与后台相同都会启动失败（`AppJwtService.java:48-66`） |
 
-`application-secret.yml` 已被 `.gitignore` 排除（`.gitignore:52`），不会提交。部署到服务器时建议改用环境变量（见「配置说明」）。
+`secret.yml` 已被 `.gitignore` 排除（`.gitignore:63`；旧名 `application-secret.yml` 也仍在排除列表里，`.gitignore:52`），不会提交。部署到服务器时建议改用环境变量（见「配置说明」）。
 
 ### 4. 打包与启动
 
@@ -238,23 +262,26 @@ curl http://localhost:8080/captchaImage
 | 文件 | 作用 | 关键配置项 |
 | :--- | :--- | :--- |
 | `qtools-admin/src/main/resources/application.yml` | 主配置 | `server.port: 8080`、`spring.profiles.active: druid`、Redis（`localhost:6379` / db 0 / 无密码）、`token.header: Authorization`、`token.expireTime: 30`（分钟）、`springdoc`（`/swagger-ui.html`，扫描包 `com.qtools.web.controller.tool, com.qtools.tool.controller`）、`xss` 过滤（`urlPatterns: /system/*,/monitor/*,/tool/*`）、`qtools.profile`（上传目录） |
-| `qtools-admin/src/main/resources/application-druid.yml` | 数据源与连接池 | 驱动 `com.mysql.cj.jdbc.Driver`、主库 `jdbc:mysql://localhost:3306/qtools?...`、`initialSize: 5` / `minIdle: 10` / `maxActive: 20` / `maxWait: 60000`、慢 SQL 阈值 `slow-sql-millis: 1000`、Druid 监控台 `url-pattern: /druid/*`、`login-username: qtools` |
-| `qtools-admin/src/main/resources/application-secret.yml`（本地创建，不入库） | 私密值 | 数据库密码、Druid 控制台口令、`token.secret` |
-| `application-secret.yml.example` | 私密配置模板 | 同上三项的占位符与生成命令 |
+| `qtools-admin/src/main/resources/application-druid.yml` | 数据源与连接池 | 驱动 `com.mysql.cj.jdbc.Driver`、主库 `jdbc:mysql://localhost:${qtools.db.port:3307}/qtools?...`（**默认端口 3307，不是 3306**）、`initialSize: 5` / `minIdle: 10` / `maxActive: 20` / `maxWait: 60000`、慢 SQL 阈值 `slow-sql-millis: 1000`、Druid 监控台 `url-pattern: /druid/*`、`login-username: qtools` |
+| `qtools-admin/src/main/resources/secret.yml`（本地创建，`.gitignore` 已排除，不入库） | 私密值 | MySQL 密码、Redis 口令（可为空）、`token.secret`、`qtools.app.jwt.secret` |
+| `qtools-admin/src/main/resources/secret.yml.example` | 私密配置模板 | 上述四项的键名、占位符，以及 `token.secret` 的随机生成命令 |
 | `qtools-admin/src/main/resources/logback.xml` | 日志 | 控制台彩色输出；文件日志写入相对目录 `logs/` |
 | `qtools-admin/src/main/resources/banner.txt` | 启动横幅 | 显示应用版本（`qtools.version`）与 Spring Boot 版本 |
 
 ### 密钥外置与环境变量
 
-主配置通过 `spring.config.import: optional:classpath:application-secret.yml`（`application.yml:52`）可选加载私密文件；文件缺失时不报错，但**缺少必填值会导致启动失败**（预期行为，避免误用默认密钥）。
+主配置通过 `spring.config.import: optional:classpath:secret.yml`（`application.yml:132`）可选加载私密文件；文件缺失时不报错，但**缺少必填值会导致启动失败**（预期行为，避免误用默认密钥）。
 
 部署时用环境变量替代私密文件（Spring Boot 宽松绑定：全部大写、`.` 换成 `_`、`-` 删除）：
 
-| 配置项 | 本地（`application-secret.yml`） | 环境变量 |
+| 配置项 | 本地（`secret.yml`） | 环境变量 |
 | :--- | :--- | :--- |
 | MySQL 密码 | `spring.datasource.druid.master.password` | `SPRING_DATASOURCE_DRUID_MASTER_PASSWORD` |
-| JWT 密钥 | `token.secret` | `TOKEN_SECRET` |
-| Druid 控制台口令 | `spring.datasource.druid.statViewServlet.login-password` | 本地私密文件中配置即可（生产环境建议直接关闭监控台） |
+| Redis 口令 | `spring.data.redis.password` | `SPRING_DATA_REDIS_PASSWORD` |
+| 后台 JWT 密钥 | `token.secret` | `TOKEN_SECRET` |
+| 用户端 JWT 密钥 | `qtools.app.jwt.secret` | `QTOOLS_APP_JWT_SECRET` |
+
+> Druid 监控台：`application-druid.yml` 只配置了 `login-username: qtools`（`application-druid.yml:50`），`secret.yml` 及模板里都**没有**控制台口令键——需要口令时请自行在 `application-druid.yml` 补 `statViewServlet.login-password` 并用环境变量注入；生产环境建议直接把 `statViewServlet.enabled` 关掉。
 
 本仓库不保存任何真实密码：`application.yml` 与 `application-druid.yml` 中只有 URL、用户名与注释说明，密码一律由私密文件或环境变量注入。
 
@@ -262,7 +289,7 @@ curl http://localhost:8080/captchaImage
 
 - 日志：控制台带颜色（时间-绿、级别-高亮、线程-黄、类名-青）；文件日志写入相对工作目录的 `logs/`，为 `sys-info.log`、`sys-error.log`、`sys-user.log`（按天滚动，保留 60 天）。以 `java -jar` 启动时，日志目录即当前工作目录下的 `logs/`。
 - 接口文档：`/swagger-ui.html`（OpenAPI JSON 在 `/v3/api-docs`）。
-- Druid 监控台：`/druid/*`，用户名 `qtools`，口令见私密配置。
+- Druid 监控台：`/druid/*`，用户名 `qtools`（`application-druid.yml:50`），**配置里没有设置 `login-password`**——需要口令时请自行补到 `application-druid.yml` 并用环境变量注入。
 - 上述路径已在 `SecurityConfig` 中放行（`SecurityConfig.java:106`）。
 
 ## 二次开发改动清单（相对若依）
@@ -273,19 +300,19 @@ curl http://localhost:8080/captchaImage
 2. **新增业务模块 `qtools-tool`**：工具列表与访问埋点两个匿名接口（`ToolInfoController` / `ToolVisitController`）、`tool_info` 与 `tool_visit` 两张表的建表脚本 `sql/qtools/tool_init.sql`。`qtools-admin` 已依赖该模块。
 3. **修复重命名遗留**：验证码生成器实现类（`CaptchaConfig` 中的 `com.qtools.framework.config.KaptchaTextCreator`，`CaptchaConfig.java:66`）、`Constants` 的 JSON 白名单与定时任务白名单/违规黑名单（`Constants.java:161-172`）、`generator.yml` 的生成包名与作者（`generator.yml:4,6`）、`banner.txt` 的版本占位符（`banner.txt:1-2`）。
 4. **日志**：控制台改为彩色输出；文件日志路径改为相对目录 `logs/`（`logback.xml:4`），不再使用上游以 `/` 开头的绝对路径。
-5. **密钥外置**：数据库密码、Druid 控制台口令、`token.secret` 从 `application-secret.yml`（`.gitignore` 已排除）或环境变量注入，配置文件中不留真实值。
+5. **密钥外置**：数据库密码、Redis 口令、后台 `token.secret`、用户端 `qtools.app.jwt.secret` 从 `secret.yml`（`.gitignore` 已排除，旧名 `application-secret.yml` 也在排除列表）或环境变量注入，配置文件中不留真实值。私密配置文件名由 `application-secret.yml` 改为 `secret.yml`，模板同步改名为 `secret.yml.example`。
 6. **启停脚本**：`ry.sh` / `ry.bat` 的 `AppName` 由上游的 `ruoyi-admin.jar` 改为本项目产物名 `qtools-admin.jar`，脚本可直接使用。
 
 ## 常见问题
 
 1. **启动或首次访问数据库报 `Access denied for user 'root'@'localhost'`**
-   没有 `application-secret.yml` 也没设环境变量，Druid 拿到的密码为空。按「快速开始 · 3」补齐数据库密码；确认 `application-druid.yml` 中的库名/用户名与本地一致。
+   没有 `secret.yml` 也没设环境变量，Druid 拿到的密码为空。按「快速开始 · 3」补齐数据库密码；确认 `application-druid.yml` 中的库名/用户名与本地一致。
 2. **启动报 `Could not resolve placeholder 'token.secret'`**
-   `TokenService` 用 `@Value("${token.secret}")` 且没有默认值（`TokenService.java:42`），密钥缺失时启动中断。在 `application-secret.yml` 里填 `token.secret`，或设置环境变量 `TOKEN_SECRET`。
+   `TokenService` 用 `@Value("${token.secret}")` 且没有默认值（`TokenService.java:42`），密钥缺失时启动中断。在 `secret.yml` 里填 `token.secret`，或设置环境变量 `TOKEN_SECRET`。
 3. **验证码 / 登录接口报 Redis 连接异常**
-   本地没启动 Redis。默认连接 `localhost:6379`、db 0、无密码（`application.yml:75-81`）；Redis 不在本机或改过端口时改这里。应用启动本身不依赖 Redis，两个匿名接口也不经过 Redis。
+   本地没启动 Redis。默认连接 `localhost:6379`、db 0、口令为空（`application.yml:155-177`）；Redis 不在本机或改过端口时改这里。应用启动本身不依赖 Redis，两个匿名接口也不经过 Redis。
 4. **Druid 监控台 `/druid/*` 安全**
-   生产环境建议把 `spring.datasource.druid.statViewServlet.enabled` 设为 `false`，或至少配置 `allow` 白名单/限制来源 IP；默认用户名 `qtools`，口令在私密配置中。
+   生产环境建议把 `spring.datasource.druid.statViewServlet.enabled` 设为 `false`，或至少配置 `allow` 白名单/限制来源 IP；默认用户名 `qtools`，配置中未设 `login-password`（生产环境更应直接关闭监控台）。
 5. **新增公开接口在哪放行？**
    在控制器类或方法上标注 `@Anonymous` 即可，`PermitAllUrlProperties` 会自动把该 URL 加入 Spring Security 的 `permitAll` 白名单；不要为了单个业务接口放宽 `SecurityConfig` 的整体匹配规则。
 
