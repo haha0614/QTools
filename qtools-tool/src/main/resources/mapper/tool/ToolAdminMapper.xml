@@ -14,10 +14,14 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="status"    column="status"    />
         <result property="createTime"    column="create_time"    />
         <result property="updateTime"    column="update_time"    />
+        <result property="visitCount"    column="visit_count"    />
     </resultMap>
 
+    <!-- 访问次数用相关子查询统计（工具数量少，无需 join 分组；tool_visit.tool_id 已有索引） -->
     <sql id="selectToolInfoVo">
-        select id, tool_name, tool_desc, tool_route, icon, sort, status, create_time, update_time from tool_info
+        select t.id, t.tool_name, t.tool_desc, t.tool_route, t.icon, t.sort, t.status, t.create_time, t.update_time,
+               (select count(*) from tool_visit v where v.tool_id = t.id) as visit_count
+        from tool_info t
     </sql>
 
     <select id="selectToolInfoList" parameterType="ToolInfo" resultMap="ToolInfo">

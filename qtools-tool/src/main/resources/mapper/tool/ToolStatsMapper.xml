@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.qtools.tool.mapper.ToolStatsMapper">
+
+    <select id="selectTotalVisits" resultType="java.lang.Long">
+        select count(*) from tool_visit
+    </select>
+
+    <select id="selectTodayVisits" resultType="java.lang.Long">
+        select count(*) from tool_visit
+        where create_time &gt;= curdate() and create_time &lt; curdate() + interval 1 day
+    </select>
+
+    <select id="selectTotalTools" resultType="java.lang.Long">
+        select count(*) from tool_info
+    </select>
+
+    <select id="selectEnabledTools" resultType="java.lang.Long">
+        select count(*) from tool_info where status = '0'
+    </select>
+
+    <!-- 趋势：按天分组；create_time 上的索引（idx_tool_visit_create_time）让范围扫描走索引 -->
+    <select id="selectDailyVisits" resultType="java.util.Map">
+        select date_format(create_time, '%Y-%m-%d') as statDate, count(*) as cnt
+        from tool_visit
+        where create_time &gt;= date_sub(curdate(), interval #{days} day)
+        group by date_format(create_time, '%Y-%m-%d')
+        order by statDate
+    </select>
+
+    <!-- 排行：left join 保证没被访问过的工具也出现（访问次数 0） -->
+    <select id="selectTopTools" resultType="java.util.Map">
+        select t.tool_name  as toolName,
+               t.tool_route as toolRoute,
+               count(v.id)  as visitCount
+        from tool_info t
+        left join tool_visit v on v.tool_id = t.id
+        group by t.id, t.tool_name, t.tool_route
+        order by visitCount desc, t.sort, t.id
+        limit #{limit}
+    </select>
+
+</mapper>

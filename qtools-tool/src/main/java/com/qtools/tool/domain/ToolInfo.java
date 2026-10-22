@@ -43,6 +43,13 @@ public class ToolInfo extends BaseEntity
     @JsonProperty("status")
     private String status;
 
+    /**
+     * 累计访问次数：来自 tool_visit 的统计值，不是 tool_info 的列，
+     * 仅在管理端列表/详情查询时由 SQL 子查询填充（用于工具维护页展示热度）。
+     */
+    @JsonProperty("visitCount")
+    private Long visitCount;
+
     public Long getId()
     {
         return id;
@@ -111,6 +118,16 @@ public class ToolInfo extends BaseEntity
     public void setStatus(String status)
     {
         this.status = status;
+    }
+
+    public Long getVisitCount()
+    {
+        return visitCount;
+    }
+
+    public void setVisitCount(Long visitCount)
+    {
+        this.visitCount = visitCount;
     }
 
     @Override
