@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    媒体统计映射文件（M4）
+
+    "今天"一律用数据库的 curdate()，与 media_event.create_time 的 now() 同源；
+    趋势图取 media_stats_daily（按天预聚合），累计类指标直接扫 media_event。
+    map 结果用 LinkedHashMap，键名按 SQL 别名原样返回给前端（key / title / count / date）。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaStatsMapper">
+
+    <!-- 概览：累计类 -->
+
+    <select id="countTotalEvents" resultType="long">
+        select count(*) from media_event
+    </select>
+
+    <select id="countTodayEvents" resultType="long">
+        select count(*) from media_event
+        where create_time &gt;= curdate()
+          and create_time &lt; date_add(curdate(), interval 1 day)
+    </select>
+
+    <select id="countByEventType" resultType="long">
+        select count(*) from media_event where event_type = #{eventType}
+    </select>
+
+    <select id="sumValueByEventType" resultType="long">
+        select coalesce(sum(value_num), 0) from media_event where event_type = #{eventType}
+    </select>
+
+    <select id="countFavorites" resultType="long">
+        select count(*) from media_favorite
+    </select>
+
+    <!-- 概览：趋势与榜单 -->
+
+    <select id="selectDailyEvents" resultType="java.util.LinkedHashMap">
+        select stat_date, coalesce(sum(cnt), 0) as cnt
+        from media_stats_daily
+        where stat_date &gt;= date_sub(curdate(), interval #{offsetDays} day)
+        group by stat_date
+        order by stat_date asc
+    </select>
+
+    <!-- 视频榜单：先按 target_key 聚合再取 top N，标题走子查询（规避 ONLY_FULL_GROUP_BY） -->
+    <select id="selectTopVideos" resultType="java.util.LinkedHashMap">
+        select t.target_key as `key`,
+               (select v.title from media_video v where v.id = t.target_key) as `title`,
+               t.cnt as `count`
+        from (select target_key, count(*) as cnt
+                from media_event
+               where event_type = 'play' and target_key &lt;&gt; ''
+               group by target_key
+               order by cnt desc, target_key asc
+               limit #{limit}) t
+        order by t.cnt desc, t.target_key asc
+    </select>
+
+    <select id="selectTopPhotos" resultType="java.util.LinkedHashMap">
+        select target_key as `key`, count(*) as `count`
+        from media_event
+        where event_type = 'photo_click' and target_key &lt;&gt; ''
+        group by target_key
+        order by count(*) desc, target_key asc
+        limit #{limit}
+    </select>
+
+    <!-- 按天汇总重建（先删后插，幂等） -->
+
+    <delete id="deleteDailyByDate">
+        delete from media_stats_daily where stat_date = #{statDate}
+    </delete>
+
+    <insert id="rebuildDailyByDate">
+        insert into media_stats_daily (stat_date, event_type, target_type, target_key, cnt, value_sum)
+        select #{statDate}, e.event_type, e.target_type, e.target_key, count(*), coalesce(sum(e.value_num), 0)
+        from media_event e
+        where e.create_time &gt;= #{statDate}
+          and e.create_time &lt; date_add(#{statDate}, interval 1 day)
+        group by e.event_type, e.target_type, e.target_key
+    </insert>
+
+</mapper>

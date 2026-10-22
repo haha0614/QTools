@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    媒体事件埋点映射文件（M4）
+
+    两条语句都只做加法，没有查询：
+      1) insertEvent    —— 明细，create_time 取数据库 now()（与汇总的 curdate() 同一时钟，
+                           避免应用与数据库时区不一致导致"今天"的事件被判到昨天）
+      2) upsertDaily     —— 当天汇总 +1；主键 (stat_date,event_type,target_type,target_key)
+                           命中即累加，MySQL 8 对 VALUES() 会提示 deprecated，但语义与规范一致，先按约定写。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaEventMapper">
+
+    <insert id="insertEvent">
+        insert into media_event (event_type, target_type, target_key, owner_key, value_num, ip, user_agent, create_time)
+        values (#{eventType}, #{targetType}, #{targetKey}, #{ownerKey,jdbcType=VARCHAR}, #{valueNum},
+                #{ip,jdbcType=VARCHAR}, #{userAgent,jdbcType=VARCHAR}, now())
+    </insert>
+
+    <insert id="upsertDaily">
+        insert into media_stats_daily (stat_date, event_type, target_type, target_key, cnt, value_sum)
+        values (curdate(), #{eventType}, #{targetType}, #{targetKey}, 1, #{valueNum})
+        on duplicate key update cnt = cnt + 1, value_sum = value_sum + values(value_sum)
+    </insert>
+
+</mapper>

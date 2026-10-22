@@ -17,6 +17,7 @@ import com.qtools.media.mapper.MediaPhotoMapper;
 import com.qtools.media.mapper.MediaRecentMapper;
 import com.qtools.media.mapper.MediaVideoMapper;
 import com.qtools.media.service.IMediaOwnerService;
+import com.qtools.media.service.IMediaTrackService;
 import com.qtools.media.service.IMediaUserService;
 
 /**
@@ -50,6 +51,11 @@ public class MediaUserServiceImpl implements IMediaUserService
     /** 收藏存量上限，超出淘汰最旧的（对齐 Node FAV_MAX） */
     private static final int FAV_KEEP_MAX = 2000;
 
+    /** 服务端收藏埋点的事件类型 */
+    private static final String EVENT_FAV = "fav";
+
+    private static final String EVENT_UNFAV = "unfav";
+
     /** 标题截断长度（对齐 Node clipText 的 200） */
     private static final int TITLE_MAX = 200;
 
@@ -69,6 +75,9 @@ public class MediaUserServiceImpl implements IMediaUserService
 
     @Autowired
     private IMediaOwnerService mediaOwnerService;
+
+    @Autowired
+    private IMediaTrackService mediaTrackService;
 
     /** 按 owner_key 分段的写锁 */
     private final Object[] writeLocks = new Object[LOCK_STRIPES];
@@ -136,6 +145,7 @@ public class MediaUserServiceImpl implements IMediaUserService
                 throw MediaException.notFound();
             }
             writeFavorite(session.getOwnerKey(), validKind, videoId, null, null);
+            trackQuietly(EVENT_FAV, validKind, videoId, session.getOwnerKey());
         }
         else
         {
@@ -146,6 +156,7 @@ public class MediaUserServiceImpl implements IMediaUserService
                 throw MediaException.notFound();
             }
             writeFavorite(session.getOwnerKey(), validKind, null, albumId, index);
+            trackQuietly(EVENT_FAV, validKind, albumId + ":" + index, session.getOwnerKey());
         }
         return userNode(session);
     }
@@ -160,12 +171,14 @@ public class MediaUserServiceImpl implements IMediaUserService
         {
             String videoId = requireText(id, "video 需要非空 id");
             mediaFavoriteMapper.deleteExact(key, validKind, videoId, null, null);
+            trackQuietly(EVENT_UNFAV, validKind, videoId, key);
         }
         else
         {
             String albumId = requireText(album, "photo 需要非空 album");
             Integer index = requireSeq(seq);
             mediaFavoriteMapper.deleteExact(key, validKind, null, albumId, index);
+            trackQuietly(EVENT_UNFAV, validKind, albumId + ":" + index, key);
         }
         return userNode(session);
     }
@@ -320,6 +333,24 @@ public class MediaUserServiceImpl implements IMediaUserService
                 mediaRecentMapper.touch(ownerKey, kind, targetId, albumId, seq, normalizedPos, normalizedDur);
             }
             mediaRecentMapper.trim(ownerKey, kind, RECENT_MAX);
+        }
+    }
+
+    /**
+     * 收藏 / 取消收藏的服务端埋点（收藏成功后才调用）。
+     *
+     * <p>服务端记录比前端上报可靠：前端可能被拦截器/离线队列丢掉，这里只跟着收藏结果走。
+     * 埋点失败一律吞掉 —— 收藏本身的返回不能因此改变。</p>
+     */
+    private void trackQuietly(String eventType, String targetType, String targetKey, String ownerKey)
+    {
+        try
+        {
+            mediaTrackService.trackEvent(eventType, targetType, targetKey, ownerKey, 0L);
+        }
+        catch (Exception e)
+        {
+            log.warn("收藏埋点写入失败（已忽略）{} {}:{} 原因={}", eventType, targetType, targetKey, e.getMessage());
         }
     }
 
