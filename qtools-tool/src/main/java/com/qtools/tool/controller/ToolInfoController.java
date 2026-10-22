@@ -31,8 +31,8 @@ public class ToolInfoController
     /**
      * 查询工具列表（仅返回 status = '0' 的正常记录，按 sort 升序）
      *
-     * <p>响应结构：{"code":200,"msg":"操作成功","data":[{"id":..,"tool_name":..,"tool_desc":..,
-     * "tool_route":..,"icon":..,"sort":..}]}</p>
+     * <p>响应结构：{"code":200,"msg":"操作成功","data":[{"id":..,"toolName":..,"toolDesc":..,
+     * "toolRoute":..,"icon":..,"sort":..}]}</p>
      *
      * @return 工具列表
      */

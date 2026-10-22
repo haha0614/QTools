@@ -52,7 +52,7 @@ public class AppJwtService
         if (secret == null || secret.isBlank())
         {
             throw new IllegalStateException(
-                    "qtools.app.jwt.secret 未配置：用户端 token 必须使用独立密钥（application-secret.yml 的 qtools.app.jwt.secret）");
+                    "qtools.app.jwt.secret 未配置：用户端 token 必须使用独立密钥（secret.yml 的 qtools.app.jwt.secret）");
         }
         byte[] bytes = secret.getBytes(StandardCharsets.UTF_8);
         if (bytes.length < MIN_SECRET_BYTES)

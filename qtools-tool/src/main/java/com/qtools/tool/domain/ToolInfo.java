@@ -6,7 +6,7 @@ import com.qtools.common.core.domain.BaseEntity;
 /**
  * 工具信息对象 tool_info
  *
- * <p>注意：前端（QTools 前台工具列表页）已按 tool_name / tool_desc / tool_route / icon / sort
+ * <p>注意：前端（QTools 前台工具列表页）已按 toolName / toolDesc / toolRoute / icon / sort
  * 这 6 个固定字段名做映射，因此这里用 {@link JsonProperty} 显式指定序列化名称，Java 字段保持驼峰。</p>
  *
  * @author qtools

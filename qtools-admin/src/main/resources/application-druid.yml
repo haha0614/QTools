@@ -8,7 +8,7 @@ spring:
             master:
                 url: jdbc:mysql://localhost:${qtools.db.port:3307}/qtools?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8
                 username: root
-                # 数据库密码不入库：本地写在 application-secret.yml，部署用环境变量 SPRING_DATASOURCE_DRUID_MASTER_PASSWORD
+                # 数据库密码不入库：本地写在 secret.yml，部署用环境变量 SPRING_DATASOURCE_DRUID_MASTER_PASSWORD
             # 从库数据源
             slave:
                 # 从数据源开关/默认关闭
@@ -46,7 +46,7 @@ spring:
                 # 设置白名单，不填则允许所有访问
                 allow:
                 url-pattern: /druid/*
-                # 控制台管理用户名和密码（密码不入库：见 application-secret.yml）
+                # 控制台管理用户名和密码（密码不入库：见 secret.yml）
                 login-username: qtools
             filter:
                 stat:

@@ -83,7 +83,7 @@ public class AppProperties
     /**
      * 用户端 JWT 配置
      *
-     * <p>{@code secret} 只允许出现在 application-secret.yml（不入库、不入仓、不打进 jar），
+     * <p>{@code secret} 只允许出现在 secret.yml（不入库、不入仓、不打进 jar），
      * 且必须与后台 {@code token.secret} 不同——两套身份互不承认是硬约束。</p>
      */
     public static class Jwt

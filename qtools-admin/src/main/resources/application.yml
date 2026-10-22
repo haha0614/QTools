@@ -54,7 +54,7 @@ qtools:
   # 与若依后台（sys_user + token.secret + /login）完全隔离：两套身份互不承认
   app:
     jwt:
-      # 密钥不入库、不入仓：写在 application-secret.yml 的 qtools.app.jwt.secret
+      # 密钥不入库、不入仓：写在 secret.yml 的 qtools.app.jwt.secret
       # 必须与 token.secret 不同，缺失或与后台相同时启动直接失败
       issuer: qtools-app
       # 有效期（天）
@@ -180,7 +180,7 @@ spring:
 token:
   # 令牌自定义标识
   header: Authorization
-  # 令牌密钥：不入库。本地写在 application-secret.yml，部署用环境变量 TOKEN_SECRET（缺失时会启动报错，属预期的快速失败）
+  # 令牌密钥：不入库。本地写在 secret.yml，部署用环境变量 TOKEN_SECRET（缺失时会启动报错，属预期的快速失败）
   expireTime: 30
 
 # MyBatis配置
