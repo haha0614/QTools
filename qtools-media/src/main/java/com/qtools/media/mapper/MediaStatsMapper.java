@@ -81,6 +81,12 @@ public interface MediaStatsMapper
     /** 视频标题（仅 video 目标有标题，查不到返回 null） */
     String selectVideoTitle(@Param("videoId") String videoId);
 
+    /** 图片标题：相册名 / 文件名（key 形如 albumId:seq，查不到返回 null） */
+    String selectPhotoTitle(@Param("targetKey") String targetKey);
+
+    /** 相册标题（targetType=album 时用，查不到返回 null） */
+    String selectAlbumTitle(@Param("albumId") String albumId);
+
     /** 归档表兜底创建：create table if not exists ... like media_event（幂等 DDL） */
     int createArchiveTable();
 

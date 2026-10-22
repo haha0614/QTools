@@ -226,8 +226,8 @@ public class MediaStatsServiceImpl implements IMediaStatsService
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("targetType", type);
         out.put("targetKey", key);
-        // 只有 video 有单一标题；photo（albumId:seq）/ album 由前端自己拼展示名，这里给 null
-        out.put("title", TARGET_VIDEO.equals(type) ? mediaStatsMapper.selectVideoTitle(key) : null);
+        // 展示名：video 用视频标题；photo 用「相册名 / 文件名」；album 用相册名
+        out.put("title", targetTitle(type, key));
         out.put("playCount", mediaStatsMapper.countTargetEvents(type, key, eventType));
         // play_end / 完播只有 video 有意义，其它类型恒 0（相册与图片没有播放结束事件）
         long playEnd = TARGET_VIDEO.equals(type) ? mediaStatsMapper.countTargetPlayEnd(type, key) : 0L;
@@ -257,6 +257,23 @@ public class MediaStatsServiceImpl implements IMediaStatsService
         return out;
     }
 
+    /** 单目标展示名：video→视频标题，photo→「相册名 / 文件名」，album→相册名；查不到给 null 由前端回退 key */
+    private String targetTitle(String type, String key)
+    {
+        if (TARGET_VIDEO.equals(type))
+        {
+            return mediaStatsMapper.selectVideoTitle(key);
+        }
+        if (TARGET_PHOTO.equals(type))
+        {
+            return mediaStatsMapper.selectPhotoTitle(key);
+        }
+        if (TARGET_ALBUM.equals(type))
+        {
+            return mediaStatsMapper.selectAlbumTitle(key);
+        }
+        return null;
+    }
     /** 单目标的"播放次数"口径：video=play / photo=photo_click / album=album_view */
     private static String countEventType(String targetType)
     {

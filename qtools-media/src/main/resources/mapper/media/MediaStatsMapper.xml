@@ -65,12 +65,20 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         order by t.cnt desc, t.target_key asc
     </select>
 
+    <!-- 图片榜单：key 形如 albumId:seq，这里 join 出「相册名 / 文件名」作为展示标题
+         （图片无 title 字段，文件名取 rel_path 的最后一段并去掉扩展名；查不到时退回 #序号） -->
     <select id="selectTopPhotos" resultType="java.util.LinkedHashMap">
-        select target_key as `key`, count(*) as `count`
-        from media_event
-        where event_type = 'photo_click' and target_key &lt;&gt; ''
-        group by target_key
-        order by count(*) desc, target_key asc
+        select e.target_key as `key`,
+               concat(coalesce(a.title, '未知相册'), ' / ',
+                      coalesce(nullif(substring_index(substring_index(p.rel_path, '/', -1), '.', 1), ''),
+                               concat('#', substring_index(e.target_key, ':', -1)))) as `title`,
+               count(*) as `count`
+        from media_event e
+        left join media_photo p on concat(p.album_id, ':', p.seq) = e.target_key
+        left join media_album a on a.id = p.album_id
+        where e.event_type = 'photo_click' and e.target_key &lt;&gt; ''
+        group by e.target_key, a.title, p.rel_path
+        order by count(*) desc, e.target_key asc
         limit #{limit}
     </select>
 
@@ -152,6 +160,21 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <select id="selectVideoTitle" resultType="java.lang.String">
         select title from media_video where id = #{videoId}
+    </select>
+    <!-- 图片标题：相册名 / 文件名（key = albumId:seq） -->
+    <select id="selectPhotoTitle" resultType="java.lang.String">
+        select concat(coalesce(a.title, '未知相册'), ' / ',
+                      coalesce(nullif(substring_index(substring_index(p.rel_path, '/', -1), '.', 1), ''),
+                               concat('#', p.seq)))
+        from media_photo p
+        left join media_album a on a.id = p.album_id
+        where p.album_id = substring_index(#{targetKey}, ':', 1)
+          and p.seq = cast(substring_index(#{targetKey}, ':', -1) as signed)
+    </select>
+
+    <!-- 相册标题（key = album_id） -->
+    <select id="selectAlbumTitle" resultType="java.lang.String">
+        select title from media_album where id = #{albumId}
     </select>
 
     <!-- 明细归档：归档表结构与 media_event 一致，主键 id 原样搬过去 -->
