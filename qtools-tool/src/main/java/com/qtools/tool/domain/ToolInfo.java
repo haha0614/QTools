@@ -20,15 +20,15 @@ public class ToolInfo extends BaseEntity
     private Long id;
 
     /** 工具名称 */
-    @JsonProperty("tool_name")
+    @JsonProperty("toolName")
     private String toolName;
 
     /** 工具描述 */
-    @JsonProperty("tool_desc")
+    @JsonProperty("toolDesc")
     private String toolDesc;
 
     /** 前端访问路由 */
-    @JsonProperty("tool_route")
+    @JsonProperty("toolRoute")
     private String toolRoute;
 
     /** 图标名称（前端 Element Plus 图标组件名） */
