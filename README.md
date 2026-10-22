@@ -7,7 +7,7 @@
 - 本仓库是「青兔在线工具箱」的后端服务，技术栈为 Java 17 + Spring Boot 3 + MyBatis + MySQL + Redis。
 - 前台用户站 QTools-C 通过两个**匿名**接口读取工具列表、上报访问埋点；管理后台 QTools-M 使用若依自带的登录与系统管理接口（用户 / 角色 / 菜单 / 字典 / 定时任务 / 代码生成等），另有工具维护接口 `/api/qtool/info/**`（走若依后台鉴权，权限串 `qtool:admin:*`，**不是**匿名接口）。
 - 相对上游若依，本仓库做了两件事：① 模块与包整体重命名（`ruoyi-*` → `qtools-*`，`com.ruoyi` → `com.qtools`）；② 新增业务模块 `qtools-tool`（前台工具列表 + 访问埋点 + 后台工具维护）。
-- 工具的基础数据由 `sql/qtools/tool_init.sql` 初始化（JSON 格式化、文本字数统计、随机密码生成共 3 条）。
+- 工具的基础数据由 `sql/qtools/tool_init.sql` 初始化（JSON 格式化、文本字数统计、随机密码生成、媒体站共 4 条）。
 - 管理端已有工具维护页面（`QTools-M/src/views/qtool/index.vue`、`view.vue`，接口封装在 `src/api/qtool/info.js`），对接后端 `/api/qtool/info/**`；仓库内**未附**这批页面的菜单/权限 SQL，菜单需在「系统管理 · 菜单管理」里自行配置后才会出现在侧边栏。
 
 ## 相关仓库
@@ -82,7 +82,7 @@ QTools/
 ├── sql/
 │   ├── ry_20260417.sql                      # 若依基础表 + 菜单/字典初始数据
 │   ├── quartz.sql                           # 定时任务表
-│   └── qtools/tool_init.sql                 # 本项目：tool_info / tool_visit + 3 条工具数据
+│   └── qtools/tool_init.sql                 # 本项目：tool_info / tool_visit + 4 条工具数据
 ├── ry.bat / ry.sh                           # 若依自带的启停脚本（注意下方说明）
 ├── bin/                                     # 若依自带的 clean/package/run 批处理
 ├── doc/                                     # 若依环境使用手册
@@ -204,7 +204,7 @@ curl -X POST http://localhost:8080/api/toolVisit/add \
 mysql -uroot -p -e "create database qtools default charset utf8mb4;"
 mysql -uroot -p qtools < sql/ry_20260417.sql       # 若依基础表 + 菜单/字典初始数据
 mysql -uroot -p qtools < sql/quartz.sql            # 定时任务表
-mysql -uroot -p qtools < sql/qtools/tool_init.sql  # 本项目：tool_info / tool_visit + 3 条工具数据(id 1/2/3)
+mysql -uroot -p qtools < sql/qtools/tool_init.sql  # 本项目：tool_info / tool_visit + 4 条工具数据(id 1/2/3/4)
 ```
 
 `tool_init.sql` 使用 `create table if not exists` 与 `insert ... on duplicate key update`，可重复执行。
@@ -251,7 +251,7 @@ curl -X POST http://localhost:8080/api/toolVisit/add -H "Content-Type: applicati
 curl http://localhost:8080/captchaImage
 ```
 
-- 工具列表接口返回 `code: 200` 且 `data` 有 3 条数据，说明数据库与 `tool_info` 数据正常。
+- 工具列表接口返回 `code: 200` 且 `data` 有 4 条数据，说明数据库与 `tool_info` 数据正常。
 - 埋点接口返回 `code: 200` 后，可查 `tool_visit` 表确认记录写入。
 - 接口文档：<http://localhost:8080/swagger-ui.html>；Druid 监控台：<http://localhost:8080/druid/>。
 
@@ -291,6 +291,25 @@ curl http://localhost:8080/captchaImage
 - 接口文档：`/swagger-ui.html`（OpenAPI JSON 在 `/v3/api-docs`）。
 - Druid 监控台：`/druid/*`，用户名 `qtools`（`application-druid.yml:50`），**配置里没有设置 `login-password`**——需要口令时请自行补到 `application-druid.yml` 并用环境变量注入。
 - 上述路径已在 `SecurityConfig` 中放行（`SecurityConfig.java:106`）。
+
+## 换成你自己的内容
+
+本项目出厂带的是「青兔在线工具箱」的站点名、工具列表与媒体内容。要换成自己的，按下面五件事走一遍即可，不用改代码逻辑：
+
+| 想换什么 | 改哪里 | 是否要重建 |
+| :--- | :--- | :--- |
+| 站点名 / 标语 / 版权 | 前台 `QTools-C` 的 `src/utils/constants.js`（`APP_INFO`） | 要（前台） |
+| 管理端标题 / 页脚 | `QTools-M` 的 `.env.*`（`VITE_APP_TITLE`）与 `src/settings.js`（`footerContent`） | 要（管理端） |
+| 工具卡片 | 库表 `tool_info`（管理端「工具维护」增删改）；兜底数据在 `QTools-C/src/views/Home.vue` 的 `FALLBACK_TOOLS` | 改库不要，改兜底要 |
+| 媒体内容 | 媒体根目录 + `doc/media-import/scan-media.js`（扫盘建库）+ `doc/media-import/build-thumbs.js`（缩略图） | 不要 |
+| 私密值 / 部署根路径 | `secret.yml`（模板 `secret.yml.example`）、`-Dqtools.home` | 不要（重启生效） |
+
+两个最容易踩的坑：
+
+- 媒体内容用 `doc/media-import/scan-media.js`（扫盘 → 建库）与 `build-thumbs.js`（按库内记录出缩略图）两条命令，前者 `--truncate` 必须同时给 `--yes`，管理端「重建索引」会自动过滤掉 `--truncate`。
+- 改完工具列表记得同步 `FALLBACK_TOOLS`，否则后端不可用时首页会显示**旧的**工具卡片。
+
+字段级改造清单、媒体目录约定与两条导入命令、`qtools.media.*` 配置项对照表、`/api/media/admin/config` 自检、分步迁移 checklist，见 **[自定义与迁移指南](doc/自定义与迁移指南.md)**。
 
 ## 二次开发改动清单（相对若依）
 

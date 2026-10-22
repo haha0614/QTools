@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.qtools.common.annotation.Log;
 import com.qtools.common.core.controller.BaseController;
+import com.qtools.common.core.domain.AjaxResult;
 import com.qtools.common.core.page.TableDataInfo;
 import com.qtools.common.enums.BusinessType;
 import com.qtools.common.utils.StringUtils;
@@ -114,6 +115,23 @@ public class MediaAdminController extends BaseController
     public Map<String, Object> stats()
     {
         return mediaAdminService.stats();
+    }
+
+    /**
+     * 配置自检：把项目搬到自己的环境后，先用它确认路径 / ffmpeg / node / 脚本都配对了
+     *
+     * <p>返回 {@code data} 内 {home, media:{rootPath:{value,exists,readable,writable,fileCount},
+     * thumbsPath, trashPath, ffmpeg:{value,exists,executable}, nodePath, scanScript, thumbScript,
+     * scanOutPath:{value,exists,writable}, maxTranscode, scanArgs},
+     * counts:{videos,albums,photos,trashEntries}, warnings:[...]}。</p>
+     *
+     * <p>不返回任何密钥 / 密码，只回路径；单项检查失败只进 warnings，本接口自身不会 500。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/config")
+    public AjaxResult config()
+    {
+        return AjaxResult.success(mediaAdminService.config());
     }
 
     // ------------------------------------------------------------------ 隐藏位

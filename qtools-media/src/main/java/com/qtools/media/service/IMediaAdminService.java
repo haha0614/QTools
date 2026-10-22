@@ -72,6 +72,17 @@ public interface IMediaAdminService
     /** 占用统计 */
     Map<String, Object> stats();
 
+    /**
+     * 配置自检（{@code GET /api/media/admin/config}）
+     *
+     * <p>逐项检查 {@code qtools.media.*} 的路径是否存在 / 可读 / 可写、ffmpeg 与 node 是否可执行、
+     * 脚本是否就位，并汇总库内条数。本方法<b>不抛异常</b>：任何单项检查失败只往 warnings 里记一条可读文案。</p>
+     *
+     * @return {home, media:{rootPath,thumbsPath,trashPath,ffmpeg,nodePath,scanScript,thumbScript,scanOutPath,
+     *         maxTranscode,scanArgs}, counts:{videos,albums,photos,trashEntries}, warnings:[...]}
+     */
+    Map<String, Object> config();
+
     /** 人物列表（id/name/albumCount/photoCount） */
     List<Map<String, Object>> people();
 

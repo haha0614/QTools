@@ -5,6 +5,7 @@ import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.LocalDateTime;
@@ -16,17 +17,20 @@ import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import com.github.pagehelper.PageInfo;
 import com.qtools.common.core.page.TableDataInfo;
 import com.qtools.common.utils.DateUtils;
 import com.qtools.common.utils.StringUtils;
+import com.qtools.media.config.MediaProperties;
 import com.qtools.media.domain.MediaAlbum;
 import com.qtools.media.domain.MediaPerson;
 import com.qtools.media.domain.MediaPhoto;
@@ -107,6 +111,13 @@ public class MediaAdminServiceImpl implements IMediaAdminService
 
     @Autowired
     private IMediaIndexService mediaIndexService;
+
+    @Autowired
+    private MediaProperties mediaProperties;
+
+    /** 盘上根目录 {@code qtools.home}（application.yml 缺省 E:/111），只用于配置自检回显 */
+    @Value("${qtools.home:}")
+    private String home;
 
     // ------------------------------------------------------------------ 列表
 
@@ -624,6 +635,307 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         out.put("trashBytes", trashBytes());
         out.put("trashCount", trashCount());
         return out;
+    }
+
+    // ------------------------------------------------------------------ 配置自检
+
+    @Override
+    public Map<String, Object> config()
+    {
+        List<String> warnings = new ArrayList<>();
+        Map<String, Object> media = new LinkedHashMap<>();
+        try
+        {
+            media.put("rootPath", dirNode(mediaProperties.getRootPath(), "rootPath", "媒体根", true, false, warnings));
+            media.put("thumbsPath",
+                    dirNode(mediaProperties.getThumbsPath(), "thumbsPath", "缩略图根", false, true, warnings));
+            media.put("trashPath", trashNode(warnings));
+            media.put("ffmpeg", fileNode(mediaProperties.getFfmpeg(), "ffmpeg", "ffmpeg", true, warnings));
+            media.put("nodePath", fileNode(mediaProperties.getNodePath(), "nodePath", "Node", true, warnings));
+            media.put("scanScript", fileNode(mediaProperties.getScanScript(), "scanScript", "扫描脚本", false, warnings));
+            media.put("thumbScript",
+                    fileNode(mediaProperties.getThumbScript(), "thumbScript", "缩略图脚本", false, warnings));
+            media.put("scanOutPath", scanOutNode(mediaProperties.getScanOutPath(), warnings));
+            media.put("maxTranscode", Math.max(1, mediaProperties.getMaxTranscode()));
+            media.put("scanArgs", mediaProperties.getScanArgs() == null ? "" : mediaProperties.getScanArgs());
+        }
+        catch (RuntimeException e)
+        {
+            // 兜底：自检接口本身绝不能让管理端 500
+            warnings.add("自检执行异常: " + message(e));
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("home", normalizePath(home));
+        out.put("media", media);
+        out.put("counts", counts(warnings));
+        out.put("warnings", warnings);
+        return out;
+    }
+
+    /** 库内条数：复用 selectCounts（hidden=0 口径，与 /stats 一致）+ 回收站对象数 */
+    private Map<String, Object> counts(List<String> warnings)
+    {
+        long videos = 0L;
+        long albums = 0L;
+        long photos = 0L;
+        try
+        {
+            Map<String, Object> row = mediaAdminMapper.selectCounts();
+            if (row != null)
+            {
+                videos = longOf(row.get("videos"));
+                albums = longOf(row.get("albums"));
+                photos = longOf(row.get("photos"));
+            }
+        }
+        catch (RuntimeException e)
+        {
+            warnings.add("库内条数查询失败（数据库不可用？）: " + message(e));
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("videos", videos);
+        out.put("albums", albums);
+        out.put("photos", photos);
+        try
+        {
+            out.put("trashEntries", trashCount());
+        }
+        catch (RuntimeException e)
+        {
+            // 取不到就不给这个键（契约允许省略），原因进 warnings
+            warnings.add("回收站条目统计失败: " + message(e));
+        }
+        return out;
+    }
+
+    /**
+     * 目录型检查项：{@code {value, exists, readable, writable}}，{@code withFileCount} 时附一级子项数
+     *
+     * <p>媒体根只读是设计如此，因此它不因 writable=false 报警；缩略图根 / 回收站根不可写才是异常。</p>
+     */
+    private static Map<String, Object> dirNode(String raw, String key, String label, boolean withFileCount,
+            boolean warnIfNotWritable, List<String> warnings)
+    {
+        String value = normalizePath(raw);
+        Path path = toPath(value);
+        boolean exists = probe(path, Files::exists);
+        boolean directory = probe(path, Files::isDirectory);
+        boolean readable = probe(path, Files::isReadable);
+        boolean writable = probe(path, Files::isWritable);
+        if (value.isEmpty())
+        {
+            warnings.add(label + " 未配置（qtools.media." + key + "，可用环境变量 " + envNameOf(key) + " 覆盖）");
+        }
+        else if (path == null)
+        {
+            warnings.add(label + " 路径非法: " + value);
+        }
+        else if (!exists)
+        {
+            warnings.add(label + " 不存在: " + value);
+        }
+        else
+        {
+            if (!directory)
+            {
+                warnings.add(label + " 不是目录: " + value);
+            }
+            if (!readable)
+            {
+                warnings.add(label + " 不可读: " + value);
+            }
+            if (warnIfNotWritable && !writable)
+            {
+                warnings.add(label + " 不可写: " + value);
+            }
+        }
+
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("value", value);
+        node.put("exists", exists);
+        node.put("readable", readable);
+        node.put("writable", writable);
+        if (withFileCount)
+        {
+            long fileCount = directory ? countChildren(path) : 0L;
+            node.put("fileCount", fileCount);
+            if (directory && fileCount == 0L)
+            {
+                warnings.add(label + " 为空目录: " + value);
+            }
+        }
+        return node;
+    }
+
+    /** 文件型检查项：{@code {value, exists}}，{@code executable} 时附 isExecutable */
+    private static Map<String, Object> fileNode(String raw, String key, String label, boolean executable,
+            List<String> warnings)
+    {
+        String value = normalizePath(raw);
+        Path path = toPath(value);
+        boolean exists = probe(path, Files::exists);
+        if (value.isEmpty())
+        {
+            warnings.add(label + " 未配置（qtools.media." + key + "，可用环境变量 " + envNameOf(key) + " 覆盖）");
+        }
+        else if (path == null)
+        {
+            warnings.add(label + " 路径非法: " + value);
+        }
+        else if (!exists)
+        {
+            warnings.add(label + " 不存在: " + value);
+        }
+
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("value", value);
+        node.put("exists", exists);
+        if (executable)
+        {
+            boolean canRun = probe(path, Files::isExecutable);
+            node.put("executable", canRun);
+            if (exists && !canRun)
+            {
+                warnings.add(label + " 不可执行: " + value);
+            }
+        }
+        return node;
+    }
+
+    /** 扫描产物目录：{@code {value, exists, writable}}（不存在时扫描任务会自动创建） */
+    private static Map<String, Object> scanOutNode(String raw, List<String> warnings)
+    {
+        String value = normalizePath(raw);
+        Path path = toPath(value);
+        boolean exists = probe(path, Files::exists);
+        boolean writable = probe(path, Files::isWritable);
+        if (value.isEmpty())
+        {
+            warnings.add("扫描产物目录 未配置（qtools.media.scanOutPath，可用环境变量 QTOOLS_MEDIA_SCANOUTPATH 覆盖）");
+        }
+        else if (!exists)
+        {
+            warnings.add("扫描产物目录不存在（扫描时会自动创建，需父目录可写）: " + value);
+        }
+        else if (!writable)
+        {
+            warnings.add("扫描产物目录不可写: " + value);
+        }
+
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("value", value);
+        node.put("exists", exists);
+        node.put("writable", writable);
+        return node;
+    }
+
+    /** 回收站根：trashPath 留空时回显实际生效的 {@code <rootPath>/_媒体站/trash} */
+    private Map<String, Object> trashNode(List<String> warnings)
+    {
+        String configured = normalizePath(mediaProperties.getTrashPath());
+        if (!configured.isEmpty())
+        {
+            return dirNode(configured, "trashPath", "回收站根", false, true, warnings);
+        }
+        String effective = "";
+        try
+        {
+            effective = normalizePath(mediaFileService.trashRoot().toString());
+        }
+        catch (RuntimeException e)
+        {
+            // 媒体根也没配好：由 rootPath 那条 warning 表达原因，这里只回空节点
+            effective = "";
+        }
+        if (effective.isEmpty())
+        {
+            warnings.add("回收站根无法确定：qtools.media.rootPath 未配置");
+            Map<String, Object> node = new LinkedHashMap<>();
+            node.put("value", "");
+            node.put("exists", false);
+            node.put("readable", false);
+            node.put("writable", false);
+            return node;
+        }
+        return dirNode(effective, "trashPath", "回收站根", false, true, warnings);
+    }
+
+    /** 一级子项数量（不递归：媒体根有上万文件，自检不能全量扫描） */
+    private static long countChildren(Path dir)
+    {
+        if (!probe(dir, Files::isDirectory))
+        {
+            return 0L;
+        }
+        try (Stream<Path> children = Files.list(dir))
+        {
+            return children.count();
+        }
+        catch (IOException | RuntimeException e)
+        {
+            return 0L;
+        }
+    }
+
+    /** 配置值 → Path；空值或非法路径返回 null（不抛 InvalidPathException） */
+    private static Path toPath(String value)
+    {
+        if (value == null || value.isEmpty())
+        {
+            return null;
+        }
+        try
+        {
+            return Paths.get(value);
+        }
+        catch (InvalidPathException e)
+        {
+            return null;
+        }
+    }
+
+    private static boolean probe(Path path, Predicate<Path> check)
+    {
+        if (path == null)
+        {
+            return false;
+        }
+        try
+        {
+            return check.test(path);
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
+    }
+
+    /** 统一成正斜杠并去掉尾部斜杠（与媒体接口里的相对路径风格一致） */
+    private static String normalizePath(String raw)
+    {
+        if (raw == null)
+        {
+            return "";
+        }
+        String text = raw.trim().replace('\\', '/');
+        while (text.length() > 3 && text.endsWith("/"))
+        {
+            text = text.substring(0, text.length() - 1);
+        }
+        return text;
+    }
+
+    /** qtools.media.scanOutPath → QTOOLS_MEDIA_SCANOUTPATH（与 Spring 宽松绑定一致） */
+    private static String envNameOf(String key)
+    {
+        return ("qtools.media." + key).replace('.', '_').toUpperCase();
+    }
+
+    private static String message(Throwable e)
+    {
+        String text = e.getMessage();
+        return text == null || text.isEmpty() ? e.getClass().getSimpleName() : text;
     }
 
     @Override

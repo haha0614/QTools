@@ -127,7 +127,7 @@ public class MediaStreamServiceImpl implements IMediaStreamService
     {
         if (!isFfmpegAvailable())
         {
-            throw new MediaException(503, "ffmpeg 不可用，无法转码");
+            throw new MediaException(503, "ffmpeg 不可用，无法转码（请配置 qtools.media.ffmpeg / QTOOLS_MEDIA_FFMPEG）");
         }
         if (StringUtils.isEmpty(p))
         {

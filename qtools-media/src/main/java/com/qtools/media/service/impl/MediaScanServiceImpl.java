@@ -119,6 +119,12 @@ public class MediaScanServiceImpl implements IMediaScanService
         {
             throw MediaException.badRequest("type 只能是 full / thumb");
         }
+        // 配置缺失必须在建 job 之前就报可读错误：否则子进程只会给 CreateProcess error=2 / NPE
+        boolean thumb = "thumb".equals(jobType);
+        requireConfigured(mediaProperties.getNodePath(), "nodePath");
+        requireConfigured(mediaProperties.getScanOutPath(), "scanOutPath");
+        requireConfigured(thumb ? mediaProperties.getThumbScript() : mediaProperties.getScanScript(),
+                thumb ? "thumbScript" : "scanScript");
         synchronized (startLock)
         {
             if (runningJobId.get() != 0L || mediaScanJobMapper.countRunning() > 0)
@@ -180,7 +186,9 @@ public class MediaScanServiceImpl implements IMediaScanService
         {
             ProcessBuilder builder = new ProcessBuilder(thumb ? buildThumbCommand() : buildCommand());
             // 子进程工作目录必须先存在（import.js 会把 import.sql / report.md 写进去）
-            File outDir = new File(mediaProperties.getScanOutPath());
+            String outPath = mediaProperties.getScanOutPath();
+            requireConfigured(outPath, "scanOutPath");
+            File outDir = new File(outPath);
             Files.createDirectories(outDir.toPath());
             builder.directory(outDir);
             builder.redirectErrorStream(true);
@@ -303,11 +311,50 @@ public class MediaScanServiceImpl implements IMediaScanService
         }
     }
 
+    /** node 可执行文件：未配置或不存在都给可读错误（子进程报的 CreateProcess error=2 定位不到配置项） */
+    private String requireNode()
+    {
+        String node = mediaProperties.getNodePath();
+        requireConfigured(node, "nodePath");
+        if (!new File(node).isFile())
+        {
+            throw new MediaException(500, "qtools.media.nodePath 不存在: " + node);
+        }
+        return node;
+    }
+
+    /** 脚本文件：未配置或不存在都给可读错误 */
+    private static String requireScript(String script, String key)
+    {
+        requireConfigured(script, key);
+        if (!new File(script).isFile())
+        {
+            throw new MediaException(500, "qtools.media." + key + " 不存在: " + script);
+        }
+        return script;
+    }
+
+    /** 必填配置校验：空白视为未配置，错误里带上环境变量覆盖名，方便照着配 */
+    private static void requireConfigured(String value, String key)
+    {
+        if (value == null || value.trim().isEmpty())
+        {
+            throw new MediaException(500, "未配置 qtools.media." + key + "（请在 application.yml 或环境变量 "
+                    + envNameOf(key) + " 中提供）");
+        }
+    }
+
+    /** qtools.media.scanOutPath → QTOOLS_MEDIA_SCANOUTPATH（与 Spring 宽松绑定一致） */
+    private static String envNameOf(String key)
+    {
+        return ("qtools.media." + key).replace('.', '_').toUpperCase();
+    }
+
     private String[] buildCommand()
     {
         List<String> command = new ArrayList<>();
-        command.add(mediaProperties.getNodePath());
-        command.add(mediaProperties.getScanScript());
+        command.add(requireNode());
+        command.add(requireScript(mediaProperties.getScanScript(), "scanScript"));
         command.add("--out=" + mediaProperties.getScanOutPath());
         String extra = mediaProperties.getScanArgs();
         if (StringUtils.isNotEmpty(extra))
@@ -333,13 +380,9 @@ public class MediaScanServiceImpl implements IMediaScanService
      */
     private String[] buildThumbCommand()
     {
-        String script = mediaProperties.getThumbScript();
-        if (StringUtils.isEmpty(script) || !new File(script).isFile())
-        {
-            throw new MediaException(500, "qtools.media.thumbScript 不存在: " + script);
-        }
+        String script = requireScript(mediaProperties.getThumbScript(), "thumbScript");
         List<String> command = new ArrayList<>();
-        command.add(mediaProperties.getNodePath());
+        command.add(requireNode());
         command.add(script);
         String extra = mediaProperties.getThumbArgs();
         if (StringUtils.isNotEmpty(extra))

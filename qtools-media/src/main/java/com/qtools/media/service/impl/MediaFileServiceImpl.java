@@ -360,9 +360,10 @@ public class MediaFileServiceImpl implements IMediaFileService
 
     private Path toRealDir(String configured, String key)
     {
-        if (StringUtils.isEmpty(configured))
+        if (StringUtils.isEmpty(configured) || configured.trim().isEmpty())
         {
-            throw new MediaException(500, key + " 未配置");
+            throw new MediaException(500, key + " 未配置（请在 application.yml 或环境变量 "
+                    + key.replace('.', '_').toUpperCase() + " 中提供）");
         }
         try
         {
