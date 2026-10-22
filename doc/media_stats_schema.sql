@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS media_event (
   target_key  VARCHAR(64)  NOT NULL DEFAULT ''                 COMMENT '目标标识：video=media_video.id；photo=albumId:seq；album=media_album.id；page=路径',
   owner_key   VARCHAR(64)  NULL                                COMMENT '设备/账号标识（与 media_owner.owner_key 一致；匿名上报未带时为空）',
   value_num   BIGINT       NOT NULL DEFAULT 0                  COMMENT '数值：播放时长ms / 停留时长ms / 其他数值，非数值事件为 0',
+  progress    TINYINT UNSIGNED NOT NULL DEFAULT 0              COMMENT '播放进度百分比 0-100（仅 play_end 有意义）',
   ip          VARCHAR(64)  NULL                                COMMENT '客户端IP',
   user_agent  VARCHAR(512) NULL                                COMMENT 'User-Agent（超长按 512 截断）',
   create_time DATETIME     NULL                                COMMENT '事件时间',
@@ -27,6 +28,11 @@ CREATE TABLE IF NOT EXISTS media_event (
   KEY idx_media_event_time (create_time),
   KEY idx_media_event_target (target_type, target_key, event_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='媒体-事件埋点';
+
+-- 明细归档表：结构与 media_event 完全一致（like 会连索引一起复制）。
+-- 用途：明细超过保留期后整段搬走，防止 media_event 无限膨胀；只保留、不提供查询接口，
+--      以后想分析历史数据时手工查这张表即可。
+CREATE TABLE IF NOT EXISTS media_event_archive LIKE media_event;
 
 CREATE TABLE IF NOT EXISTS media_stats_daily (
   stat_date   DATE        NOT NULL                             COMMENT '统计日期',

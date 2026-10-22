@@ -45,6 +45,12 @@ public class MediaTrackServiceImpl implements IMediaTrackService
 
     private static final int USER_AGENT_MAX = 512;
 
+    /** 播放结束事件（唯一让 progress 有意义的事件类型） */
+    private static final String EVENT_PLAY_END = "play_end";
+
+    /** 进度百分比上限 */
+    private static final int PROGRESS_MAX = 100;
+
     @Autowired
     private MediaEventMapper mediaEventMapper;
 
@@ -56,11 +62,13 @@ public class MediaTrackServiceImpl implements IMediaTrackService
             log.debug("媒体埋点入参为空，已忽略");
             return;
         }
-        trackEvent(dto.getEventType(), dto.getTargetType(), dto.getTargetKey(), dto.getOwnerKey(), dto.getValueNum());
+        trackEvent(dto.getEventType(), dto.getTargetType(), dto.getTargetKey(), dto.getOwnerKey(), dto.getValueNum(),
+                dto.getProgress());
     }
 
     @Override
-    public void trackEvent(String eventType, String targetType, String targetKey, String ownerKey, Long valueNum)
+    public void trackEvent(String eventType, String targetType, String targetKey, String ownerKey, Long valueNum,
+            Integer progress)
     {
         String type = trimToNull(eventType);
         String target = trimToNull(targetType);
@@ -77,9 +85,10 @@ public class MediaTrackServiceImpl implements IMediaTrackService
         String key = clip(trimToNull(targetKey), TARGET_KEY_MAX);
         String owner = clip(trimToNull(ownerKey), OWNER_KEY_MAX);
         long value = valueNum == null || valueNum < 0 ? 0L : valueNum;
+        int percent = clampProgress(type, progress);
         try
         {
-            mediaEventMapper.insertEvent(type, target, key, owner, value, currentIp(), currentUserAgent());
+            mediaEventMapper.insertEvent(type, target, key, owner, value, percent, currentIp(), currentUserAgent());
             mediaEventMapper.upsertDaily(type, target, key, value);
         }
         catch (Exception e)
@@ -93,6 +102,23 @@ public class MediaTrackServiceImpl implements IMediaTrackService
     private static String currentIp()
     {
         return clip(IpUtils.getIpAddr(), IP_MAX);
+    }
+
+    /**
+     * 服务端夹取播放进度，不信任客户端：
+     * 非 play_end 事件一律 0；play_end 时缺省 0，越界按 [0,100] 边界截断。
+     */
+    private static int clampProgress(String eventType, Integer progress)
+    {
+        if (!EVENT_PLAY_END.equals(eventType) || progress == null)
+        {
+            return 0;
+        }
+        if (progress < 0)
+        {
+            return 0;
+        }
+        return Math.min(progress, PROGRESS_MAX);
     }
 
     private static String currentUserAgent()

@@ -9,6 +9,9 @@ import jakarta.validation.constraints.Size;
  * <p>请求体形如：{@code {"eventType":"play","targetType":"video","targetKey":"a1b2c3d4e5f6",
  * "ownerKey":"ms-xxxx","valueNum":1234}}</p>
  *
+ * <p>播放结束时额外带上进度：{@code {"eventType":"play_end","targetType":"video",
+ * "targetKey":"a1b2c3d4e5f6","ownerKey":"ms-xxxx","valueNum":15300,"progress":100}}。</p>
+ *
  * <p>本 DTO 的约束只用于声明契约：校验失败不会把错误抛给前端，控制器内部有
  * {@code @ExceptionHandler} 统一回 {@code AjaxResult.success()}（埋点失败绝不能影响页面）。</p>
  *
@@ -34,6 +37,9 @@ public class MediaTrackDTO
 
     /** 数值：播放时长ms / 停留时长ms / 其他数值，缺省 0 */
     private Long valueNum;
+
+    /** 播放进度百分比 0-100（只有 play_end 有意义；服务端夹取到该区间，非 play_end 一律落 0） */
+    private Integer progress;
 
     public String getEventType()
     {
@@ -85,10 +91,20 @@ public class MediaTrackDTO
         this.valueNum = valueNum;
     }
 
+    public Integer getProgress()
+    {
+        return progress;
+    }
+
+    public void setProgress(Integer progress)
+    {
+        this.progress = progress;
+    }
+
     @Override
     public String toString()
     {
         return "MediaTrackDTO [eventType=" + eventType + ", targetType=" + targetType + ", targetKey=" + targetKey
-                + ", ownerKey=" + ownerKey + ", valueNum=" + valueNum + "]";
+                + ", ownerKey=" + ownerKey + ", valueNum=" + valueNum + ", progress=" + progress + "]";
     }
 }

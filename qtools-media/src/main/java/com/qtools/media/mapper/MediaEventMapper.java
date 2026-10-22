@@ -17,7 +17,8 @@ public interface MediaEventMapper
     /** 插入一条事件明细（create_time 用数据库 now()，与汇总用的 curdate() 同一时钟） */
     int insertEvent(@Param("eventType") String eventType, @Param("targetType") String targetType,
             @Param("targetKey") String targetKey, @Param("ownerKey") String ownerKey,
-            @Param("valueNum") long valueNum, @Param("ip") String ip, @Param("userAgent") String userAgent);
+            @Param("valueNum") long valueNum, @Param("progress") int progress, @Param("ip") String ip,
+            @Param("userAgent") String userAgent);
 
     /** 当天汇总 +1（同日同类型同目标命中主键则累加 cnt / value_sum） */
     int upsertDaily(@Param("eventType") String eventType, @Param("targetType") String targetType,

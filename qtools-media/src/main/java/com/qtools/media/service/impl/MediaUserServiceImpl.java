@@ -346,7 +346,7 @@ public class MediaUserServiceImpl implements IMediaUserService
     {
         try
         {
-            mediaTrackService.trackEvent(eventType, targetType, targetKey, ownerKey, 0L);
+            mediaTrackService.trackEvent(eventType, targetType, targetKey, ownerKey, 0L, 0);
         }
         catch (Exception e)
         {

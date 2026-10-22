@@ -15,6 +15,7 @@ public interface IMediaTrackService
     /** 接口上报（匿名）：入参不合法时静默丢弃 */
     void track(MediaTrackDTO dto);
 
-    /** 服务端埋点（收藏/取消收藏等）：字段与 {@link MediaTrackDTO} 同义 */
-    void trackEvent(String eventType, String targetType, String targetKey, String ownerKey, Long valueNum);
+    /** 服务端埋点（收藏/取消收藏等）：字段与 {@link MediaTrackDTO} 同义；progress 仅 play_end 有意义 */
+    void trackEvent(String eventType, String targetType, String targetKey, String ownerKey, Long valueNum,
+            Integer progress);
 }

@@ -8,6 +8,12 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     "今天"一律用数据库的 curdate()，与 media_event.create_time 的 now() 同源；
     趋势图取 media_stats_daily（按天预聚合），累计类指标直接扫 media_event。
     map 结果用 LinkedHashMap，键名按 SQL 别名原样返回给前端（key / title / count / date）。
+
+    M5 追加：
+      · 概览的 UV（countUvToday / countUvTotal）与完播率（countPlayEnd / countCompletedPlay）；
+      · 单目标统计（countTarget* / sumTargetPlayMs / selectTargetDaily / selectVideoTitle）——
+        单目标数据量小，直接扫 media_event 明细，不给 media_stats_daily 加维度；
+      · 明细归档（createArchiveTable / archiveEvents / deleteArchivedEvents）。
 -->
 <mapper namespace="com.qtools.media.mapper.MediaStatsMapper">
 
@@ -82,5 +88,88 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
           and e.create_time &lt; date_add(#{statDate}, interval 1 day)
         group by e.event_type, e.target_type, e.target_key
     </insert>
+
+    <!-- 概览：UV 与完播率 -->
+
+    <select id="countUvToday" resultType="long">
+        select count(distinct owner_key)
+        from media_event
+        where create_time &gt;= curdate()
+          and create_time &lt; date_add(curdate(), interval 1 day)
+          and owner_key is not null
+          and owner_key &lt;&gt; ''
+    </select>
+
+    <select id="countUvTotal" resultType="long">
+        select count(distinct owner_key)
+        from media_event
+        where owner_key is not null
+          and owner_key &lt;&gt; ''
+    </select>
+
+    <select id="countPlayEnd" resultType="long">
+        select count(*) from media_event where event_type = 'play_end'
+    </select>
+
+    <!-- 完播阈值由服务层的 COMPLETE_PROGRESS 传入（90），progress 写入前已夹取到 0-100 -->
+    <select id="countCompletedPlay" resultType="long">
+        select count(*) from media_event where event_type = 'play_end' and progress &gt;= #{progress}
+    </select>
+
+    <!-- 单目标统计：直接扫 media_event 明细（单目标数据量小，不给汇总表加维度） -->
+
+    <select id="countTargetEvents" resultType="long">
+        select count(*) from media_event
+        where target_type = #{targetType} and target_key = #{targetKey} and event_type = #{eventType}
+    </select>
+
+    <select id="countTargetPlayEnd" resultType="long">
+        select count(*) from media_event
+        where target_type = #{targetType} and target_key = #{targetKey} and event_type = 'play_end'
+    </select>
+
+    <select id="countTargetCompleted" resultType="long">
+        select count(*) from media_event
+        where target_type = #{targetType} and target_key = #{targetKey}
+          and event_type = 'play_end' and progress &gt;= #{progress}
+    </select>
+
+    <select id="sumTargetPlayMs" resultType="long">
+        select coalesce(sum(value_num), 0) from media_event
+        where target_type = #{targetType} and target_key = #{targetKey} and event_type = 'play_end'
+    </select>
+
+    <!-- 单目标近 N 天走势：上界取到明天 0 点，避免把未来时间戳的数据算进最后一天 -->
+    <select id="selectTargetDaily" resultType="java.util.LinkedHashMap">
+        select date(create_time) as stat_date, count(*) as cnt
+        from media_event
+        where target_type = #{targetType} and target_key = #{targetKey} and event_type = #{eventType}
+          and create_time &gt;= date_sub(curdate(), interval #{offsetDays} day)
+          and create_time &lt; date_add(curdate(), interval 1 day)
+        group by date(create_time)
+        order by stat_date asc
+    </select>
+
+    <select id="selectVideoTitle" resultType="java.lang.String">
+        select title from media_video where id = #{videoId}
+    </select>
+
+    <!-- 明细归档：归档表结构与 media_event 一致，主键 id 原样搬过去 -->
+
+    <update id="createArchiveTable">
+        create table if not exists media_event_archive like media_event
+    </update>
+
+    <insert id="archiveEvents">
+        insert into media_event_archive
+            (id, event_type, target_type, target_key, owner_key, value_num, progress, ip, user_agent, create_time)
+        select id, event_type, target_type, target_key, owner_key, value_num, progress, ip, user_agent, create_time
+        from media_event
+        where create_time &lt; #{before}
+    </insert>
+
+    <delete id="deleteArchivedEvents">
+        delete from media_event where create_time &lt; #{before}
+    </delete>
 
 </mapper>

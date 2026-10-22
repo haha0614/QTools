@@ -33,6 +33,11 @@ import com.qtools.media.service.IMediaStatsService;
  * dailyEvents      media_stats_daily 近 7 天按天 sum(cnt)，缺失日期在 Java 里补 0
  * topVideos        media_event 按 'play' 次数倒序 top10，标题左联 media_video.title（可为 null）
  * topPhotos        media_event 按 'photo_click' 次数倒序 top10，key = albumId:seq
+ * uvToday          select count(distinct owner_key) ... 今天，排除 null 与空串
+ * uvTotal          select count(distinct owner_key) ... 全部，排除 null 与空串
+ * playEndCount     select count(*) ... event_type='play_end'（完播率分母）
+ * completedPlayCount ... event_type='play_end' and progress>=90（完播率分子）
+ * completionRate   Java 计算：completedPlayCount / playEndCount * 100（整数，分母为 0 给 0）
  * </pre></p>
  *
  * @author qtools
@@ -52,6 +57,31 @@ public class MediaStatsServiceImpl implements IMediaStatsService
     /** 榜单条数 */
     private static final int TOP_LIMIT = 10;
 
+    /** 完播阈值（progress 百分比）：>= 90 视为完播，与 SQL 里的字面量保持一致 */
+    private static final int COMPLETE_PROGRESS = 90;
+
+    /** 单目标统计的默认 / 合法天数区间 */
+    private static final int DAYS_DEFAULT = 7;
+
+    private static final int DAYS_MIN = 1;
+
+    private static final int DAYS_MAX = 30;
+
+    /** 目标类型与"播放次数"口径的映射：album_view / photo_click / play */
+    private static final String TARGET_VIDEO = "video";
+
+    private static final String TARGET_PHOTO = "photo";
+
+    private static final String TARGET_ALBUM = "album";
+
+    private static final String EVENT_PLAY = "play";
+
+    private static final String EVENT_PLAY_END = "play_end";
+
+    private static final String EVENT_PHOTO_CLICK = "photo_click";
+
+    private static final String EVENT_ALBUM_VIEW = "album_view";
+
     @Autowired
     private MediaStatsMapper mediaStatsMapper;
 
@@ -70,6 +100,14 @@ public class MediaStatsServiceImpl implements IMediaStatsService
         out.put("dailyEvents", dailyEventNodes());
         out.put("topVideos", mediaStatsMapper.selectTopVideos(TOP_LIMIT));
         out.put("topPhotos", mediaStatsMapper.selectTopPhotos(TOP_LIMIT));
+        // M5 新增字段：原有字段一个不动，只在末尾追加
+        long playEnd = mediaStatsMapper.countPlayEnd();
+        long completed = mediaStatsMapper.countCompletedPlay(COMPLETE_PROGRESS);
+        out.put("uvToday", mediaStatsMapper.countUvToday());
+        out.put("uvTotal", mediaStatsMapper.countUvTotal());
+        out.put("playEndCount", playEnd);
+        out.put("completedPlayCount", completed);
+        out.put("completionRate", percent(completed, playEnd));
         return out;
     }
 
@@ -111,14 +149,24 @@ public class MediaStatsServiceImpl implements IMediaStatsService
      */
     private List<Map<String, Object>> dailyEventNodes()
     {
+        return dailyNodes(mediaStatsMapper.selectDailyEvents(TREND_DAYS - 1), TREND_DAYS);
+    }
+
+    /**
+     * 把"只含有效数据天"的 SQL 结果补成连续 span 天的升序数组，缺失日期 count=0。
+     *
+     * <p>锚点用 JVM 当天，与 SQL 的 date_sub(curdate(), ...) 一致（应用与库同机同时区）。</p>
+     */
+    private static List<Map<String, Object>> dailyNodes(List<Map<String, Object>> rows, int span)
+    {
         Map<String, Long> counted = new LinkedHashMap<>();
-        for (Map<String, Object> row : mediaStatsMapper.selectDailyEvents(TREND_DAYS - 1))
+        for (Map<String, Object> row : rows)
         {
             counted.put(dayKey(row.get("stat_date")), asLong(row.get("cnt")));
         }
-        List<Map<String, Object>> nodes = new ArrayList<>(TREND_DAYS);
+        List<Map<String, Object>> nodes = new ArrayList<>(span);
         LocalDate today = LocalDate.now();
-        for (int i = TREND_DAYS - 1; i >= 0; i--)
+        for (int i = span - 1; i >= 0; i--)
         {
             String day = today.minusDays(i).format(DAY_FORMAT);
             Map<String, Object> node = new LinkedHashMap<>();
@@ -166,6 +214,96 @@ public class MediaStatsServiceImpl implements IMediaStatsService
         {
             return 0L;
         }
+    }
+
+    @Override
+    public Map<String, Object> target(String targetType, String targetKey, Integer days)
+    {
+        String type = normalizeTargetType(targetType);
+        String key = targetKey == null ? "" : targetKey.trim();
+        int span = normalizeDays(days);
+        String eventType = countEventType(type);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("targetType", type);
+        out.put("targetKey", key);
+        // 只有 video 有单一标题；photo（albumId:seq）/ album 由前端自己拼展示名，这里给 null
+        out.put("title", TARGET_VIDEO.equals(type) ? mediaStatsMapper.selectVideoTitle(key) : null);
+        out.put("playCount", mediaStatsMapper.countTargetEvents(type, key, eventType));
+        // play_end / 完播只有 video 有意义，其它类型恒 0（相册与图片没有播放结束事件）
+        long playEnd = TARGET_VIDEO.equals(type) ? mediaStatsMapper.countTargetPlayEnd(type, key) : 0L;
+        long completed = TARGET_VIDEO.equals(type)
+                ? mediaStatsMapper.countTargetCompleted(type, key, COMPLETE_PROGRESS) : 0L;
+        out.put("playEndCount", playEnd);
+        out.put("completedCount", completed);
+        out.put("completionRate", percent(completed, playEnd));
+        out.put("totalPlayMs", mediaStatsMapper.sumTargetPlayMs(type, key));
+        out.put("daily", dailyNodes(mediaStatsMapper.selectTargetDaily(type, key, eventType, span - 1), span));
+        return out;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> archive(String before)
+    {
+        String day = parseDay(before);
+        // 归档表兜底创建：DDL 在 MySQL 里会隐式提交，所以放在两条 DML 之前，
+        // 不影响"搬走 + 删除"这两条语句同成同败（它们仍在同一个事务里）。
+        mediaStatsMapper.createArchiveTable();
+        int moved = mediaStatsMapper.archiveEvents(day);
+        mediaStatsMapper.deleteArchivedEvents(day);
+        log.info("媒体明细归档完成 before={} moved={}", day, moved);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("moved", moved);
+        return out;
+    }
+
+    /** 单目标的"播放次数"口径：video=play / photo=photo_click / album=album_view */
+    private static String countEventType(String targetType)
+    {
+        switch (targetType)
+        {
+            case TARGET_PHOTO:
+                return EVENT_PHOTO_CLICK;
+            case TARGET_ALBUM:
+                return EVENT_ALBUM_VIEW;
+            default:
+                return EVENT_PLAY;
+        }
+    }
+
+    private static String normalizeTargetType(String targetType)
+    {
+        String type = targetType == null ? "" : targetType.trim();
+        if (TARGET_VIDEO.equals(type) || TARGET_PHOTO.equals(type) || TARGET_ALBUM.equals(type))
+        {
+            return type;
+        }
+        // 控制器已先校验并回 AjaxResult.error，这里只是服务层的兜底
+        throw MediaException.badRequest("targetType 不合法");
+    }
+
+    /** days 夹取到 [1,30]，null 用默认 7 */
+    private static int normalizeDays(Integer days)
+    {
+        if (days == null)
+        {
+            return DAYS_DEFAULT;
+        }
+        if (days < DAYS_MIN)
+        {
+            return DAYS_MIN;
+        }
+        return Math.min(days, DAYS_MAX);
+    }
+
+    /** 整数百分比（整除截断）：分母为 0 时给 0 */
+    private static int percent(long part, long total)
+    {
+        if (total <= 0L)
+        {
+            return 0;
+        }
+        return (int) Math.min(100L, part * 100L / total);
     }
 
     private static String parseDay(String date)
