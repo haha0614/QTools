@@ -58,3 +58,6 @@ application-secret.yml
 ######################################################################
 # 媒体索引迁移的生成物（import.js 每次运行重写，不入库）
 doc/media-import/*.sql
+
+# 私密配置（两种命名都排除：旧 application-secret.yml / 新 secret.yml）
+secret.yml

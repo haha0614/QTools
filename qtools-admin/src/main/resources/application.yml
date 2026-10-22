@@ -129,7 +129,7 @@ user:
 spring:
   # 加载本地私密配置（数据库密码、JWT 密钥等）：该文件被 .gitignore 排除，缺失时自动跳过
   config:
-    import: optional:classpath:application-secret.yml
+    import: optional:classpath:secret.yml
   # 静态资源：由 WebSpaConfig 显式注册 /** ，关闭 Boot 默认的 classpath:/static 映射以免抢同一路径
   web:
     resources:
