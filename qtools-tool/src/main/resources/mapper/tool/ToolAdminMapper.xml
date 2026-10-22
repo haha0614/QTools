@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.qtools.tool.mapper.ToolAdminMapper">
+    
+    <resultMap type="ToolInfo" id="ToolInfo">
+        <result property="id"    column="id"    />
+        <result property="toolName"    column="tool_name"    />
+        <result property="toolDesc"    column="tool_desc"    />
+        <result property="toolRoute"    column="tool_route"    />
+        <result property="icon"    column="icon"    />
+        <result property="sort"    column="sort"    />
+        <result property="status"    column="status"    />
+        <result property="createTime"    column="create_time"    />
+        <result property="updateTime"    column="update_time"    />
+    </resultMap>
+
+    <sql id="selectToolInfoVo">
+        select id, tool_name, tool_desc, tool_route, icon, sort, status, create_time, update_time from tool_info
+    </sql>
+
+    <select id="selectToolInfoList" parameterType="ToolInfo" resultMap="ToolInfo">
+        <include refid="selectToolInfoVo"/>
+        <where>  
+            <if test="toolName != null  and toolName != ''"> and tool_name like concat('%', #{toolName}, '%')</if>
+            <if test="toolDesc != null  and toolDesc != ''"> and tool_desc = #{toolDesc}</if>
+            <if test="toolRoute != null  and toolRoute != ''"> and tool_route = #{toolRoute}</if>
+            <if test="icon != null  and icon != ''"> and icon = #{icon}</if>
+            <if test="sort != null "> and sort = #{sort}</if>
+            <if test="status != null  and status != ''"> and status = #{status}</if>
+        </where>
+    </select>
+    
+    <select id="selectToolInfoById" parameterType="Long" resultMap="ToolInfo">
+        <include refid="selectToolInfoVo"/>
+        where id = #{id}
+    </select>
+
+    <insert id="insertToolInfo" parameterType="ToolInfo" useGeneratedKeys="true" keyProperty="id">
+        insert into tool_info
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="toolName != null and toolName != ''">tool_name,</if>
+            <if test="toolDesc != null">tool_desc,</if>
+            <if test="toolRoute != null and toolRoute != ''">tool_route,</if>
+            <if test="icon != null">icon,</if>
+            <if test="sort != null">sort,</if>
+            <if test="status != null">status,</if>
+            <if test="createTime != null">create_time,</if>
+            <if test="updateTime != null">update_time,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="toolName != null and toolName != ''">#{toolName},</if>
+            <if test="toolDesc != null">#{toolDesc},</if>
+            <if test="toolRoute != null and toolRoute != ''">#{toolRoute},</if>
+            <if test="icon != null">#{icon},</if>
+            <if test="sort != null">#{sort},</if>
+            <if test="status != null">#{status},</if>
+            <if test="createTime != null">#{createTime},</if>
+            <if test="updateTime != null">#{updateTime},</if>
+         </trim>
+    </insert>
+
+    <update id="updateToolInfo" parameterType="ToolInfo">
+        update tool_info
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="toolName != null and toolName != ''">tool_name = #{toolName},</if>
+            <if test="toolDesc != null">tool_desc = #{toolDesc},</if>
+            <if test="toolRoute != null and toolRoute != ''">tool_route = #{toolRoute},</if>
+            <if test="icon != null">icon = #{icon},</if>
+            <if test="sort != null">sort = #{sort},</if>
+            <if test="status != null">status = #{status},</if>
+            <if test="createTime != null">create_time = #{createTime},</if>
+            <if test="updateTime != null">update_time = #{updateTime},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteToolInfoById" parameterType="Long">
+        delete from tool_info where id = #{id}
+    </delete>
+
+    <delete id="deleteToolInfoByIds" parameterType="String">
+        delete from tool_info where id in 
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>
