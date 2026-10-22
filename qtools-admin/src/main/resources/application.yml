@@ -24,10 +24,11 @@ qtools:
   captchaType: math
   # 【换成自己的媒体内容】两条路，任选其一（详见 doc/自定义与迁移指南.md）：
   #   A. 通用扫描（适合新用户）：scanScript 指向 doc/media-import/scan-media.js，
-  #      且 scanArgs 必须带 --root=<媒体根>（可再加 --big-bytes=…）；
+  #      且 scanArgs 必须带 --root=<媒体根> --secret=<secret.yml 绝对路径>（可再加 --big-bytes=…）；
   #      thumbScript 指向 doc/media-import/build-thumbs.js，
-  #      且 thumbArgs 必须带 --root=<媒体根> --thumbs=<缩略图根>。
-  #      Java 侧只传 nodePath + 脚本 + scanArgs/thumbArgs，参数漏了管理端「重建索引」会失败。
+  #      且 thumbArgs 必须带 --root=<媒体根> --thumbs=<缩略图根> --secret=<secret.yml 绝对路径>。
+  #      Java 侧只传 nodePath + 脚本 + scanArgs/thumbArgs（缩略图另注入 MS_FFMPEG），
+  #      既不注入数据库口令、也会过滤 --truncate/--force，所以口令要走脚本的 --secret=。
   #   B. 旧 Node 站迁移（原作者场景，现状）：import.js + build_thumbs.js（读 index.json）。
   # 媒体库配置（M1 只读接口 + M3 管理端；媒体根只读，软删只移动不真删）
   media:

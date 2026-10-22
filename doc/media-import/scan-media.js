@@ -70,12 +70,21 @@ const HELP = `
   --yes               确认 --truncate（缺它会直接报错退出，不会写库）
   --dry-run           只统计并打印，不写库（不需要数据库/mysql 客户端）
   --dump-sql=<file>   把生成的 SQL 写入该文件并打印前 20 行，**不执行**（可与 --dry-run 同用）
+  --secret=<file>     密码来源②：从 secret.yml 取 spring.datasource.druid.master.password
+                      （管理端「重建索引」按钮触发时没有 MYSQL_PWD，用它）
   --big-bytes=<n>     判定 is_big=1 的字节阈值，默认 2097152（2MB）
   --exclude=<a,b>     按目录名排除（任意层级），默认 _媒体站,trash,.git,node_modules,thumbs,pv
   --help              显示本帮助
 
-密码：只从环境变量 MYSQL_PWD 读取（不打印、不落盘）：
+密码优先级：
+  1) 环境变量 MYSQL_PWD
+  2) --secret=<application-secret.yml / secret.yml 路径>，取其中
+     spring.datasource.druid.master.password 的值（只认 master，不会误取 redis 的 password）
+  3) 两样都没有 -> 报错退出
+  取到后只通过子进程的 MYSQL_PWD 传给 mysql 客户端：不打印、不落盘、不进命令行参数。
+
   PowerShell:  $env:MYSQL_PWD = '<root 密码>'; node scan-media.js --root=D:\\我的媒体
+  或:          node scan-media.js --root=D:\\我的媒体 --secret=D:\\cfg\\secret.yml
 
 输出（管理端 MediaScanServiceImpl 按这些行解析，改动前先看它）：
   videos=<n> albums=<n> photos=<n> people=0            扫描到的源数据条数
@@ -86,7 +95,7 @@ const HELP = `
 
 function parseArgs(argv) {
   const o = Object.assign({}, DEFAULTS, {
-    root: null, mysql: null, dumpSql: null, truncate: false, yes: false, dryRun: false, ignored: [],
+    root: null, mysql: null, secret: null, dumpSql: null, truncate: false, yes: false, dryRun: false, ignored: [],
   });
   for (const a of argv) {
     if (a === '--truncate') o.truncate = true;
@@ -99,6 +108,7 @@ function parseArgs(argv) {
     else if (a.startsWith('--host=')) o.host = a.slice('--host='.length);
     else if (a.startsWith('--port=')) o.port = a.slice('--port='.length);
     else if (a.startsWith('--mysql=')) o.mysql = a.slice('--mysql='.length);
+    else if (a.startsWith('--secret=')) o.secret = a.slice('--secret='.length);
     else if (a.startsWith('--dump-sql=')) o.dumpSql = a.slice('--dump-sql='.length);
     else if (a.startsWith('--big-bytes=')) o.bigBytes = Number(a.slice('--big-bytes='.length));
     else if (a.startsWith('--exclude=')) {
@@ -193,13 +203,69 @@ function resolveExe(explicit, name, label) {
   return found;
 }
 
-function readPassword() {
-  const pwd = process.env.MYSQL_PWD;
+// ---------------------------------------------------------------- 密码
+
+/**
+ * 优先级：MYSQL_PWD 环境变量 > --secret=<yml> 里的 spring.datasource.druid.master.password。
+ * 拿到后只通过子进程的 MYSQL_PWD 传给 mysql：不打印、不落盘、不进命令行参数。
+ */
+function readPassword(o) {
+  if (process.env.MYSQL_PWD) return process.env.MYSQL_PWD;
+  if (o.secret) return readSecretPassword(o.secret);
+  throw new Error('未提供数据库密码：请设置环境变量 MYSQL_PWD，' +
+    '或用 --secret=<application-secret/secret.yml 路径> 指定私密配置');
+}
+
+function readSecretPassword(file) {
+  const abs = path.resolve(file);
+  let raw;
+  try {
+    raw = fs.readFileSync(abs, 'utf8');
+  } catch (e) {
+    throw new Error('--secret 指定的文件读不到：' + abs + '（' + (e.code || e.message) + '）');
+  }
+  const pwd = extractMasterPassword(raw);
   if (!pwd) {
-    throw new Error('未设置 MYSQL_PWD 环境变量。密码只从环境变量读取（不落盘、不打印）：\n' +
-      '  PowerShell:  $env:MYSQL_PWD = \'<密码>\'; node scan-media.js --root=<媒体根>');
+    throw new Error('--secret=' + abs + ' 里找不到 spring.datasource.druid.master.password');
   }
   return pwd;
+}
+
+/** 从 YAML 文本取 spring.datasource.druid.master.password 的值（缩进扫描 + 正则，零依赖，不引 js-yaml） */
+function extractMasterPassword(text) {
+  // 兼容扁平写法：spring.datasource.druid.master.password: xxx
+  const flat = text.match(/^[ \t]*spring\.datasource\.druid\.master\.password[ \t]*:[ \t]*(.*)$/m);
+  if (flat) return yamlScalar(flat[1]);
+
+  const want = ['spring', 'datasource', 'druid', 'master', 'password'].join('.');
+  const stack = []; // 缩进路径栈：{ indent, key }
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.replace(/^\uFEFF/, '');
+    if (!line.trim() || /^[ \t]*#/.test(line)) continue;
+    const m = line.match(/^([ \t]*)([A-Za-z0-9_.-]+):(?:[ \t]+(.*))?$/);
+    if (!m) continue;
+    const indent = m[1].replace(/\t/g, '  ').length;
+    const value = m[3] === undefined ? '' : m[3];
+    while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
+    const trail = stack.map((s) => s.key).concat(m[2]).join('.');
+    // 只认 master.password：spring.data.redis.password、slave.password 等前缀对不上，天然排除
+    if (value !== '' && m[2] === 'password' && trail.slice(-want.length) === want) {
+      return yamlScalar(value);
+    }
+    stack.push({ indent, key: m[2] });
+  }
+  return null;
+}
+
+/** 取 YAML 标量：去引号、去行尾注释（引号内的 # 不算注释） */
+function yamlScalar(raw) {
+  const value = String(raw).trim();
+  const quote = value[0];
+  if (quote === '"' || quote === "'") {
+    const end = value.indexOf(quote, 1);
+    return end < 0 ? value.slice(1) : value.slice(1, end);
+  }
+  return value.replace(/[ \t]+#.*$/, '').trim();
 }
 
 // ---------------------------------------------------------------- 遍历（只读）
@@ -443,7 +509,7 @@ function main() {
   if (o.dryRun || o.dumpSql) return 0;
 
   const mysqlExe = resolveExe(o.mysql, 'mysql', 'mysql 客户端');
-  const password = readPassword();
+  const password = readPassword(o);
   const sql = buildSql(model, o);
   const r = runMysql(o, mysqlExe, password, sql);
   if (r.status !== 0) {

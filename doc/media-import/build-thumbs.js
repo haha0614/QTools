@@ -33,6 +33,7 @@ const DEFAULTS = {
   thumbs: null,
   ffmpeg: null,
   mysql: null,
+  secret: null,
   db: 'qtools',
   user: 'root',
   host: '127.0.0.1',
@@ -54,9 +55,16 @@ const HELP = `
   --port=<n>          默认 3306
   --force             重建已存在的产物（默认按「存在即跳过」增量）
   --limit=<n>         只处理前 n 条（调试用）
+  --secret=<file>     密码来源②：从 secret.yml 取 spring.datasource.druid.master.password
+                      （管理端「重建缩略图」按钮触发时没有 MYSQL_PWD，用它）
   --help              显示本帮助
 
-密码：只从环境变量 MYSQL_PWD 读取（不打印、不落盘）。
+密码优先级：
+  1) 环境变量 MYSQL_PWD
+  2) --secret=<application-secret.yml / secret.yml 路径>，取其中
+     spring.datasource.druid.master.password 的值（只认 master，不会误取 redis 的 password）
+  3) 两样都没有 -> 报错退出
+  取到后只通过子进程的 MYSQL_PWD 传给 mysql 客户端：不打印、不落盘、不进命令行参数。
 
 产物路径（相对 --thumbs）：
   v/<videoId>.jpg           视频封面（-ss 3 抽帧；不足 3 秒自动回退 -ss 0）
@@ -78,6 +86,7 @@ function parseArgs(argv) {
     else if (a.startsWith('--thumbs=')) o.thumbs = a.slice('--thumbs='.length);
     else if (a.startsWith('--ffmpeg=')) o.ffmpeg = a.slice('--ffmpeg='.length);
     else if (a.startsWith('--mysql=')) o.mysql = a.slice('--mysql='.length);
+    else if (a.startsWith('--secret=')) o.secret = a.slice('--secret='.length);
     else if (a.startsWith('--db=')) o.db = a.slice('--db='.length);
     else if (a.startsWith('--user=')) o.user = a.slice('--user='.length);
     else if (a.startsWith('--host=')) o.host = a.slice('--host='.length);
@@ -140,13 +149,69 @@ function resolveTool(explicit, envName, exeName, exeFlag) {
   return found;
 }
 
-function readPassword() {
-  const pwd = process.env.MYSQL_PWD;
+// ---------------------------------------------------------------- 密码
+
+/**
+ * 优先级：MYSQL_PWD 环境变量 > --secret=<yml> 里的 spring.datasource.druid.master.password。
+ * 拿到后只通过子进程的 MYSQL_PWD 传给 mysql：不打印、不落盘、不进命令行参数。
+ */
+function readPassword(o) {
+  if (process.env.MYSQL_PWD) return process.env.MYSQL_PWD;
+  if (o.secret) return readSecretPassword(o.secret);
+  throw new Error('未提供数据库密码：请设置环境变量 MYSQL_PWD，' +
+    '或用 --secret=<application-secret/secret.yml 路径> 指定私密配置');
+}
+
+function readSecretPassword(file) {
+  const abs = path.resolve(file);
+  let raw;
+  try {
+    raw = fs.readFileSync(abs, 'utf8');
+  } catch (e) {
+    throw new Error('--secret 指定的文件读不到：' + abs + '（' + (e.code || e.message) + '）');
+  }
+  const pwd = extractMasterPassword(raw);
   if (!pwd) {
-    throw new Error('未设置 MYSQL_PWD 环境变量（密码只从环境变量读取，不打印、不落盘）：\n' +
-      '  PowerShell:  $env:MYSQL_PWD = \'<密码>\'; node build-thumbs.js --thumbs=<缩略图根>');
+    throw new Error('--secret=' + abs + ' 里找不到 spring.datasource.druid.master.password');
   }
   return pwd;
+}
+
+/** 从 YAML 文本取 spring.datasource.druid.master.password 的值（缩进扫描 + 正则，零依赖，不引 js-yaml） */
+function extractMasterPassword(text) {
+  // 兼容扁平写法：spring.datasource.druid.master.password: xxx
+  const flat = text.match(/^[ \t]*spring\.datasource\.druid\.master\.password[ \t]*:[ \t]*(.*)$/m);
+  if (flat) return yamlScalar(flat[1]);
+
+  const want = ['spring', 'datasource', 'druid', 'master', 'password'].join('.');
+  const stack = []; // 缩进路径栈：{ indent, key }
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.replace(/^\uFEFF/, '');
+    if (!line.trim() || /^[ \t]*#/.test(line)) continue;
+    const m = line.match(/^([ \t]*)([A-Za-z0-9_.-]+):(?:[ \t]+(.*))?$/);
+    if (!m) continue;
+    const indent = m[1].replace(/\t/g, '  ').length;
+    const value = m[3] === undefined ? '' : m[3];
+    while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
+    const trail = stack.map((s) => s.key).concat(m[2]).join('.');
+    // 只认 master.password：spring.data.redis.password、slave.password 等前缀对不上，天然排除
+    if (value !== '' && m[2] === 'password' && trail.slice(-want.length) === want) {
+      return yamlScalar(value);
+    }
+    stack.push({ indent, key: m[2] });
+  }
+  return null;
+}
+
+/** 取 YAML 标量：去引号、去行尾注释（引号内的 # 不算注释） */
+function yamlScalar(raw) {
+  const value = String(raw).trim();
+  const quote = value[0];
+  if (quote === '"' || quote === "'") {
+    const end = value.indexOf(quote, 1);
+    return end < 0 ? value.slice(1) : value.slice(1, end);
+  }
+  return value.replace(/[ \t]+#.*$/, '').trim();
 }
 
 function query(mysqlExe, o, password, sql) {
@@ -252,7 +317,7 @@ function main() {
   // ffmpeg 不可用直接退出码 1（后面的 1 万张全都会失败，没有继续的意义）
   const ffmpeg = resolveTool(o.ffmpeg, 'MS_FFMPEG', 'ffmpeg', '--ffmpeg');
   const mysqlExe = resolveTool(o.mysql, 'MS_MYSQL', 'mysql', '--mysql');
-  const password = readPassword();
+  const password = readPassword(o);
 
   const videoRows = query(mysqlExe, o, password,
     'SELECT id,rel_path FROM media_video ORDER BY id;');
