@@ -11,6 +11,16 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     MySQL 唯一索引把 NULL 视为互不相等，因此 video 行之间、photo 行之间的
     ON DUPLICATE KEY 永远不触发（写多少次都是新行）。这里统一用「按 kind 分支的
     精确匹配」+ INSERT ... WHERE NOT EXISTS 兜住幂等。
+
+    ================== 身份：hash 优先、老字段回退 ==================
+    为什么要两套身份（依据：doc/媒体库可移植性方案.md §3 P1）：
+      * 内容哈希 content_hash 是稳定身份 —— 改名、移动、换盘、相册内插图后都不变；
+      * 老字段 target_id / (album_id, seq) 是路径派生的身份 —— 视频改名后 id 还是旧的
+        （id 由 sha1(rel_path) 生成，重扫会变），相册里插一张图会让后面所有 seq 后移，
+        于是收藏行会指向别的图甚至悬空；
+      * 但历史数据（以及扫描脚本回填哈希之前的行）content_hash 为 NULL，只认老字段。
+    因此：content_hash 不为 NULL 时按哈希认行，为 NULL 时退回老字段；匹配条件用 OR 合并，
+    这样"先按老字段收藏过、之后才回填哈希"的行不会重复插入，取消收藏也不会漏删。
 -->
 <mapper namespace="com.qtools.media.mapper.MediaFavoriteMapper">
 
@@ -23,41 +33,79 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="happenedAt" column="happened_at"/>
     </resultMap>
 
-    <!-- 唯一性判定：video 只看 target_id，photo 只看 album_id+seq（与业务唯一键一致） -->
+    <!--
+        唯一性 / 命中判定：video 看 content_hash 或 target_id，photo 看 content_hash
+        或 album_id+seq。contentHash 为 NULL 时只剩老字段分支（= 改动前的行为）。
+    -->
     <sql id="exactWhere">
         owner_key = #{ownerKey} and kind = #{kind}
+        and (
+        <if test="contentHash != null">
+            content_hash = #{contentHash} or
+        </if>
         <choose>
             <when test="kind == 'video'">
-                and target_id = #{targetId}
+                target_id = #{targetId}
             </when>
             <otherwise>
-                and album_id = #{albumId} and seq = #{seq}
+                album_id = #{albumId} and seq = #{seq}
             </otherwise>
         </choose>
+        )
     </sql>
 
     <insert id="insertIfAbsent">
-        insert into media_favorite (owner_key, kind, target_id, album_id, seq)
+        insert into media_favorite (owner_key, kind, target_id, album_id, seq, content_hash)
         select #{ownerKey}, #{kind}, #{targetId,jdbcType=VARCHAR}, #{albumId,jdbcType=VARCHAR},
-               #{seq,jdbcType=INTEGER}
+               #{seq,jdbcType=INTEGER}, #{contentHash,jdbcType=VARCHAR}
         from dual
         where not exists (select 1 from media_favorite where <include refid="exactWhere"/>)
     </insert>
 
+    <!-- 命中时置顶；content_hash 只补空、不覆盖（coalesce(新值, 旧值)） -->
     <update id="touch">
-        update media_favorite set created_at = current_timestamp(3) where <include refid="exactWhere"/>
+        update media_favorite
+           set created_at = current_timestamp(3),
+               content_hash = coalesce(#{contentHash,jdbcType=VARCHAR}, content_hash)
+         where <include refid="exactWhere"/>
     </update>
 
     <delete id="deleteExact">
         delete from media_favorite where <include refid="exactWhere"/>
     </delete>
 
+    <!--
+        收藏列表：出参仍是 target_id / album_id / seq（前端契约不变），但值取 join 到的
+        当前值 —— 相册重新排序、视频改路径之后，缩略图与链接依然指向"这张图 / 这个视频"。
+
+        video 侧：media_video.content_hash 上有唯一索引，按哈希 join 不会放大行数；
+                  哈希为 NULL 时才回到 v.id = f.target_id。
+        photo 侧：同一张图可以合法地出现在多个相册里（media_photo.content_hash 只是普通
+                  索引），所以用「关联子查询 + ORDER BY ... LIMIT 1」取一条，既不放大行数
+                  也不需要 GROUP BY。子查询同样按 hash 优先、老字段回退。
+        album 标题跟着当前相册走（a 打在 coalesce(p.album_id, f.album_id) 上）。
+    -->
     <select id="selectItemList" resultMap="MediaUserItemResult">
-        select f.kind, f.target_id, f.album_id, f.seq, f.created_at as happened_at,
+        select f.kind,
+               coalesce(v.id, f.target_id)       as target_id,
+               coalesce(p.album_id, f.album_id)  as album_id,
+               coalesce(p.seq, f.seq)            as seq,
+               f.created_at as happened_at,
                coalesce(v.title, a.title) as title
         from media_favorite f
-        left join media_video v on f.kind = 'video' and v.id = f.target_id
-        left join media_album a on f.kind = 'photo' and a.id = f.album_id
+        left join media_video v
+               on f.kind = 'video'
+              and ((f.content_hash is not null and v.content_hash = f.content_hash)
+                or (f.content_hash is null and v.id = f.target_id))
+        left join media_photo p
+               on f.kind = 'photo'
+              and p.id = (select p2.id
+                            from media_photo p2
+                           where (f.content_hash is not null and p2.content_hash = f.content_hash)
+                              or (f.content_hash is null and p2.album_id = f.album_id and p2.seq = f.seq)
+                           order by p2.album_id asc, p2.seq asc, p2.id asc
+                           limit 1)
+        left join media_album a on a.id = coalesce(p.album_id, f.album_id)
         where f.owner_key = #{ownerKey}
         order by f.created_at desc, f.id desc
         limit #{limit}

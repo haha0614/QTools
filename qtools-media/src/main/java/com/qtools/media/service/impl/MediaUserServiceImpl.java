@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.domain.MediaOwnerSession;
 import com.qtools.media.domain.MediaUserItem;
+import com.qtools.media.domain.MediaVideo;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaFavoriteMapper;
 import com.qtools.media.mapper.MediaPhotoMapper;
@@ -30,6 +31,18 @@ import com.qtools.media.service.IMediaUserService;
  *
  * <p>同一 JVM 内用分段锁把同一 owner 的写入串行化，避免双击/并发请求在同一毫秒内
  * 各插一行（多实例部署时需要改成 DB 级锁，当前单实例 8080 不涉及）。</p>
+ *
+ * <p><b>稳定身份：hash 优先、老字段回退</b>（见 {@code doc/媒体库可移植性方案.md}）。
+ * 收藏 / 最近浏览落库时由<b>服务端</b>自行解析目标的 {@code content_hash}
+ * （视频按 id、图片按 album+seq 反查），前端契约一个字段都不变：
+ * <ul>
+ *   <li>解析到哈希 → 写进 {@code content_hash}，此后改名 / 移动 / 相册重排都不丢；</li>
+ *   <li>解析不到（老数据未回填、目标已隐藏）→ 写 NULL，SQL 侧自动回退
+ *       {@code target_id} / {@code (album_id, seq)}，等于改动前的行为；</li>
+ *   <li>命中已存在的行时只补空（{@code coalesce(新值, 旧值)}），绝不用 NULL 覆盖已有的哈希，
+ *       这样"用户早先收藏过、哈希后来才回填"的行会自己补齐。</li>
+ * </ul>
+ * 统计（{@code MediaStatsMapper}）仍按旧 key（target_id / albumId:seq）归属，属可接受偏差。</p>
  *
  * @author qtools
  */
@@ -140,11 +153,13 @@ public class MediaUserServiceImpl implements IMediaUserService
         if (KIND_VIDEO.equals(validKind))
         {
             String videoId = requireText(id, "video 需要非空 id");
-            if (mediaVideoMapper.selectVideoById(videoId) == null)
+            MediaVideo video = mediaVideoMapper.selectVideoById(videoId);
+            if (video == null)
             {
                 throw MediaException.notFound();
             }
-            writeFavorite(session.getOwnerKey(), validKind, videoId, null, null);
+            // 复用这一次查询里带出来的 content_hash，不再多查一次库
+            writeFavorite(session.getOwnerKey(), validKind, videoId, null, null, video.getContentHash());
             trackQuietly(EVENT_FAV, validKind, videoId, session.getOwnerKey());
         }
         else
@@ -155,7 +170,7 @@ public class MediaUserServiceImpl implements IMediaUserService
             {
                 throw MediaException.notFound();
             }
-            writeFavorite(session.getOwnerKey(), validKind, null, albumId, index);
+            writeFavorite(session.getOwnerKey(), validKind, null, albumId, index, photoHash(albumId, index));
             trackQuietly(EVENT_FAV, validKind, albumId + ":" + index, session.getOwnerKey());
         }
         return userNode(session);
@@ -170,14 +185,14 @@ public class MediaUserServiceImpl implements IMediaUserService
         if (KIND_VIDEO.equals(validKind))
         {
             String videoId = requireText(id, "video 需要非空 id");
-            mediaFavoriteMapper.deleteExact(key, validKind, videoId, null, null);
+            mediaFavoriteMapper.deleteExact(key, validKind, videoId, null, null, videoHash(videoId));
             trackQuietly(EVENT_UNFAV, validKind, videoId, key);
         }
         else
         {
             String albumId = requireText(album, "photo 需要非空 album");
             Integer index = requireSeq(seq);
-            mediaFavoriteMapper.deleteExact(key, validKind, null, albumId, index);
+            mediaFavoriteMapper.deleteExact(key, validKind, null, albumId, index, photoHash(albumId, index));
             trackQuietly(EVENT_UNFAV, validKind, albumId + ":" + index, key);
         }
         return userNode(session);
@@ -192,11 +207,12 @@ public class MediaUserServiceImpl implements IMediaUserService
         if (KIND_VIDEO.equals(validKind))
         {
             String videoId = requireText(id, "video 需要非空 id");
-            if (mediaVideoMapper.selectVideoById(videoId) == null)
+            MediaVideo video = mediaVideoMapper.selectVideoById(videoId);
+            if (video == null)
             {
                 throw MediaException.notFound();
             }
-            writeRecent(key, validKind, videoId, null, null, pos, dur);
+            writeRecent(key, validKind, videoId, null, null, video.getContentHash(), pos, dur);
         }
         else
         {
@@ -206,7 +222,7 @@ public class MediaUserServiceImpl implements IMediaUserService
             {
                 throw MediaException.notFound();
             }
-            writeRecent(key, validKind, null, albumId, index, null, null);
+            writeRecent(key, validKind, null, albumId, index, photoHash(albumId, index), null, null);
         }
         return selectRecentList(session, null);
     }
@@ -306,34 +322,61 @@ public class MediaUserServiceImpl implements IMediaUserService
 
     // ------------------------------------------------------------------ 写入细节
 
-    private void writeFavorite(String ownerKey, String kind, String targetId, String albumId, Integer seq)
+    /**
+     * 收藏落库；{@code contentHash} 为 null 时退化成改动前的行为（只按老字段匹配）
+     */
+    private void writeFavorite(String ownerKey, String kind, String targetId, String albumId, Integer seq,
+            String contentHash)
     {
         synchronized (lock(ownerKey))
         {
-            int inserted = mediaFavoriteMapper.insertIfAbsent(ownerKey, kind, targetId, albumId, seq);
+            int inserted = mediaFavoriteMapper.insertIfAbsent(ownerKey, kind, targetId, albumId, seq, contentHash);
             if (inserted == 0)
             {
-                mediaFavoriteMapper.touch(ownerKey, kind, targetId, albumId, seq);
+                // 命中老行：补时间戳并把空的 content_hash 填上（用户早先收藏、哈希刚回填的情况）
+                mediaFavoriteMapper.touch(ownerKey, kind, targetId, albumId, seq, contentHash);
             }
             mediaFavoriteMapper.prune(ownerKey, FAV_KEEP_MAX);
         }
     }
 
-    private void writeRecent(String ownerKey, String kind, String targetId, String albumId, Integer seq, Double pos,
-            Double dur)
+    private void writeRecent(String ownerKey, String kind, String targetId, String albumId, Integer seq,
+            String contentHash, Double pos, Double dur)
     {
         synchronized (lock(ownerKey))
         {
             Double normalizedPos = pos == null ? null : positiveOrZero(pos);
             Double normalizedDur = dur == null ? null : positiveOrZero(dur);
-            int inserted = mediaRecentMapper.insertIfAbsent(ownerKey, kind, targetId, albumId, seq, normalizedPos,
-                    normalizedDur);
+            int inserted = mediaRecentMapper.insertIfAbsent(ownerKey, kind, targetId, albumId, seq, contentHash,
+                    normalizedPos, normalizedDur);
             if (inserted == 0)
             {
-                mediaRecentMapper.touch(ownerKey, kind, targetId, albumId, seq, normalizedPos, normalizedDur);
+                mediaRecentMapper.touch(ownerKey, kind, targetId, albumId, seq, contentHash, normalizedPos,
+                        normalizedDur);
             }
             mediaRecentMapper.trim(ownerKey, kind, RECENT_MAX);
         }
+    }
+
+    /**
+     * 图片的内容哈希：按 {@code (albumId, seq)} 反查，查不到返回 null（回退老字段）
+     *
+     * <p>解析完全在服务端做，前端契约不变；依据见 {@code doc/媒体库可移植性方案.md}。</p>
+     */
+    private String photoHash(String albumId, Integer seq)
+    {
+        return mediaPhotoMapper.selectContentHashByAlbumAndSeq(albumId, seq);
+    }
+
+    /**
+     * 视频的内容哈希（不过滤 hidden）：删除路径要能在视频已软删之后仍然按哈希认出收藏行
+     *
+     * <p>视频被隐藏时 {@link MediaVideoMapper#selectVideoById} 查不到，用它会退化成只按
+     * target_id 删，改名后的收藏就删不掉了。</p>
+     */
+    private String videoHash(String videoId)
+    {
+        return mediaVideoMapper.selectContentHashById(videoId);
     }
 
     /**
@@ -372,11 +415,12 @@ public class MediaUserServiceImpl implements IMediaUserService
         if (KIND_VIDEO.equals(kind))
         {
             String id = requireText(str(item.get("id")), "video 需要非空 id");
-            if (mediaVideoMapper.selectVideoById(id) == null)
+            MediaVideo video = mediaVideoMapper.selectVideoById(id);
+            if (video == null)
             {
                 return false;
             }
-            writeFavorite(ownerKey, kind, id, null, null);
+            writeFavorite(ownerKey, kind, id, null, null, video.getContentHash());
             return true;
         }
         String album = requireText(str(item.get("album")), "photo 需要非空 album");
@@ -385,7 +429,7 @@ public class MediaUserServiceImpl implements IMediaUserService
         {
             return false;
         }
-        writeFavorite(ownerKey, kind, null, album, seq);
+        writeFavorite(ownerKey, kind, null, album, seq, photoHash(album, seq));
         return true;
     }
 
@@ -396,11 +440,13 @@ public class MediaUserServiceImpl implements IMediaUserService
         if (KIND_VIDEO.equals(kind))
         {
             String id = requireText(str(item.get("id")), "video 需要非空 id");
-            if (mediaVideoMapper.selectVideoById(id) == null)
+            MediaVideo video = mediaVideoMapper.selectVideoById(id);
+            if (video == null)
             {
                 return false;
             }
-            writeRecent(ownerKey, kind, id, null, null, doubleOf(item.get("pos")), doubleOf(item.get("dur")));
+            writeRecent(ownerKey, kind, id, null, null, video.getContentHash(), doubleOf(item.get("pos")),
+                    doubleOf(item.get("dur")));
             return true;
         }
         String album = requireText(str(item.get("album")), "photo 需要非空 album");
@@ -409,7 +455,7 @@ public class MediaUserServiceImpl implements IMediaUserService
         {
             return false;
         }
-        writeRecent(ownerKey, kind, null, album, seq, null, null);
+        writeRecent(ownerKey, kind, null, album, seq, photoHash(album, seq), null, null);
         return true;
     }
 
@@ -418,13 +464,13 @@ public class MediaUserServiceImpl implements IMediaUserService
         String kind = requireKind(str(item.get("kind")));
         if (KIND_VIDEO.equals(kind))
         {
-            mediaFavoriteMapper.deleteExact(ownerKey, kind, requireText(str(item.get("id")), "video 需要非空 id"),
-                    null, null);
+            String id = requireText(str(item.get("id")), "video 需要非空 id");
+            mediaFavoriteMapper.deleteExact(ownerKey, kind, id, null, null, videoHash(id));
             return;
         }
         String album = requireText(str(item.get("album")), "photo 需要非空 album");
         Integer seq = requireSeq(intOf(item.containsKey("seq") ? item.get("seq") : item.get("i")));
-        mediaFavoriteMapper.deleteExact(ownerKey, kind, null, album, seq);
+        mediaFavoriteMapper.deleteExact(ownerKey, kind, null, album, seq, photoHash(album, seq));
     }
 
     // ------------------------------------------------------------------ 组装响应

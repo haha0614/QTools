@@ -2,7 +2,16 @@
 <!DOCTYPE mapper
 PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<!-- 媒体最近浏览表 media_recent 映射文件（M2）；幂等策略同 MediaFavoriteMapper -->
+<!--
+    媒体最近浏览表 media_recent 映射文件（M2）；幂等策略同 MediaFavoriteMapper。
+
+    ================== 身份：hash 优先、老字段回退 ==================
+    依据 doc/媒体库可移植性方案.md §3 P1：content_hash 是稳定身份，播放进度记录里存的
+    target_id / (album_id, seq) 会随改名、移动、相册重排而失效。
+      * content_hash 不为 NULL → 按哈希认行（进度跟着内容走）；
+      * content_hash 为 NULL（老数据未回填）→ 退回 target_id / (album_id, seq)。
+    匹配条件用 OR 合并，保证"老行 + 新哈希"能命中同一行，既不重复插入也不漏删。
+-->
 <mapper namespace="com.qtools.media.mapper.MediaRecentMapper">
 
     <resultMap type="com.qtools.media.domain.MediaUserItem" id="MediaRecentItemResult">
@@ -18,28 +27,36 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <sql id="exactWhere">
         owner_key = #{ownerKey} and kind = #{kind}
+        and (
+        <if test="contentHash != null">
+            content_hash = #{contentHash} or
+        </if>
         <choose>
             <when test="kind == 'video'">
-                and target_id = #{targetId}
+                target_id = #{targetId}
             </when>
             <otherwise>
-                and album_id = #{albumId} and seq = #{seq}
+                album_id = #{albumId} and seq = #{seq}
             </otherwise>
         </choose>
+        )
     </sql>
 
     <insert id="insertIfAbsent">
-        insert into media_recent (owner_key, kind, target_id, album_id, seq, pos, dur)
+        insert into media_recent (owner_key, kind, target_id, album_id, seq, content_hash, pos, dur)
         select #{ownerKey}, #{kind}, #{targetId,jdbcType=VARCHAR}, #{albumId,jdbcType=VARCHAR},
-               #{seq,jdbcType=INTEGER}, #{pos,jdbcType=DECIMAL}, #{dur,jdbcType=DECIMAL}
+               #{seq,jdbcType=INTEGER}, #{contentHash,jdbcType=VARCHAR},
+               #{pos,jdbcType=DECIMAL}, #{dur,jdbcType=DECIMAL}
         from dual
         where not exists (select 1 from media_recent where <include refid="exactWhere"/>)
     </insert>
 
+    <!-- 命中时刷新续播位置；content_hash 只补空、不覆盖 -->
     <update id="touch">
         update media_recent
            set pos = #{pos,jdbcType=DECIMAL},
                dur = #{dur,jdbcType=DECIMAL},
+               content_hash = coalesce(#{contentHash,jdbcType=VARCHAR}, content_hash),
                updated_at = current_timestamp(3)
          where <include refid="exactWhere"/>
     </update>
@@ -48,13 +65,33 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         delete from media_recent where <include refid="exactWhere"/>
     </delete>
 
+    <!--
+        最近浏览列表：出参仍是 target_id / album_id / seq（前端契约不变），值取 join 到的
+        当前值；video 侧哈希有唯一索引不会放大，photo 侧用「关联子查询 + LIMIT 1」取一条。
+        详见 MediaFavoriteMapper.xml 的同名注释。
+    -->
     <select id="selectItemList" resultMap="MediaRecentItemResult">
-        select r.kind, r.target_id, r.album_id, r.seq, r.pos, r.dur,
+        select r.kind,
+               coalesce(v.id, r.target_id)       as target_id,
+               coalesce(p.album_id, r.album_id)  as album_id,
+               coalesce(p.seq, r.seq)            as seq,
+               r.pos, r.dur,
                r.updated_at as happened_at,
                coalesce(v.title, a.title) as title
         from media_recent r
-        left join media_video v on r.kind = 'video' and v.id = r.target_id
-        left join media_album a on r.kind = 'photo' and a.id = r.album_id
+        left join media_video v
+               on r.kind = 'video'
+              and ((r.content_hash is not null and v.content_hash = r.content_hash)
+                or (r.content_hash is null and v.id = r.target_id))
+        left join media_photo p
+               on r.kind = 'photo'
+              and p.id = (select p2.id
+                            from media_photo p2
+                           where (r.content_hash is not null and p2.content_hash = r.content_hash)
+                              or (r.content_hash is null and p2.album_id = r.album_id and p2.seq = r.seq)
+                           order by p2.album_id asc, p2.seq asc, p2.id asc
+                           limit 1)
+        left join media_album a on a.id = coalesce(p.album_id, r.album_id)
         where r.owner_key = #{ownerKey} and r.kind = #{kind}
         order by r.updated_at desc, r.id desc
         limit #{limit}

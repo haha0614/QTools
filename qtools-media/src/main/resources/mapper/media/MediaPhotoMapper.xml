@@ -39,4 +39,17 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         where p.album_id = #{albumId} and p.seq = #{seq} and p.hidden = 0
     </select>
 
+    <!--
+        收藏 / 最近浏览写入时绑定图片的稳定身份：拿到 content_hash 就以它为准，
+        拿不到（老数据未回填）就返回 null，让调用方回退 (album_id, seq)。
+        过滤条件必须与 countPhotoByAlbumAndSeq 完全一致，否则会出现"校验通过但哈希为空"。
+    -->
+    <select id="selectContentHashByAlbumAndSeq" resultType="String">
+        select p.content_hash
+        from media_photo p
+        inner join media_album a on a.id = p.album_id and a.hidden = 0
+        where p.album_id = #{albumId} and p.seq = #{seq} and p.hidden = 0
+        limit 1
+    </select>
+
 </mapper>

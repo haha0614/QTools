@@ -97,6 +97,9 @@ public class MediaAdminServiceImpl implements IMediaAdminService
     private static final Comparator<TrashEntry> TRASH_ORDER =
             Comparator.comparing(entry -> entry.stamp() == null ? "" : entry.stamp());
 
+    /** 库根一致性抽样的条数（自检必须是常数级开销，不能全量扫库） */
+    private static final int ROOT_SAMPLE = 200;
+
     @Autowired
     private MediaAdminMapper mediaAdminMapper;
 
@@ -664,6 +667,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
             // 兜底：自检接口本身绝不能让管理端 500
             warnings.add("自检执行异常: " + message(e));
         }
+        checkRootMismatch(warnings);
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("home", normalizePath(home));
@@ -707,6 +711,73 @@ public class MediaAdminServiceImpl implements IMediaAdminService
             warnings.add("回收站条目统计失败: " + message(e));
         }
         return out;
+    }
+
+    /**
+     * 库根一致性抽样：{@code rootPath + rel_path} 多数不存在 → 追加「媒体根可能配错」
+     *
+     * <p>库根换了盘或配错时不会有任何报错，只表现为满屏 404 和破图；这条 warning 让
+     * {@code GET /api/media/admin/config} 直接把原因摆出来
+     * （见 {@code doc/媒体库可移植性方案.md} §3 P2「库根可能配错」）。</p>
+     *
+     * <p>只抽样 {@value #ROOT_SAMPLE} 条：库里上万个文件，自检必须是常数级开销。
+     * 根未配置 / 不存在 / 不是目录时直接返回 —— 那些情况 {@link #dirNode} 已经报过更准确的
+     * warning，不要重复刷屏。</p>
+     */
+    private void checkRootMismatch(List<String> warnings)
+    {
+        String rootPath = normalizePath(mediaProperties.getRootPath());
+        Path root = toPath(rootPath);
+        if (root == null || !probe(root, Files::isDirectory))
+        {
+            return;
+        }
+        Path base = root.toAbsolutePath().normalize();
+        List<String> relPaths;
+        try
+        {
+            relPaths = mediaAdminMapper.selectSampleRelPaths(ROOT_SAMPLE);
+        }
+        catch (RuntimeException e)
+        {
+            warnings.add("库根一致性抽样失败（数据库不可用？）: " + message(e));
+            return;
+        }
+        if (relPaths == null || relPaths.isEmpty())
+        {
+            return;
+        }
+        int missing = 0;
+        for (String relPath : relPaths)
+        {
+            if (!probe(resolveUnder(base, relPath), Files::isRegularFile))
+            {
+                missing++;
+            }
+        }
+        if (missing * 2 > relPaths.size())
+        {
+            warnings.add("媒体根可能配错：抽样 " + relPaths.size() + " 个视频中有 " + missing
+                    + " 个找不到文件（当前库根：" + rootPath + "）");
+        }
+    }
+
+    /** 相对路径 → 绝对路径；空值、绝对路径、{@code ..} 逃出库根的一律返回 null（视为找不到） */
+    private static Path resolveUnder(Path base, String relPath)
+    {
+        if (relPath == null || relPath.isEmpty())
+        {
+            return null;
+        }
+        try
+        {
+            Path resolved = base.resolve(relPath).normalize();
+            return resolved.startsWith(base) ? resolved : null;
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
     }
 
     /**

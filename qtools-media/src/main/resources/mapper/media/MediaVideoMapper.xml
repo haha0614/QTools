@@ -9,7 +9,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 <mapper namespace="com.qtools.media.mapper.MediaVideoMapper">
 
     <resultMap type="com.qtools.media.domain.MediaVideo" id="MediaVideoResult">
-        <id     property="id"         column="id"          />
+        <id     property="id"          column="id"           />
+        <result property="contentHash" column="content_hash" />
+        <result property="rootId"      column="root_id"      />
         <result property="folder"     column="folder"      />
         <result property="relPath"    column="rel_path"    />
         <result property="title"      column="title"       />
@@ -36,8 +38,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="name"    column="name"     />
     </resultMap>
 
+    <!--
+        content_hash / root_id 一并取出：收藏 / 最近浏览的写入路径要拿它的哈希做稳定身份
+        （hash 优先、老字段回退，见 doc/媒体库可移植性方案.md），
+        复用 selectVideoById 就不再额外查一次库。这两列不出现在任何接口出参里。
+    -->
     <sql id="selectVideoVo">
-        select id, folder, rel_path, title, size, dur, w, h, vcodec, browser_ok,
+        select id, content_hash, root_id, folder, rel_path, title, size, dur, w, h, vcodec, browser_ok,
                poster_path, doc_path, sub_path, mtime
         from media_video
     </sql>
@@ -51,6 +58,11 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     <select id="selectVideoById" parameterType="String" resultMap="MediaVideoResult">
         <include refid="selectVideoVo"/>
         where id = #{id} and hidden = 0
+    </select>
+
+    <!-- 取消收藏 / 删除最近浏览要用的哈希：不过滤 hidden，视频被软删后也能按哈希认回收藏行 -->
+    <select id="selectContentHashById" resultType="String">
+        select content_hash from media_video where id = #{id} limit 1
     </select>
 
     <select id="selectTagList" resultMap="MediaVideoTagResult">

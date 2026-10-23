@@ -19,6 +19,16 @@ public class MediaAlbum
     /** 相对媒体根的目录 */
     private String dir;
 
+    /**
+     * 规范化相对目录 —— 相册的稳定身份（扫描脚本维护，重扫时按它认回原 id）。
+     *
+     * <p>注意：本库的相册是<b>按文件名前缀分册</b>的（156 本相册只对应 13 个目录，
+     * 其中「写真/念念 Nian Nian」一个目录下有 144 本），因此 {@code dir_key} 只能定位
+     * "该册图片所在目录"，<b>不唯一</b>——join / 去重必须再带上 title 或直接用 id。
+     * 当前 Java 读路径仍以 {@link #id} 为准，本字段只供扫描脚本与后续迁移使用。</p>
+     */
+    private String dirKey;
+
     private Integer photoCount;
 
     private Long bytes;
@@ -73,6 +83,16 @@ public class MediaAlbum
     public void setDir(String dir)
     {
         this.dir = dir;
+    }
+
+    public String getDirKey()
+    {
+        return dirKey;
+    }
+
+    public void setDirKey(String dirKey)
+    {
+        this.dirKey = dirKey;
     }
 
     public Integer getPhotoCount()

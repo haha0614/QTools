@@ -2,6 +2,7 @@ package com.qtools.media.mapper;
 
 import java.util.Date;
 import java.util.List;
+import org.apache.ibatis.annotations.Param;
 import com.qtools.media.domain.MediaVideo;
 import com.qtools.media.domain.MediaVideoActor;
 import com.qtools.media.domain.MediaVideoTag;
@@ -20,6 +21,15 @@ public interface MediaVideoMapper
 
     /** 按 id 查询单个未隐藏视频 */
     MediaVideo selectVideoById(String id);
+
+    /**
+     * 视频内容哈希（<b>不过滤 hidden</b>），供取消收藏 / 删除最近浏览时按稳定身份匹配
+     *
+     * <p>删除路径要能在视频已隐藏（软删）之后仍然把收藏行按哈希认出来，因此这里不能像
+     * {@link #selectVideoById} 那样过滤 hidden。哈希为 null 表示扫描脚本还没回填，
+     * 调用方回退老的 target_id。详见 {@code doc/媒体库可移植性方案.md}。</p>
+     */
+    String selectContentHashById(@Param("id") String id);
 
     /** 查询全部未隐藏视频的标签，按 video_id 排序，供调用方分组成 map */
     List<MediaVideoTag> selectTagList();

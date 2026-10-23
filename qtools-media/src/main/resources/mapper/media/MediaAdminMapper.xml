@@ -214,5 +214,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         group by p.id, p.name, p.sort
         order by p.sort asc, p.id asc
     </select>
+    <!-- 配置自检：抽样 rel_path 判断「库根是否配错」（不含 hidden=1 的行，它们本来就被搬进了回收站） -->
+    <select id="selectSampleRelPaths" resultType="String">
+        select rel_path
+        from media_video
+        where hidden = 0
+        order by id asc
+        limit #{limit}
+    </select>
 
 </mapper>

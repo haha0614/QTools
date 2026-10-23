@@ -10,8 +10,19 @@ import java.util.Date;
  */
 public class MediaVideo
 {
-    /** sha1(rel)[:12] */
+    /** sha1(rel)[:12]（历史身份，保持不变：前端 URL / 统计 target_key / 缩略图路径都还在用它） */
     private String id;
+
+    /**
+     * 内容哈希（oshash）—— 改名 / 移动 / 换盘都不变，是收藏与播放进度的稳定身份。
+     *
+     * <p>老库数据可能为 null（扫描脚本回填之前），此时调用方必须回退旧的 {@link #id}；
+     * 详见 {@code doc/媒体库可移植性方案.md}。</p>
+     */
+    private String contentHash;
+
+    /** 所属库根 media_root.id；null 表示默认根（多库根预留，当前只用一个根） */
+    private Integer rootId;
 
     /** 一级目录（分类） */
     private String folder;
@@ -57,6 +68,26 @@ public class MediaVideo
     public void setId(String id)
     {
         this.id = id;
+    }
+
+    public String getContentHash()
+    {
+        return contentHash;
+    }
+
+    public void setContentHash(String contentHash)
+    {
+        this.contentHash = contentHash;
+    }
+
+    public Integer getRootId()
+    {
+        return rootId;
+    }
+
+    public void setRootId(Integer rootId)
+    {
+        this.rootId = rootId;
     }
 
     public String getFolder()

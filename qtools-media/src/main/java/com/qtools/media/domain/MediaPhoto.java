@@ -11,8 +11,20 @@ public class MediaPhoto
 
     private String albumId;
 
-    /** 册内 0 基序号 */
+    /** 册内 0 基序号（相册内插图后会整体后移，不能当身份用） */
     private Integer seq;
+
+    /**
+     * 内容哈希（oshash）—— 相册内插图 / 改名 / 移动都不变，是收藏与最近浏览的稳定身份。
+     *
+     * <p>同一张图可以合法地出现在多个相册里，因此本列<b>没有</b>唯一索引；老库数据可能为 null
+     * （扫描脚本回填之前），此时必须回退 {@code (album_id, seq)}。详见
+     * {@code doc/媒体库可移植性方案.md}。</p>
+     */
+    private String contentHash;
+
+    /** 所属库根 media_root.id；null 表示默认根（多库根预留，当前只用一个根） */
+    private Integer rootId;
 
     /** 相对媒体根的路径 */
     private String relPath;
@@ -57,6 +69,26 @@ public class MediaPhoto
     public void setSeq(Integer seq)
     {
         this.seq = seq;
+    }
+
+    public String getContentHash()
+    {
+        return contentHash;
+    }
+
+    public void setContentHash(String contentHash)
+    {
+        this.contentHash = contentHash;
+    }
+
+    public Integer getRootId()
+    {
+        return rootId;
+    }
+
+    public void setRootId(Integer rootId)
+    {
+        this.rootId = rootId;
     }
 
     public String getRelPath()

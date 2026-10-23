@@ -81,4 +81,13 @@ public interface MediaAdminMapper
 
     /** 按人物统计相册数与图片数（含 0 的人物） */
     List<Map<String, Object>> selectPersonStats();
+
+    // ------------------------------------------------------------------ 配置自检
+
+    /**
+     * 抽样取若干条视频的相对路径，用于 {@code GET /api/media/admin/config} 判断「库根是否配错」
+     *
+     * <p>只取 {@code rel_path}，不取整行：自检接口要能在库很大时也很快返回。</p>
+     */
+    List<String> selectSampleRelPaths(@Param("limit") int limit);
 }
