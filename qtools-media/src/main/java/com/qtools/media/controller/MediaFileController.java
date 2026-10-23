@@ -39,7 +39,9 @@ import com.qtools.media.service.IMediaFileService;
  * <ul>
  *   <li>/file：字节级 Range（ResourceRegion + HttpRange），200/206/416/If-Range/HEAD 全覆盖；</li>
  *   <li>/sub：.vtt 直传，.srt 内存转 VTT；</li>
- *   <li>/thumb 与 /preview：thumbs 目录下 jpg，长缓存。</li>
+ *   <li>/thumb 与 /preview：thumbs 目录下 jpg，长缓存；</li>
+ *   <li>/sprite、/preview/{id}：视频精灵图与预览视频（build-thumbs.js 按内容寻址落盘，
+ *       默认不生成，产物缺失即 404；预览视频复用 /file 的 Range 实现）。</li>
  * </ul>
  *
  * @author qtools
@@ -91,6 +93,39 @@ public class MediaFileController
     {
         long begin = System.currentTimeMillis();
         Path path = mediaFileService.resolveMedia(p, r);
+        streamFile(path, request, response, "p=" + p, begin);
+    }
+
+    /** 视频精灵图 thumbs/s/<content_hash>.jpg（回退 thumbs/s/<id>.jpg；无 hash 或文件不存在 → 404） */
+    @GetMapping("/sprite/{id}")
+    public ResponseEntity<Resource> sprite(@PathVariable("id") String id)
+    {
+        return imageResponse(mediaFileService.resolveSprite(id));
+    }
+
+    /**
+     * 视频预览视频 thumbs/pv2/<content_hash>.mp4｜.webm（回退 <id>.mp4｜.webm；都没有 → 404）
+     *
+     * <p><b>支持 Range</b>：直接把 /file 那套 200/206/416 实现拿来复用，
+     * {@code <video preload="none">} 按比例 {@code currentTime} 拖动时浏览器才会发区间请求。</p>
+     */
+    @GetMapping("/preview/{id}")
+    public void previewClip(@PathVariable("id") String id, HttpServletRequest request,
+            HttpServletResponse response) throws IOException
+    {
+        long begin = System.currentTimeMillis();
+        Path path = mediaFileService.resolvePreviewClip(id);
+        streamFile(path, request, response, "preview=" + id, begin);
+    }
+
+    /**
+     * 字节级 Range 落盘（/file 与 /preview 共用）
+     *
+     * @param label 日志用的资源标识
+     */
+    private void streamFile(Path path, HttpServletRequest request, HttpServletResponse response, String label,
+            long begin) throws IOException
+    {
         long size = Files.size(path);
         long mtime = Files.getLastModifiedTime(path).toMillis();
         String etag = '"' + Long.toHexString(size) + '-' + Long.toHexString(mtime) + '"';
@@ -119,7 +154,7 @@ public class MediaFileController
             {
                 response.getOutputStream().write(body);
             }
-            log.debug("媒体文件 416 p={} size={}", p, size);
+            log.debug("媒体文件 416 {} size={}", label, size);
             return;
         }
 
@@ -143,7 +178,7 @@ public class MediaFileController
             ResourceRegion region = new ResourceRegion(new FileSystemResource(path), start, count);
             writeRegion(region, response);
         }
-        log.debug("媒体文件 {} p={} range={} len={} cost={}ms", response.getStatus(), p,
+        log.debug("媒体文件 {} {} range={} len={} cost={}ms", response.getStatus(), label,
                 response.getHeader("Content-Range"), count, System.currentTimeMillis() - begin);
     }
 

@@ -54,7 +54,16 @@ public class MediaFileServiceImpl implements IMediaFileService
 
     private static final String PREVIEW_PHOTO_DIR = "pv";
 
+    /** 视频精灵图目录（build-thumbs.js --sprite，10x10 网格） */
+    private static final String SPRITE_DIR = "s";
+
+    /** 视频预览视频目录（build-thumbs.js --preview，静音缩时） */
+    private static final String PREVIEW_CLIP_DIR = "pv2";
+
     private static final String JPG_SUFFIX = ".jpg";
+
+    /** 预览视频可能的容器后缀：编码器有 libx264 时 .mp4，只有 VP9/VP8 时 .webm */
+    private static final String[] CLIP_SUFFIXES = { ".mp4", ".webm" };
 
     /** 视频 id / 文件名片段：只允许安全字符，杜绝路径分隔符与 . / .. */
     private static final Pattern SAFE_ID = Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
@@ -383,6 +392,21 @@ public class MediaFileServiceImpl implements IMediaFileService
      */
     private Path contentAddressedThumb(Path dir, String videoId)
     {
+        String hash = contentHashOf(videoId);
+        if (hash == null)
+        {
+            return null;
+        }
+        return existingFile(dir, hash + JPG_SUFFIX);
+    }
+
+    /**
+     * 视频内容哈希（已校验）
+     *
+     * @return 命中返回 trim 过的 16 位 hex；{@code content_hash} 未回填、脏数据、读库异常都返回 null
+     */
+    private String contentHashOf(String videoId)
+    {
         String hash;
         try
         {
@@ -390,7 +414,7 @@ public class MediaFileServiceImpl implements IMediaFileService
         }
         catch (RuntimeException e)
         {
-            // 读库失败按「没有哈希」处理：退到老命名，别让缩略图接口跟着库一起挂
+            // 读库失败按「没有哈希」处理：退到老命名，别让派生资源接口跟着库一起挂
             return null;
         }
         if (StringUtils.isEmpty(hash))
@@ -398,12 +422,99 @@ public class MediaFileServiceImpl implements IMediaFileService
             return null;
         }
         String name = hash.trim();
-        if (!SAFE_CONTENT_HASH.matcher(name).matches())
+        return SAFE_CONTENT_HASH.matcher(name).matches() ? name : null;
+    }
+
+    @Override
+    public Path resolveSprite(String id)
+    {
+        requireSafeId(id);
+        Path dir = thumbsDir().resolve(SPRITE_DIR);
+        String hash = contentHashOf(id);
+        if (hash != null)
         {
-            return null;
+            Path hit = existingFile(dir, hash + JPG_SUFFIX);
+            if (hit != null)
+            {
+                return hit;
+            }
         }
-        Path target = dir.resolve(name + JPG_SUFFIX).normalize();
-        return target.startsWith(dir) && Files.isRegularFile(target) ? target : null;
+        // 回退：老命名 thumbs/s/<videoId>.jpg
+        return requireFile(dir, id + JPG_SUFFIX);
+    }
+
+    @Override
+    public Path resolvePreviewClip(String id)
+    {
+        requireSafeId(id);
+        Path dir = thumbsDir().resolve(PREVIEW_CLIP_DIR);
+        String hash = contentHashOf(id);
+        // 先内容寻址、再老命名；每个 stem 先 .mp4 再 .webm（编码器不同落盘不同）
+        String[] stems = hash == null ? new String[] { id } : new String[] { hash, id };
+        for (String stem : stems)
+        {
+            for (String suffix : CLIP_SUFFIXES)
+            {
+                Path hit = existingFile(dir, stem + suffix);
+                if (hit != null)
+                {
+                    return hit;
+                }
+            }
+        }
+        throw MediaException.notFound();
+    }
+
+    @Override
+    public Set<String> spriteKeys()
+    {
+        return derivedKeys(SPRITE_DIR);
+    }
+
+    @Override
+    public Set<String> previewKeys()
+    {
+        return derivedKeys(PREVIEW_CLIP_DIR);
+    }
+
+    /**
+     * 派生目录下的文件名集合（不含扩展名，.mp4/.webm/.jpg 都归并到同一 stem）
+     *
+     * <p>一次目录扫描取代逐条 {@code Files.isRegularFile}：索引要判断上万条视频，
+     * 逐条 stat 会把 /media/index 的构建时间拉长一个量级。</p>
+     */
+    private Set<String> derivedKeys(String sub)
+    {
+        Set<String> out = new java.util.HashSet<>();
+        Path dir;
+        try
+        {
+            dir = thumbsDir().resolve(sub);
+        }
+        catch (RuntimeException e)
+        {
+            // 缩略图根没配好时索引照旧可用：只是把所有视频都当成「没有派生资源」
+            return out;
+        }
+        if (!Files.isDirectory(dir))
+        {
+            return out;
+        }
+        try (java.nio.file.DirectoryStream<Path> stream = Files.newDirectoryStream(dir))
+        {
+            for (Path file : stream)
+            {
+                String name = file.getFileName().toString();
+                int dot = name.lastIndexOf('.');
+                out.add(dot > 0 ? name.substring(0, dot) : name);
+            }
+        }
+        catch (IOException | RuntimeException e)
+        {
+            // 目录读不到按「没有派生资源」处理，不让索引接口跟着挂
+            return new java.util.HashSet<>();
+        }
+        return out;
     }
 
     @Override
@@ -741,6 +852,27 @@ public class MediaFileServiceImpl implements IMediaFileService
             // 权限不足、链路异常等一律按越权处理，避免泄漏文件是否存在
             throw MediaException.forbidden();
         }
+    }
+
+    /** 视频 id 白名单校验：thumb/v、s、pv2 三个接口共用同一套规则 */
+    private static void requireSafeId(String id)
+    {
+        if (id == null || !SAFE_ID.matcher(id).matches())
+        {
+            throw MediaException.forbidden();
+        }
+    }
+
+    /**
+     * 拼接后落在 base 内且为真实普通文件时返回路径，否则返回 null
+     *
+     * <p>与 {@link #requireFile} 的区别：这里<b>不抛异常</b>，专供「先内容寻址、再回退老命名」
+     * 的候选探测，避免第一个候选缺失就把请求打成 404。</p>
+     */
+    private static Path existingFile(Path base, String name)
+    {
+        Path target = base.resolve(name).normalize();
+        return target.startsWith(base) && Files.isRegularFile(target) ? target : null;
     }
 
     /** 拼接后仍须落在 base 内且为真实普通文件 */

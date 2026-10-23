@@ -31,6 +31,7 @@ import com.qtools.media.mapper.MediaAlbumMapper;
 import com.qtools.media.mapper.MediaPersonMapper;
 import com.qtools.media.mapper.MediaPhotoMapper;
 import com.qtools.media.mapper.MediaVideoMapper;
+import com.qtools.media.service.IMediaFileService;
 import com.qtools.media.service.IMediaIndexService;
 
 /**
@@ -73,6 +74,10 @@ public class MediaIndexServiceImpl implements IMediaIndexService
 
     @Autowired
     private MediaProperties mediaProperties;
+
+    /** 派生资源（sprite / pv2）目录清单：索引批量判断 hasSprite / hasPreview 用 */
+    @Autowired
+    private IMediaFileService mediaFileService;
 
     private volatile MediaIndexSnapshot snapshot;
 
@@ -174,6 +179,10 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             actorsByVideo.computeIfAbsent(actor.getVideoId(), k -> new ArrayList<>()).add(actor.getName());
         }
 
+        // 派生资源存在性：一次目录扫描成集合，逐条判断不再 stat（万级视频下差别是一个量级）
+        Set<String> spriteKeys = mediaFileService.spriteKeys();
+        Set<String> previewKeys = mediaFileService.previewKeys();
+
         List<Map<String, Object>> videoNodes = new ArrayList<>(videos.size());
         int posterCount = 0;
         for (MediaVideo video : videos)
@@ -182,8 +191,10 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             {
                 posterCount++;
             }
-            videoNodes.add(toVideoNode(video, tagsByVideo.get(video.getId()),
-                    actorsByVideo.get(video.getId())));
+            Map<String, Object> node = toVideoNode(video, tagsByVideo.get(video.getId()),
+                    actorsByVideo.get(video.getId()));
+            putDerived(node, video, spriteKeys, previewKeys);
+            videoNodes.add(node);
         }
 
         List<MediaAlbum> albums = mediaAlbumMapper.selectAlbumList();
@@ -286,6 +297,30 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         node.put("doc", video.getDocPath());
         node.put("sub", video.getSubPath());
         return node;
+    }
+
+    /**
+     * 视频条目补派生资源标记（sprite / 预览视频）
+     *
+     * <p>命中规则与服务端解析完全一致：文件名是 {@code content_hash} 或老命名 {@code id} 都算有。
+     * 前端据此决定要不要请求 /media/sprite|preview/{id}，不靠逐个探测 404。</p>
+     */
+    private static void putDerived(Map<String, Object> node, MediaVideo video, Set<String> spriteKeys,
+            Set<String> previewKeys)
+    {
+        String hash = video.getContentHash() == null ? "" : video.getContentHash().trim();
+        String id = video.getId();
+        node.put("hasSprite", hasDerivedKey(spriteKeys, hash, id));
+        node.put("hasPreview", hasDerivedKey(previewKeys, hash, id));
+    }
+
+    private static boolean hasDerivedKey(Set<String> keys, String hash, String id)
+    {
+        if (!hash.isEmpty() && keys.contains(hash))
+        {
+            return true;
+        }
+        return id != null && keys.contains(id);
     }
 
     private Map<String, Object> toAlbumNode(MediaAlbum album, Map<Long, String> personNames,

@@ -1,6 +1,7 @@
 package com.qtools.media.service;
 
 import java.nio.file.Path;
+import java.util.Set;
 
 /**
  * 媒体文件定位与内容处理 服务层
@@ -160,6 +161,49 @@ public interface IMediaFileService
      * @return 缩略图路径
      */
     Path resolveThumbVideo(String id);
+
+    /**
+     * 定位视频精灵图：<b>内容寻址优先</b> thumbs/s/{content_hash}.jpg，
+     * 命中不了再<b>回退</b>老命名 thumbs/s/{id}.jpg
+     *
+     * <p>精灵图由 build-thumbs.js 的 {@code --sprite} 生成（10 列 × 10 行，每格 160×90，
+     * 成品恒 1600×900），<b>默认不生成</b>：产物缺失就在这里 404，前端靠 /media/index 的
+     * {@code hasSprite} 决定要不要请求，不会拿 404 当常态。</p>
+     *
+     * @param id 视频 id
+     * @return 精灵图路径
+     * @throws com.qtools.media.exception.MediaException 403 id 非法 / 404 产物不存在
+     */
+    Path resolveSprite(String id);
+
+    /**
+     * 定位视频预览视频：内容寻址优先 thumbs/pv2/{content_hash}.mp4｜.webm，
+     * 命中不了再回退老命名 thumbs/pv2/{id}.mp4｜.webm
+     *
+     * <p>预览视频由 build-thumbs.js 的 {@code --preview} 生成（静音 320×180 4fps 5~8 秒）；
+     * 编码器只有 VP9/VP8 时落 .webm，所以 mp4 找不到还要试 webm。</p>
+     *
+     * @param id 视频 id
+     * @return 预览视频路径（.mp4 或 .webm，Content-Type 由 contentType 按扩展名给出）
+     * @throws com.qtools.media.exception.MediaException 403 id 非法 / 404 产物不存在
+     */
+    Path resolvePreviewClip(String id);
+
+    /**
+     * thumbs/s 下精灵图的文件名集合（不含扩展名），一次目录扫描，
+     * 供 /media/index 批量判断 {@code hasSprite}（避免逐条 stat / 前端逐个探测 404）
+     *
+     * @return 文件名集合；目录不存在或读不到时返回空集
+     */
+    Set<String> spriteKeys();
+
+    /**
+     * thumbs/pv2 下预览视频的文件名集合（不含扩展名，.mp4/.webm 归并到同一 stem），
+     * 供 /media/index 批量判断 {@code hasPreview}
+     *
+     * @return 文件名集合；目录不存在或读不到时返回空集
+     */
+    Set<String> previewKeys();
 
     /**
      * 定位相册缩略图（p）或预览图（pv）
