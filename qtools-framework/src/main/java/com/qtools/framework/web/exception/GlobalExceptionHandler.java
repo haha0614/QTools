@@ -1,5 +1,7 @@
 package com.qtools.framework.web.exception;
 
+import java.io.IOException;
+
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,12 +12,14 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingPathVariableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import com.qtools.common.constant.HttpStatus;
 import com.qtools.common.core.domain.AjaxResult;
 import com.qtools.common.core.text.Convert;
 import com.qtools.common.exception.DemoModeException;
 import com.qtools.common.exception.ServiceException;
+import com.qtools.common.utils.ClientAbortUtils;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.common.utils.html.EscapeUtil;
 
@@ -102,12 +106,46 @@ public class GlobalExceptionHandler
     }
 
     /**
+     * 客户端提前断开：刷新页面、切换路由、关闭标签页，或 keepalive / sendBeacon 请求被浏览器取消。
+     *
+     * <p>此时连接已不可用，写不回任何响应；这属于正常的浏览器行为，不是服务端故障。
+     * 若交给下面的 {@code handleException} 会按系统异常打整段 ERROR 堆栈，一次翻页就刷满日志，
+     * 因此单独处理、按 DEBUG 记录且不打堆栈。</p>
+     */
+    @ExceptionHandler(AsyncRequestNotUsableException.class)
+    public void handleAsyncRequestNotUsable(AsyncRequestNotUsableException e, HttpServletRequest request)
+    {
+        log.debug("客户端已断开，忽略响应写入失败：{}（{}）", request.getRequestURI(), rootCauseMessage(e));
+    }
+
+    /**
+     * 异常链里是否带「客户端主动断开」特征（实现见 {@link ClientAbortUtils}，
+     * 放在公共模块以便各业务模块共用；判断基于类名与消息，不引入 spring-web / tomcat 的类型依赖）。
+     */
+    public static boolean isClientAbort(Throwable e)
+    {
+        return ClientAbortUtils.isClientAbort(e);
+    }
+
+    /** 取根因的简短信息，避免日志里塞整段堆栈 */
+    private static String rootCauseMessage(Throwable e)
+    {
+        return ClientAbortUtils.rootCauseMessage(e);
+    }
+
+    /**
      * 系统异常
      */
     @ExceptionHandler(Exception.class)
     public AjaxResult handleException(Exception e, HttpServletRequest request)
     {
         String requestURI = request.getRequestURI();
+        if (isClientAbort(e))
+        {
+            // 连接已断，写响应必然再次失败；只留一行 DEBUG，避免刷 ERROR 堆栈
+            log.debug("客户端已断开，忽略：{}", requestURI);
+            return null;
+        }
         log.error("请求地址'{}',发生系统异常.", requestURI, e);
         return AjaxResult.error(e.getMessage());
     }

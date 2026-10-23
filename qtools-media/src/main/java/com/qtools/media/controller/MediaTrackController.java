@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import com.qtools.common.annotation.Anonymous;
 import com.qtools.common.core.domain.AjaxResult;
+import com.qtools.common.utils.ClientAbortUtils;
 import com.qtools.media.domain.dto.MediaTrackDTO;
 import com.qtools.media.service.IMediaTrackService;
 
@@ -66,11 +67,24 @@ public class MediaTrackController
         return AjaxResult.success();
     }
 
-    /** 兜底：埋点链路上任何未预料的异常都不外泄给前端 */
+    /**
+     * 兜底：埋点链路上任何未预料的异常都不外泄给前端。
+     *
+     * <p>埋点是 sendBeacon / keepalive 发出的「发了就不管」请求，页面刷新或关闭时被浏览器取消很常见，
+     * 这类「客户端已断开」的异常按 DEBUG 记录（复用全局异常处理器里的同一个判断），
+     * 其余异常仍按 WARN 记录。</p>
+     */
     @ExceptionHandler(Exception.class)
     public AjaxResult handleUnexpected(Exception e)
     {
-        log.warn("媒体埋点处理异常（已忽略）: {}", e.getMessage());
+        if (ClientAbortUtils.isClientAbort(e))
+        {
+            log.debug("媒体埋点：客户端已断开，忽略（{}）", e.getClass().getSimpleName());
+        }
+        else
+        {
+            log.warn("媒体埋点处理异常（已忽略）: {}", e.getMessage());
+        }
         return AjaxResult.success();
     }
 }
