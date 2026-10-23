@@ -402,6 +402,89 @@ public class MediaFileServiceImpl implements IMediaFileService
 
     // ------------------------------------------------------------------ 路径安全
 
+    /**
+     * 库根 realpath（多库根）
+     *
+     * @param rootId null = 配置 {@code qtools.media.rootPath}（沿用原有「配置变了就重算」的缓存）；
+     *               非空 = {@code media_root} 里该行的 {@code path}
+     */
+    private Path rootDir(Integer rootId)
+    {
+        if (rootId == null)
+        {
+            return rootDir();
+        }
+        MediaRoot root;
+        try
+        {
+            root = mediaRootMapper.selectRootById(rootId);
+        }
+        catch (RuntimeException e)
+        {
+            // 表不存在（没跑 media_portability.sql）/ 库不可用：显式指定的根查不到就是查不到
+            throw new MediaException(500, "读取库根失败（media_root）: id=" + rootId);
+        }
+        if (root == null || StringUtils.isEmpty(root.getPath()))
+        {
+            throw MediaException.notFound("库根不存在: media_root.id=" + rootId);
+        }
+        try
+        {
+            return Paths.get(root.getPath()).toAbsolutePath().normalize().toRealPath();
+        }
+        catch (IOException | RuntimeException e)
+        {
+            // 第二个根没挂盘 / 路径写错：按「找不到」处理，不把接口打成 500
+            throw MediaException.notFound("库根不可用: " + root.getPath() + "（media_root.id=" + rootId + "）");
+        }
+    }
+
+    /**
+     * 多根兜底用的其它媒体根（{@code kind='root'}，按 id 升序，排除当前默认根）
+     *
+     * <p>根不存在 / 不可访问 / {@code media_root} 没建 / 读库失败一律<b>静默跳过</b>：
+     * 第二个根没挂盘时既不能报错，也不该影响默认根的正常访问。</p>
+     */
+    private List<Path> otherRoots(Path primary)
+    {
+        List<MediaRoot> roots;
+        try
+        {
+            roots = mediaRootMapper.selectRootList();
+        }
+        catch (RuntimeException e)
+        {
+            return List.of();
+        }
+        if (roots == null || roots.isEmpty())
+        {
+            return List.of();
+        }
+        List<Path> out = new ArrayList<>();
+        for (MediaRoot root : roots)
+        {
+            if (root == null || StringUtils.isEmpty(root.getPath()) || !"root".equalsIgnoreCase(root.getKind()))
+            {
+                continue;
+            }
+            Path dir;
+            try
+            {
+                dir = Paths.get(root.getPath()).toAbsolutePath().normalize().toRealPath();
+            }
+            catch (IOException | RuntimeException e)
+            {
+                continue;
+            }
+            if (dir.equals(primary) || out.contains(dir))
+            {
+                continue;
+            }
+            out.add(dir);
+        }
+        return out;
+    }
+
     /** 媒体根（realpath） */
     private Path rootDir()
     {
@@ -468,8 +551,52 @@ public class MediaFileServiceImpl implements IMediaFileService
         }
     }
 
-    /** 拒绝绝对路径/盘符/UNC/前导分隔符，并把 rel 解析到 root 内 */
-    private Path resolveInside(Path root, String rel)
+    /** 在某个根内定位普通文件：越界 403 / 不存在 404 */
+    private Path fileIn(Path root, String rel)
+    {
+        Path real = toRealPath(resolveInside(root, rel));
+        if (!real.startsWith(root))
+        {
+            throw MediaException.forbidden();
+        }
+        if (real.startsWith(stationDir(root)))
+        {
+            throw MediaException.forbidden();
+        }
+        if (!Files.isRegularFile(real))
+        {
+            throw MediaException.notFound();
+        }
+        return real;
+    }
+
+    /** 在某个根内定位目录：越界 403 / 不存在 404（站内目录也不允许作为删除/隐藏目标） */
+    private Path dirIn(Path root, String rel)
+    {
+        Path real = toRealPath(resolveInside(root, rel));
+        if (!real.startsWith(root))
+        {
+            throw MediaException.forbidden();
+        }
+        if (real.startsWith(stationDir(root)))
+        {
+            // 站内目录（_媒体站）下的任何对象都不得作为删除/隐藏目标
+            throw MediaException.forbidden();
+        }
+        if (!Files.isDirectory(real))
+        {
+            throw MediaException.notFound();
+        }
+        return real;
+    }
+
+    /**
+     * 相对路径的语法白名单：拒绝 NUL / 绝对路径 / 盘符 / UNC
+     *
+     * <p>与根无关，所以在多根兜底之前先判一次；{@link #resolveInside} 内部还会再判一次，
+     * 保证任何调用路径都过这道闸。</p>
+     */
+    private void checkRelSyntax(String rel)
     {
         if (rel.indexOf('\0') >= 0)
         {
@@ -485,6 +612,12 @@ public class MediaFileServiceImpl implements IMediaFileService
         {
             throw MediaException.forbidden();
         }
+    }
+
+    /** 拒绝绝对路径/盘符/UNC/前导分隔符，并把 rel 解析到 root 内 */
+    private Path resolveInside(Path root, String rel)
+    {
+        checkRelSyntax(rel);
         Path target;
         try
         {

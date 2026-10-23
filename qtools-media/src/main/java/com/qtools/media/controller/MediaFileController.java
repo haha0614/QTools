@@ -80,13 +80,17 @@ public class MediaFileController
 
     /**
      * 字节级 Range 流（等价 Node 版 /media）
+     *
+     * <p>{@code r} 是可选的多库根 id（{@code media_root.id}）：带上就只在该根内找，
+     * 不带（前端现状）则用配置 {@code qtools.media.rootPath}，找不到再依次试其它媒体根。</p>
      */
     @GetMapping("/file")
-    public void file(@RequestParam(value = "p", required = false) String p, HttpServletRequest request,
+    public void file(@RequestParam(value = "p", required = false) String p,
+            @RequestParam(value = "r", required = false) Integer r, HttpServletRequest request,
             HttpServletResponse response) throws IOException
     {
         long begin = System.currentTimeMillis();
-        Path path = mediaFileService.resolveMedia(p);
+        Path path = mediaFileService.resolveMedia(p, r);
         long size = Files.size(path);
         long mtime = Files.getLastModifiedTime(path).toMillis();
         String etag = '"' + Long.toHexString(size) + '-' + Long.toHexString(mtime) + '"';
@@ -147,10 +151,11 @@ public class MediaFileController
      * 字幕：.srt 内存转 VTT，其余按 VTT 直传（缺头时补 WEBVTT）
      */
     @GetMapping("/sub")
-    public void sub(@RequestParam(value = "p", required = false) String p, HttpServletRequest request,
+    public void sub(@RequestParam(value = "p", required = false) String p,
+            @RequestParam(value = "r", required = false) Integer r, HttpServletRequest request,
             HttpServletResponse response) throws IOException
     {
-        Path path = mediaFileService.resolveMedia(p);
+        Path path = mediaFileService.resolveMedia(p, r);
         // 用字节解码：非法 UTF-8 会被替换而不是抛异常，避免个别字幕整条 500
         String raw = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
         boolean srt = path.getFileName().toString().toLowerCase().endsWith(".srt");

@@ -34,12 +34,14 @@ import com.qtools.media.config.MediaProperties;
 import com.qtools.media.domain.MediaAlbum;
 import com.qtools.media.domain.MediaPerson;
 import com.qtools.media.domain.MediaPhoto;
+import com.qtools.media.domain.MediaRoot;
 import com.qtools.media.domain.MediaVideo;
 import com.qtools.media.domain.MediaVideoActor;
 import com.qtools.media.domain.MediaVideoTag;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaAdminMapper;
 import com.qtools.media.mapper.MediaPersonMapper;
+import com.qtools.media.mapper.MediaRootMapper;
 import com.qtools.media.mapper.MediaVideoMapper;
 import com.qtools.media.service.IMediaAdminService;
 import com.qtools.media.service.IMediaFileService;
@@ -108,6 +110,10 @@ public class MediaAdminServiceImpl implements IMediaAdminService
 
     @Autowired
     private MediaPersonMapper mediaPersonMapper;
+
+    /** 多库根清单（自检只列不改） */
+    @Autowired
+    private MediaRootMapper mediaRootMapper;
 
     @Autowired
     private IMediaFileService mediaFileService;
@@ -654,6 +660,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
             media.put("thumbsPath",
                     dirNode(mediaProperties.getThumbsPath(), "thumbsPath", "缩略图根", false, true, warnings));
             media.put("trashPath", trashNode(warnings));
+            media.put("roots", rootsNode(warnings));
             media.put("ffmpeg", fileNode(mediaProperties.getFfmpeg(), "ffmpeg", "ffmpeg", true, warnings));
             media.put("nodePath", fileNode(mediaProperties.getNodePath(), "nodePath", "Node", true, warnings));
             media.put("scanScript", fileNode(mediaProperties.getScanScript(), "scanScript", "扫描脚本", false, warnings));
@@ -779,6 +786,55 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         {
             return null;
         }
+    }
+
+    /**
+     * 多库根清单：{@code [{id,name,kind,path,exists,readable}]}
+     *
+     * <p>「配了几个根、哪个根现在没挂上」的唯一可视入口。根目录不存在（换盘前先把第二块盘配好）
+     * 只记一条 warning，绝不让自检失败，也不影响其它根：这是「第二个根不存在也不给错」的落点。</p>
+     */
+    private List<Map<String, Object>> rootsNode(List<String> warnings)
+    {
+        List<Map<String, Object>> out = new ArrayList<>();
+        List<MediaRoot> roots;
+        try
+        {
+            roots = mediaRootMapper.selectRootList();
+        }
+        catch (RuntimeException e)
+        {
+            warnings.add("多库根清单读取失败（media_root 未建？先执行 doc/media_portability.sql）: " + message(e));
+            return out;
+        }
+        if (roots == null)
+        {
+            return out;
+        }
+        for (MediaRoot root : roots)
+        {
+            if (root == null)
+            {
+                continue;
+            }
+            String value = normalizePath(root.getPath());
+            Path path = toPath(value);
+            boolean exists = probe(path, Files::exists);
+            Map<String, Object> node = new LinkedHashMap<>();
+            node.put("id", root.getId());
+            node.put("name", root.getName());
+            node.put("kind", root.getKind());
+            node.put("path", value);
+            node.put("exists", exists);
+            node.put("readable", probe(path, Files::isReadable));
+            out.add(node);
+            if ("root".equalsIgnoreCase(root.getKind()) && !exists)
+            {
+                warnings.add("媒体根不可用（media_root.id=" + root.getId() + "）: " + value
+                        + "；把盘挂上或改 media_root.path 即可，其它根不受影响");
+            }
+        }
+        return out;
     }
 
     /**
