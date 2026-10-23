@@ -156,20 +156,24 @@ public class GlobalExceptionHandler
     @ExceptionHandler(BindException.class)
     public AjaxResult handleBindException(BindException e)
     {
-        log.error(e.getMessage(), e);
-        String message = e.getAllErrors().get(0).getDefaultMessage();
-        return AjaxResult.error(message);
+        String message = e.getAllErrors().isEmpty() ? "参数绑定失败" : e.getAllErrors().get(0).getDefaultMessage();
+        log.warn("参数绑定失败：{}", message);
+        return AjaxResult.error(HttpStatus.BAD_REQUEST, message);
     }
 
     /**
      * 自定义验证异常
+     *
+     * <p>参数校验失败是「调用方传错了」，不是服务端故障：用 400 而不是默认的 500，
+     * 并且只记一行 WARN（不打堆栈）——否则每次前端传错字段都会在日志里刷一大段堆栈。</p>
      */
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public Object handleMethodArgumentNotValidException(MethodArgumentNotValidException e)
     {
-        log.error(e.getMessage(), e);
-        String message = e.getBindingResult().getFieldError().getDefaultMessage();
-        return AjaxResult.error(message);
+        String message = e.getBindingResult().getFieldError() == null ? "参数校验不通过"
+                : e.getBindingResult().getFieldError().getDefaultMessage();
+        log.warn("参数校验不通过：{}", message);
+        return AjaxResult.error(HttpStatus.BAD_REQUEST, message);
     }
 
     /**
