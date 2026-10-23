@@ -12,7 +12,8 @@
  *         folder = rel_path 第一段（根目录下直接放文件时用「默认」）
  *         rel_path = 正斜杠相对路径；title = 文件名去扩展名
  *         browser_ok = .mp4/.webm -> 1，其它 -> 0
- *         poster_path = thumbs/v/<id>.jpg（文件由 build-thumbs.js 生成）
+ *         poster_path = thumbs/v/<content_hash>.jpg（文件由 build-thumbs.js P4 按内容生成）；
+ *         无 content_hash 时回退 thumbs/v/<id>.jpg（老命名，build-thumbs 同样会回退）
  *         dur/w/h/vcodec 留 NULL（不跑 ffprobe），且 upsert 时不覆盖已有值
  *   图片  .jpg .jpeg .png .webp .gif .bmp  -> media_photo
  *         album-mode=dir（默认）：每个「图片所在目录」算一本相册
@@ -113,6 +114,11 @@ const HELP = `
                       prefix=目录内再按文件名（去扩展名）开头 ^(\d{1,4})[_\-\s] 分组，每组一本册
   --backfill-hash     给库里 content_hash IS NULL 的行补哈希（按 --root + rel_path 读文件），
                       顺带补齐 media_album.dir_key；文件不存在只计数不删行
+  --fix-poster-path   只更新 media_video.poster_path（不改其它列、不扫盘、不需要 --root）：
+                      有 content_hash 的行刷成 thumbs/v/<content_hash>.jpg，
+                      没有的行刷成 thumbs/v/<id>.jpg；可配 --dry-run / --dump-sql=<file>
+                      注意顺序：先跑 build-thumbs.js（P4 起按 <content_hash>.jpg 落盘），
+                      再执行本模式；封面文件还是 <id>.jpg 时刷完会指向不存在的文件
   --limit=<n>         --backfill-hash 时最多处理多少行（默认不限）
   --help              显示本帮助
 
@@ -144,7 +150,7 @@ const HELP = `
 function parseArgs(argv) {
   const o = Object.assign({}, DEFAULTS, {
     root: null, mysql: null, secret: null, dumpSql: null, truncate: false, yes: false, dryRun: false,
-    ignored: [], noHash: false, backfillHash: false, limit: null, rootId: null,
+    ignored: [], noHash: false, backfillHash: false, fixPosterPath: false, limit: null, rootId: null,
   });
   for (const a of argv) {
     if (a === '--truncate') o.truncate = true;
@@ -153,6 +159,7 @@ function parseArgs(argv) {
     else if (a === '--help' || a === '-h') o.help = true;
     else if (a === '--no-hash') o.noHash = true;
     else if (a === '--backfill-hash') o.backfillHash = true;
+    else if (a === '--fix-poster-path') o.fixPosterPath = true;
     else if (a.startsWith('--root=')) o.root = a.slice('--root='.length);
     else if (a.startsWith('--db=')) o.db = a.slice('--db='.length);
     else if (a.startsWith('--user=')) o.user = a.slice('--user='.length);
@@ -211,6 +218,18 @@ function sqlStr(v) {
 function sqlInt(v) {
   const n = Number(v);
   return Number.isFinite(n) ? String(Math.trunc(n)) : '0';
+}
+
+/**
+ * 视频封面路径：有 content_hash 就按内容寻址，否则回退 videoId
+ *
+ * <p>与 build-thumbs.js（P4）的落盘命名一一对应：<thumbs>/v/<content_hash>.jpg，
+ * content_hash 为 NULL 时才回退 <thumbs>/v/<videoId>.jpg。两处必须一致，
+ * 否则后端/前端按 poster_path 去找就是 404。</p>
+ */
+function posterPathOf(id, hash) {
+  const key = hash === null || hash === undefined ? '' : String(hash).trim();
+  return 'thumbs/v/' + (key === '' ? String(id) : key) + '.jpg';
 }
 
 /** 库根 id：null/undefined 写 NULL（= 后端用配置 rootPath），不能用 sqlInt（那会写 0） */
@@ -848,7 +867,7 @@ function buildSql(model, o) {
   // 2) 视频 upsert（新增/同路径更新；content_hash 一并写入）
   const videoRows = model.videoRows.map((v) => '(' + [
     sqlStr(v.id), sqlStr(v.folder), sqlStr(v.rel), sqlStr(v.title), sqlInt(v.size),
-    'NULL', 'NULL', 'NULL', 'NULL', sqlInt(v.browserOk), sqlStr('thumbs/v/' + v.id + '.jpg'), '0',
+    'NULL', 'NULL', 'NULL', 'NULL', sqlInt(v.browserOk), sqlStr(posterPathOf(v.id, v.hash)), '0',
     sqlDateTime(v.mtimeMs), sqlStr(v.hash), sqlRoot(o.rootId),
   ].join(',') + ')');
   for (const part of chunks(videoRows, o.batch)) {
@@ -865,7 +884,7 @@ function buildSql(model, o) {
     lines.push('UPDATE media_video SET rel_path=' + sqlStr(v.rel) +
       ',folder=' + sqlStr(v.folder) + ',title=' + sqlStr(v.title) +
       ',size=' + sqlInt(v.size) + ',browser_ok=' + sqlInt(v.browserOk) +
-      ',poster_path=' + sqlStr('thumbs/v/' + v.id + '.jpg') +
+      ',poster_path=' + sqlStr(posterPathOf(v.id, v.hash)) +
       ',mtime=' + sqlDateTime(v.mtimeMs) + ',content_hash=' + sqlStr(v.hash) +
       ',root_id=' + sqlRoot(o.rootId) +
       ' WHERE id=' + sqlStr(v.id) + ';');
@@ -1059,6 +1078,71 @@ function runBackfill(o, root) {
   return 0;
 }
 
+// ---------------------------------------------------------------- 修正 poster_path（--fix-poster-path）
+
+/**
+ * poster_path 补救 SQL：只 UPDATE media_video.poster_path，不动任何其它列
+ *
+ * <p>P4 起 build-thumbs 把封面按内容落盘成 <thumbs>/v/<content_hash>.jpg，而老库里的
+ * poster_path 还是建库时写的 thumbs/v/<id>.jpg —— 谁按它去找封面谁就 404。
+ * 这里把已有行刷成与现有文件一致的命名：有 hash 用 hash，没 hash 用 id
+ * （= build-thumbs 的回退命名）。只更新已有行，不插入、不删除。</p>
+ *
+ * <p><b>执行顺序</b>：先 build-thumbs.js 把封面按 {@code <content_hash>.jpg} 落盘，再跑本模式。
+ * 反过来的话，刷新的 poster_path 会指向还没生成的封面文件。</p>
+ */
+function buildPosterFixSql() {
+  const byHash = "CONCAT('thumbs/v/', content_hash, '.jpg')";
+  const byId = "CONCAT('thumbs/v/', id, '.jpg')";
+  return [
+    'SET NAMES utf8mb4;',
+    'UPDATE media_video SET poster_path = ' + byHash +
+      " WHERE content_hash IS NOT NULL AND content_hash <> ''" +
+      ' AND (poster_path IS NULL OR poster_path <> ' + byHash + ');',
+    'SELECT ROW_COUNT();',
+    'UPDATE media_video SET poster_path = ' + byId +
+      " WHERE (content_hash IS NULL OR content_hash = '')" +
+      ' AND (poster_path IS NULL OR poster_path <> ' + byId + ');',
+    'SELECT ROW_COUNT();',
+  ].join('\n') + '\n';
+}
+
+/** 修正后的自检：total / 有 hash 且一致 / 无 hash 且一致 */
+const POSTER_VERIFY_SQL = "SELECT COUNT(*)," +
+  " SUM(content_hash IS NOT NULL AND content_hash <> '' AND poster_path = CONCAT('thumbs/v/', content_hash, '.jpg'))," +
+  " SUM((content_hash IS NULL OR content_hash = '') AND poster_path = CONCAT('thumbs/v/', id, '.jpg'))" +
+  ' FROM media_video;';
+
+function runFixPosterPath(o) {
+  const sql = buildPosterFixSql();
+  const lines = sql.split('\n').filter(Boolean);
+  if (o.dumpSql) {
+    const file = path.resolve(o.dumpSql);
+    fs.writeFileSync(file, sql, 'utf8');
+    log('== poster_path 修正 SQL 已写入 ' + file + '（' + lines.length + ' 行），未执行');
+    for (const line of lines) log('  | ' + line);
+    log('== 执行：mysql -uroot -D ' + o.db + ' --default-character-set=utf8mb4 < ' + file);
+    return 0;
+  }
+  if (o.dryRun) {
+    log('== poster_path 修正 SQL（dry-run：不连库、不写库）');
+    for (const line of lines) log('  | ' + line);
+    return 0;
+  }
+  const mysqlExe = resolveExe(o.mysql, 'mysql', 'mysql 客户端');
+  const password = readPassword(o);
+  log('== 修正 poster_path：' + o.db + '@' + o.host + ':' + o.port);
+  const rows = queryRows(o, mysqlExe, password, sql);
+  const fixedHash = rows.length > 0 ? Number(rows[0][0]) || 0 : 0;
+  const fixedId = rows.length > 1 ? Number(rows[1][0]) || 0 : 0;
+  const v = queryRows(o, mysqlExe, password, POSTER_VERIFY_SQL)[0] || [];
+  const total = Number(v[0]) || 0;
+  const ok = (Number(v[1]) || 0) + (Number(v[2]) || 0);
+  log('poster 修正 hash=' + fixedHash + ' id=' + fixedId);
+  log('poster 校验 total=' + total + ' 一致=' + ok + (ok === total ? '' : ' 不一致=' + (total - ok)));
+  return 0;
+}
+
 // ---------------------------------------------------------------- 主流程
 
 function statsLine(stats) {
@@ -1083,6 +1167,8 @@ function main() {
     log(HELP);
     return 0;
   }
+  // 补救模式只动 poster_path 一列，不扫盘也不需要 --root
+  if (o.fixPosterPath) return runFixPosterPath(o);
   if (!o.root) throw new Error('缺少必填参数 --root=<媒体根>（--help 看用法）');
   const root = path.resolve(o.root);
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {

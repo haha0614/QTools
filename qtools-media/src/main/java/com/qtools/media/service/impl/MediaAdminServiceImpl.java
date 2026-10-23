@@ -7,6 +7,7 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -83,6 +84,9 @@ public class MediaAdminServiceImpl implements IMediaAdminService
 
     /** id 前缀分隔符：trash/<kind>/<id>__<原名> */
     private static final String TRASH_SEP = "__";
+
+    /** 回收站里的库根桶目录名：trash/<kind>/<rootId>/（纯数字；条目名一定含 __，不会误判） */
+    private static final Pattern ROOT_BUCKET = Pattern.compile("^\\d{1,10}$");
 
     /** 重复软删时嵌在文件名里的时间戳（yyyyMMddHHmmss，必要时带 _n 序号） */
     private static final Pattern TRASH_STAMP = Pattern.compile("^\\d{14}(_\\d+)?$");
@@ -283,11 +287,13 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         Path source;
         String rel;
         String trashId;
+        Integer rootId;
         if (KIND_VIDEO.equals(kind))
         {
             MediaVideo video = requireVideo(id);
             rel = video.getRelPath();
-            source = mediaFileService.resolveMedia(rel);
+            rootId = video.getRootId();
+            source = mediaFileService.resolveMedia(rel, rootId);
             trashId = video.getId();
         }
         else if (KIND_ALBUM.equals(kind))
@@ -302,21 +308,25 @@ public class MediaAdminServiceImpl implements IMediaAdminService
             }
             rel = album.getDir();
             source = mediaFileService.resolveMediaDir(rel);
+            // 相册表没有 root_id：按这个目录实际落在哪个根判断，否则会搬进默认根的桶里
+            rootId = mediaFileService.rootIdOf(source);
             trashId = album.getId();
         }
         else
         {
             MediaPhoto photo = resolvePhoto(id, null, null);
             rel = photo.getRelPath();
-            source = mediaFileService.resolveMedia(rel);
+            rootId = photo.getRootId();
+            source = mediaFileService.resolveMedia(rel, rootId);
             trashId = String.valueOf(photo.getId());
         }
 
-        Path targetDir = mediaFileService.resolveTrashDir(kind);
+        // 按记录所属的根分桶：trash/<kind>/<rootId>/，root_id 为 NULL 时沿用老结构 trash/<kind>/
+        Path targetDir = mediaFileService.resolveTrashDir(kind, rootId);
         Path target = uniqueTarget(targetDir, trashId, source.getFileName().toString());
         try
         {
-            Files.move(source, target);
+            moveOrCopy(source, target);
         }
         catch (IOException e)
         {
@@ -334,6 +344,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         out.put("id", trashId);
         out.put("from", rel);
         out.put("to", mediaFileService.relativize(target));
+        out.put("rootId", rootId);
         out.put("updated", updated);
         out.put("hidden", true);
         return out;
@@ -346,26 +357,31 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         Path source = null;
         String storedId;
         String rel;
+        Integer rootId;
         if (KIND_VIDEO.equals(kind))
         {
             MediaVideo video = requireVideo(id);
             storedId = video.getId();
             rel = video.getRelPath();
+            rootId = video.getRootId();
         }
         else if (KIND_ALBUM.equals(kind))
         {
             MediaAlbum album = requireAlbum(id);
             storedId = album.getId();
             rel = album.getDir();
+            rootId = albumRootId(album.getId());
         }
         else
         {
             MediaPhoto photo = resolvePhoto(id, null, null);
             storedId = String.valueOf(photo.getId());
             rel = photo.getRelPath();
+            rootId = photo.getRootId();
         }
 
-        // 回收站里以该 id 开头的条目；名字里带时间戳后缀的排在后面，即最近一次软删
+        // 回收站里以该 id 开头的条目（含各 root_id 桶，老条目仍能被找到）；
+        // 名字里带时间戳后缀的排在后面，即最近一次软删
         List<TrashEntry> candidates = listTrashEntries(kind, storedId);
         if (candidates.isEmpty())
         {
@@ -373,7 +389,9 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         }
         source = candidates.get(candidates.size() - 1).path();
 
-        Path destination = mediaFileService.resolveWriteTarget(rel);
+        // 写回记录的所属根（root_id 为 NULL → 默认根）：resolveWriteTarget 内部
+        // 再做一次 resolveInside + 最近存在祖先的 realpath 复核，越界一律 403
+        Path destination = mediaFileService.resolveWriteTarget(rel, rootId);
         if (Files.exists(destination))
         {
             throw MediaException.conflict("原路径已存在，未覆盖：" + rel);
@@ -384,7 +402,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
             {
                 Files.createDirectories(destination.getParent());
             }
-            Files.move(source, destination);
+            moveOrCopy(source, destination);
         }
         catch (IOException e)
         {
@@ -402,6 +420,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         out.put("id", storedId);
         out.put("from", mediaFileService.relativize(source));
         out.put("to", rel);
+        out.put("rootId", rootId);
         out.put("updated", updated);
         out.put("hidden", false);
         return out;
@@ -548,6 +567,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("kind", entry.kind());
         row.put("id", entry.id());
+        row.put("rootId", entry.rootId());
         row.put("name", entry.name());
         row.put("originalRel", originalRel);
         // DB 里查不到（记录已删）→ 原路径未知，只能按磁盘对象处理
@@ -1272,6 +1292,87 @@ public class MediaAdminServiceImpl implements IMediaAdminService
     }
 
     /**
+     * 移动；跨卷失败时退化为「复制 + 删源」
+     *
+     * <p>{@link Files#move} 同卷是改名，跨卷（多库根常是另一块盘）直接抛异常。这里补一层：
+     * 复制完整成功之后才删源；复制中途失败就清掉残留目标再抛出，绝不留半份文件、
+     * 也绝不在复制失败时先删掉源。</p>
+     */
+    private static void moveOrCopy(Path source, Path target) throws IOException
+    {
+        try
+        {
+            Files.move(source, target);
+            return;
+        }
+        catch (IOException e)
+        {
+            log.warn("移动失败，改走复制+删源（多为跨盘）：{} -> {}（{}）", source, target, e.getMessage());
+        }
+        try
+        {
+            copyRecursively(source, target);
+        }
+        catch (IOException e)
+        {
+            // 复制半途失败：清掉残留目标，源保持原样
+            try
+            {
+                deleteRecursively(target);
+            }
+            catch (IOException ignored)
+            {
+                log.warn("清理复制残留失败：{}", target);
+            }
+            throw e;
+        }
+        deleteRecursively(source);
+    }
+
+    /** 递归复制（相册软删搬的是整个目录）；目标已存在即失败，绝不覆盖 */
+    private static void copyRecursively(Path source, Path target) throws IOException
+    {
+        Files.walkFileTree(source, new SimpleFileVisitor<>()
+        {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException
+            {
+                Files.createDirectories(target.resolve(source.relativize(dir)));
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException
+            {
+                Files.copy(file, target.resolve(source.relativize(file)), StandardCopyOption.COPY_ATTRIBUTES);
+                return FileVisitResult.CONTINUE;
+            }
+        });
+    }
+
+    /**
+     * 相册所属库根：相册表没有 {@code root_id} 列，按册内图片的 {@code root_id} 推断
+     *
+     * @return {@code media_root.id}；册内图片全为 NULL（存量数据）或列不存在时返回 null = 默认根
+     */
+    private Integer albumRootId(String albumId)
+    {
+        if (StringUtils.isEmpty(albumId))
+        {
+            return null;
+        }
+        try
+        {
+            return mediaAdminMapper.selectAlbumRootId(albumId);
+        }
+        catch (RuntimeException e)
+        {
+            // root_id 列还没加（没跑 media_portability.sql）：按默认根处理
+            return null;
+        }
+    }
+
+    /**
      * 回收站里该 id 的所有条目，按「软删先后」升序返回（最后一个是最近一次）
      *
      * <p>坑：<b>不能按文件名字典序判断新旧</b>。文件名形如 {@code <id>__<原名>}（首次软删）或
@@ -1312,7 +1413,13 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         return found;
     }
 
-    /** 某一类的全部回收站条目，按软删先后升序 */
+    /**
+     * 某一类的全部回收站条目（含各 {@code root_id} 桶），按软删先后升序
+     *
+     * <p>两种层级并存：老结构 {@code trash/<kind>/<id>__<原名>}（root_id 为 NULL）与
+     * 多库根结构 {@code trash/<kind>/<rootId>/<id>__<原名>}。桶目录是纯数字名，而条目名
+     * 一定含 {@code __}，所以 {@link #isRootBucket} 不会把条目误判成桶。</p>
+     */
     private List<TrashEntry> scanTrash(String kind)
     {
         Path dir = mediaFileService.resolveTrashDir(kind);
@@ -1321,7 +1428,19 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         {
             for (Path path : stream.toList())
             {
-                found.add(parseTrashEntry(kind, path));
+                if (!isRootBucket(path))
+                {
+                    found.add(parseTrashEntry(kind, path, null));
+                    continue;
+                }
+                Integer bucket = Integer.valueOf(path.getFileName().toString());
+                try (Stream<Path> inner = Files.list(path))
+                {
+                    for (Path entry : inner.toList())
+                    {
+                        found.add(parseTrashEntry(kind, entry, bucket));
+                    }
+                }
             }
         }
         catch (IOException e)
@@ -1332,6 +1451,12 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         return found;
     }
 
+    /** 回收站里的库根桶：目录名是纯数字（{@code trash/<kind>/<rootId>}） */
+    private static boolean isRootBucket(Path path)
+    {
+        return Files.isDirectory(path) && ROOT_BUCKET.matcher(path.getFileName().toString()).matches();
+    }
+
     /**
      * 解析回收站条目 —— 软删 / 恢复 / 列回收站<b>唯一</b>的解析入口
      *
@@ -1340,7 +1465,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
      * {@link #uniqueTarget} 造）。restore 用 stamp 选最近一次软删，列表接口用同一个 stamp
      * 算 deletedAt，两处必须是同一个时间戳来源。</p>
      */
-    private static TrashEntry parseTrashEntry(String kind, Path path)
+    private static TrashEntry parseTrashEntry(String kind, Path path, Integer rootId)
     {
         String fileName = path.getFileName().toString();
         String id = null;
@@ -1367,7 +1492,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         long bytes = isDir ? dirBytes(path) : fileBytes(path);
         // 首次软删的文件名里没有时间戳 → 退回文件时间（排序仍按 TRASH_ORDER 视为最早）
         Date deletedAt = stamp == null ? fileTime(path) : parseStamp(stamp);
-        return new TrashEntry(kind, id, name, stamp, path, isDir, bytes, deletedAt);
+        return new TrashEntry(kind, id, name, stamp, path, isDir, bytes, deletedAt, rootId);
     }
 
     /**
@@ -1422,8 +1547,9 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         {
             throw MediaException.notFound("回收站中没有该对象: " + target.getFileName());
         }
-        if (!real.startsWith(kindDir) || real.equals(kindDir))
+        if (!real.startsWith(kindDir) || real.equals(kindDir) || isRootBucket(real))
         {
+            // 桶目录（trash/<kind>/<rootId>）本身不能被整桶彻底删：那会一次抹掉多个对象
             throw MediaException.forbidden();
         }
         return real;
@@ -1573,7 +1699,12 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         }
     }
 
-    /** 回收站对象数 = trash/<kind>/ 下直接子项数（一次软删 = 一个对象） */
+    /**
+     * 回收站对象数（一次软删 = 一个对象）
+     *
+     * <p>层级两种都算：{@code trash/<kind>/<条目>} 与 {@code trash/<kind>/<rootId>/<条目>}；
+     * 桶目录本身不是对象，所以进桶再数一层。</p>
+     */
     private long trashCount()
     {
         Path trash = mediaFileService.trashRoot();
@@ -1588,7 +1719,18 @@ public class MediaAdminServiceImpl implements IMediaAdminService
             {
                 try (Stream<Path> entries = Files.list(kindDir))
                 {
-                    count += entries.count();
+                    for (Path child : entries.toList())
+                    {
+                        if (!isRootBucket(child))
+                        {
+                            count++;
+                            continue;
+                        }
+                        try (Stream<Path> inner = Files.list(child))
+                        {
+                            count += inner.count();
+                        }
+                    }
                 }
             }
         }
@@ -1691,9 +1833,10 @@ public class MediaAdminServiceImpl implements IMediaAdminService
      * @param name      原名（文件名里 id/时间戳之后的部分）
      * @param stamp     文件名内嵌的软删时间戳；首次软删没有时间戳时为 null（视为最早）
      * @param deletedAt 展示用的删除时间：有时间戳取时间戳，否则取文件时间
+     * @param rootId    条目所在桶对应的库根 id；null = 老结构（root_id 为 NULL 的存量条目）
      */
     private record TrashEntry(String kind, String id, String name, String stamp, Path path, boolean isDir,
-            long bytes, Date deletedAt)
+            long bytes, Date deletedAt, Integer rootId)
     {
     }
 }

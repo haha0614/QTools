@@ -12,6 +12,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <resultMap type="com.qtools.media.domain.MediaVideo" id="MediaAdminVideoResult">
         <id     property="id"         column="id"          />
+        <!-- 多库根：软删 / 恢复要按记录所属根选根、选回收站桶，因此这两列必须取出来 -->
+        <result property="rootId"     column="root_id"     />
         <result property="folder"     column="folder"      />
         <result property="relPath"    column="rel_path"    />
         <result property="title"      column="title"       />
@@ -44,6 +46,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <resultMap type="com.qtools.media.domain.MediaPhoto" id="MediaAdminPhotoResult">
         <id     property="id"      column="id"       />
+        <!-- 多库根：图片软删 / 恢复按 root_id 选根 -->
+        <result property="rootId"  column="root_id"  />
         <result property="albumId" column="album_id" />
         <result property="seq"     column="seq"      />
         <result property="relPath" column="rel_path" />
@@ -122,8 +126,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <!-- 单行 -->
 
+    <!-- root_id 必须取出：软删 / 恢复按记录所属根选根、选回收站桶 -->
     <select id="selectVideoAnyById" resultMap="MediaAdminVideoResult">
-        select id, folder, rel_path, title, size, dur, w, h, vcodec, browser_ok,
+        select id, root_id, folder, rel_path, title, size, dur, w, h, vcodec, browser_ok,
                poster_path, doc_path, sub_path, hidden, mtime
         from media_video
         where id = #{id}
@@ -136,13 +141,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </select>
 
     <select id="selectPhotoAnyById" resultMap="MediaAdminPhotoResult">
-        select id, album_id, seq, rel_path, bytes, w, h, is_big, hidden
+        select id, root_id, album_id, seq, rel_path, bytes, w, h, is_big, hidden
         from media_photo
         where id = #{id}
     </select>
 
     <select id="selectPhotoByAlbumSeq" resultMap="MediaAdminPhotoResult">
-        select id, album_id, seq, rel_path, bytes, w, h, is_big, hidden
+        select id, root_id, album_id, seq, rel_path, bytes, w, h, is_big, hidden
         from media_photo
         where album_id = #{albumId} and seq = #{seq}
     </select>
@@ -153,6 +158,15 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         where p.album_id = #{albumId}
         order by p.seq asc
         limit #{limit}
+    </select>
+
+    <!-- 相册所属库根：册内第一个非空 root_id（相册表没有 root_id 列） -->
+    <select id="selectAlbumRootId" resultType="java.lang.Integer">
+        select p.root_id
+        from media_photo p
+        where p.album_id = #{albumId} and p.root_id is not null
+        order by p.seq asc
+        limit 1
     </select>
 
     <select id="countAlbumByDir" resultType="int">

@@ -60,6 +60,14 @@ public interface MediaAdminMapper
     /** 与本册共用同一物理目录的其它相册数量（念念 144 册共享目录，单独软删会毁掉其它册） */
     int countAlbumByDir(@Param("dir") String dir, @Param("excludeId") String excludeId);
 
+    /**
+     * 相册所属库根：相册表没有 {@code root_id} 列，按册内图片的 {@code root_id} 推断
+     *
+     * @param albumId 相册 id
+     * @return 册内第一个非空 {@code root_id}；全为 NULL（存量数据）时返回 null = 默认根
+     */
+    Integer selectAlbumRootId(@Param("albumId") String albumId);
+
     // ------------------------------------------------------------------ 隐藏位
 
     int updateVideoHidden(@Param("id") String id, @Param("hidden") Integer hidden);

@@ -8,21 +8,36 @@
  *              content_hash 为 NULL 时回退 <thumbs>/v/<videoId>.jpg（老命名，仍可用）
  *   图片缩略图 <thumbs>/p/<albumId>/<%04d>.jpg                 scale=400:-2
  *   大图预览   <thumbs>/pv/<albumId>/<%04d>.jpg（仅 is_big=1）  scale=1600:-2
+ *   精灵图     <thumbs>/s/<content_hash>.jpg                  10x10 网格，每格 160x90
+ *              （fps=tile 一次成型，间隔由时长决定，目标 ≤100 帧，图片恒为 1600 宽）
+ *   预览视频   <thumbs>/pv2/<content_hash>.mp4（或 .webm）       静音 320x180 4fps 5-8 秒
+ *              （按 ffmpeg 里的编码器择一：libx264 > libvpx-vp9 > libvpx > mpeg4）
+ *   s/ 与 pv2/ 同样按内容寻址，content_hash 为 NULL 时回退 <videoId>。
+ *   两者默认**不**生成：要 --sprite / --preview 显式开启，管理端现有命令行为不变。
  *
  * 视频封面按内容寻址：videoId = sha1(rel_path)[:12] 会随改名变化，content_hash 不会，
  * 所以同一份内容改名 / 移动后复用同一张封面。新老命名共存：Java 端先找 <hash>.jpg，
  * 找不到再回退 <id>.jpg，历史产物不迁移也能直接上线。
+ *
+ * 派生资源回收（--gc）：扫 thumbs/v、thumbs/s、thumbs/pv2，删掉「文件名去掉扩展名后
+ * 既不是任何 media_video.content_hash 也不是任何 media_video.id」的孤儿产物；
+ * 只碰这三类派生文件，绝不碰媒体源。默认干跑只打印，--gc --yes 才真删
+ * （与 scan-media.js 的 --truncate/--yes 同一套确认语义）。
  *
  * 增量：产物存在、非空，且产物 mtime >= 源文件 mtime -> skip（源被替换 / 重编码后自动重建）；
  *       --force 强制重建；--no-fresh 关掉 mtime 判断，退回「存在即跳过」的旧语义。
  * 幂等：只写缩略图根目录，不碰源媒体目录。
  *
  * 输出（管理端 MediaScanServiceImpl 的 thumb 模式按这些行解析，改动前先看它）：
- *   START total=<n> tasks=videos,photos,previews force=<0|1> fresh=<0|1>
+ *   START total=<n> tasks=videos,photos,previews[,sprites,pvclips] force=<0|1> fresh=<0|1>
+ *         sprite=<0|1> preview=<0|1> gc=<0|1>
  *   PROGRESS <done>/<total>          每条之后一行
  *   FAIL <rel_path>: <原因>           单条失败不中断
  *   TASK <task> total=<n> ok=<n> skip=<n> fail=<n>
- *   DONE ok=<n> skip=<n> fail=<n> seconds=<n>
+ *   GC scan dirs=v,s,pv2 files=<n> orphans=<n> bytes=<n>
+ *   GC TOP <v|s|pv2>/<name> size=<n>   最多 10 行（按体积从大到小）
+ *   GC dry-run ... / GC remove dirs=v,s,pv2 removed=<n> failed=<n> bytes=<n>
+ *   DONE ok=<n> skip=<n> fail=<n> seconds=<n>[ GC removed=<n> kept=<n>]
  * 有失败条目时退出码仍为 0（与原作者 build_thumbs.js 一致），只有 ffmpeg 缺失 / 数据库读不到
  * 等致命错误才非 0。
  *
@@ -47,7 +62,16 @@ const DEFAULTS = {
   force: false,
   fresh: true,
   limit: 0,
+  sprite: false,
+  preview: false,
+  gc: false,
+  gcYes: false,
 };
+
+// 精灵图：10 列 x 10 行、每格 160x90 -> 成品恒为 1600x900，最多 100 帧
+const SPRITE = { cols: 10, rows: 10, w: 160, h: 90 };
+// 预览视频：静音、低码率、4fps，时长夹在 5~8 秒（需求是 5-10 秒）
+const PV = { fps: 4, minSec: 5, maxSec: 8, w: 320, h: 180 };
 
 const HELP = `
 用法：node build-thumbs.js --thumbs=<缩略图根> [--root=<媒体根>] [选项]
@@ -63,6 +87,10 @@ const HELP = `
   --force             无条件重建全部产物（忽略 mtime 与存在性）
   --no-fresh          关闭新鲜度检查：产物存在即跳过（等价改动前的旧语义）
   --limit=<n>         只处理前 n 条（调试用）
+  --sprite            顺手生成视频精灵图 s/<hash>.jpg（10x10 网格，每格 160x90；默认关）
+  --preview           顺手生成预览视频 pv2/<hash>.mp4|webm（静音 5-8 秒；默认关）
+  --gc                扫 v/ s/ pv2/ 删孤儿派生文件（默认只打印，配 --yes 才真删）
+  --yes, -y           确认 --gc 的删除动作（不给就只是干跑统计）
   --secret=<file>     密码来源②：从 secret.yml 取 spring.datasource.druid.master.password
                       （管理端「重建缩略图」按钮触发时没有 MYSQL_PWD，用它）
   --help              显示本帮助
@@ -79,6 +107,17 @@ const HELP = `
   v/<videoId>.jpg           仅当 content_hash 为 NULL 时的回退命名
   p/<albumId>/0000.jpg...   图片缩略图（seq 4 位补零）
   pv/<albumId>/0000.jpg...  大图预览（仅 is_big=1）
+  s/<content_hash>.jpg      精灵图（--sprite）
+  pv2/<content_hash>.mp4    预览视频（--preview；编码器只有 VP9/VP8 时是 .webm）
+
+精灵图 / 预览视频的取帧间隔都由 media_video.dur 决定：精灵图目标是铺满
+10x10=100 格（fps=100/时长），预览视频固定 4fps * 5~8 秒。两者同时开启时
+**一次 ffmpeg 解码同时出两张产物**（-filter_complex 分两路），不做二次解码。
+一张图/一段视频失败只计一次 fail，不中断整批。
+
+--gc：只删 thumbs/v、thumbs/s、thumbs/pv2 里「文件名去掉扩展名后既不在
+media_video.content_hash 里、也不在 media_video.id 里」的文件；不递归、不碰
+媒体源目录、不删目录本身。删除前打印 TOP 10 与总数，只有再加 --yes 才真删。
 
 增量判定：产物存在且非空，且产物 mtime >= 源文件 mtime 才算「已是最新」。
 源文件被替换 / 重编码后 mtime 变新，下一次运行自动重建该条产物。
@@ -94,6 +133,10 @@ function parseArgs(argv) {
   for (const a of argv) {
     if (a === '--force') o.force = true;
     else if (a === '--no-fresh') o.fresh = false;
+    else if (a === '--sprite') o.sprite = true;
+    else if (a === '--preview') o.preview = true;
+    else if (a === '--gc') o.gc = true;
+    else if (a === '--yes' || a === '-y') o.gcYes = true;
     else if (a === '--help' || a === '-h') o.help = true;
     else if (a.startsWith('--root=')) o.root = a.slice('--root='.length);
     else if (a.startsWith('--thumbs=')) o.thumbs = a.slice('--thumbs='.length);
@@ -256,6 +299,19 @@ function planTasks(videos, photos, o) {
   for (const v of videos) {
     // 内容寻址：同一份内容改名 / 移动后 content_hash 不变，仍复用同一张封面
     t.push({ task: 'videos', src: v.rel, out: path.join(o.thumbs, 'v', thumbName(v) + '.jpg'), kind: 'video' });
+    // 精灵图 / 预览视频紧跟同一条视频：两者都要重建时主流程会把它们合并成一次 ffmpeg
+    if (o.sprite) {
+      t.push({
+        task: 'sprites', src: v.rel, kind: 'sprite', dur: v.dur,
+        out: path.join(o.thumbs, 's', thumbName(v) + '.jpg'),
+      });
+    }
+    if (o.preview) {
+      t.push({
+        task: 'pvclips', src: v.rel, kind: 'pvclip', dur: v.dur,
+        out: path.join(o.thumbs, 'pv2', thumbName(v) + '.' + (o.previewEncoder || {}).ext),
+      });
+    }
   }
   for (const p of photos) {
     t.push({
@@ -324,23 +380,224 @@ function ffmpegArgsFor(item, src) {
   const base = ['-y', '-loglevel', 'error'];
   if (item.kind === 'video') return base.concat(['-ss', '3', '-i', src, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', item.out]);
   if (item.kind === 'photo') return base.concat(['-i', src, '-frames:v', '1', '-vf', 'scale=400:-2', '-q:v', '4', item.out]);
+  if (item.kind === 'sprite') return base.concat(['-i', src, '-vf', spriteFilter(item), '-frames:v', '1', '-q:v', '4', item.out]);
+  if (item.kind === 'pvclip') return base.concat(pvclipArgs(item, src));
   return base.concat(['-i', src, '-frames:v', '1', '-vf', 'scale=1600:-2', '-q:v', '4', item.out]);
 }
 
-function buildOne(ffmpeg, item, root) {
+function buildOne(ffmpeg, item, root, o) {
   const src = srcPathOf(item, root);
   if (!fs.existsSync(src)) return { ok: false, reason: '源文件不存在：' + src };
   fs.mkdirSync(path.dirname(item.out), { recursive: true });
-  let r = runFfmpeg(ffmpeg, ffmpegArgsFor(item, src));
+  const args = ffmpegArgsFor(item, src, o);
+  let r = runFfmpeg(ffmpeg, args);
   // 源不足 3 秒时 -ss 3 抽不到帧：回退 -ss 0 再试一次
   if (!r.ok && item.kind === 'video') {
-    const args = ffmpegArgsFor(item, src);
     args[args.indexOf('-ss') + 1] = '0';
     r = runFfmpeg(ffmpeg, args);
   }
   if (!r.ok) return { ok: false, reason: r.reason };
   if (!alreadyDone(item.out)) return { ok: false, reason: 'ffmpeg 返回 0 但没有产物' };
   return { ok: true, reason: null };
+}
+
+// ---------------------------------------------------------------- 精灵图 / 预览视频
+
+/** 时长（秒）；库里 dur 为空 / 非正数时返回 0，由调用方退到安全默认值 */
+function durOf(item) {
+  const d = Number(item.dur);
+  return Number.isFinite(d) && d > 0 ? d : 0;
+}
+
+function round6(x) {
+  return String(Number(x.toFixed(6)));
+}
+
+/** 精灵图取帧速率：铺满 10x10=100 格，间隔由时长反推（100/时长）；时长未知按 1fps */
+function spriteFps(item) {
+  const dur = durOf(item);
+  return dur > 0 ? Math.min(100 / dur, 100) : 1;
+}
+
+function spriteFilter(item) {
+  return 'fps=' + round6(spriteFps(item)) + ',scale=' + SPRITE.w + ':' + SPRITE.h +
+    ',tile=' + SPRITE.cols + 'x' + SPRITE.rows;
+}
+
+/**
+ * 预览视频取帧方案：输出 4fps、时长夹在 5~8 秒；
+ * step 是把这些帧均摊到整段视频上的时间间隔（时长未知时按 1 秒一帧）。
+ * select 只抓等间隔的帧，setpts 把它们重排成 0.25 秒一格的连续时间轴，
+ * 所以成片是「整段视频的等间隔缩时」，不是「开头 8 秒」。
+ */
+function pvPlan(item) {
+  const dur = durOf(item);
+  const seconds = dur > 0 ? Math.min(PV.maxSec, Math.max(PV.minSec, dur)) : PV.maxSec;
+  const frames = Math.max(1, Math.round(seconds * PV.fps));
+  const step = dur > 0 ? Math.max(0.05, dur / frames) : 1;
+  return { seconds, frames, step };
+}
+
+function pvFilter(item) {
+  const p = pvPlan(item);
+  return "select='isnan(prev_selected_t)+gte(t-prev_selected_t," + round6(p.step) + ")'," +
+    'setpts=N/(' + PV.fps + '*TB),scale=' + PV.w + ':' + PV.h;
+}
+
+/** 预览视频编码参数（不含输入 / 输出路径，-vf 由调用方拼） */
+function pvEncodeArgs(o) {
+  const enc = (o && o.previewEncoder) || null;
+  if (!enc) throw new Error('内部错误：未探测到可用的预览视频编码器');
+  return enc.args.slice();
+}
+
+function pvclipArgs(item, src, o) {
+  const p = pvPlan(item);
+  return ['-i', src, '-vf', pvFilter(item), '-an'].concat(pvEncodeArgs(o))
+    .concat(['-r', String(PV.fps), '-t', String(p.seconds), item.out]);
+}
+
+/** 精灵图 + 预览视频一次解码同时出两张产物 */
+function bothArgs(spriteItem, pvItem, src, o) {
+  const p = pvPlan(pvItem);
+  return ['-y', '-loglevel', 'error', '-i', src,
+    '-filter_complex', '[0:v]' + spriteFilter(spriteItem) + '[s];[0:v]' + pvFilter(pvItem) + '[p]',
+    '-map', '[s]', '-frames:v', '1', '-q:v', '4', spriteItem.out,
+  ].concat(['-map', '[p]', '-an']).concat(pvEncodeArgs(o))
+    .concat(['-r', String(PV.fps), '-t', String(p.seconds), pvItem.out]);
+}
+
+/**
+ * 同时生成精灵图与预览视频：先试一次 ffmpeg 双输出；
+ * 失败（或只出了其中一张）再逐项重试，让失败只落在真正坏掉的那一项上。
+ */
+function buildSpriteAndClip(ffmpeg, spriteItem, pvItem, root, o) {
+  const src = srcPathOf(spriteItem, root);
+  if (!fs.existsSync(src)) {
+    const reason = '源文件不存在：' + src;
+    return { sprite: { ok: false, reason }, pvclip: { ok: false, reason } };
+  }
+  fs.mkdirSync(path.dirname(spriteItem.out), { recursive: true });
+  fs.mkdirSync(path.dirname(pvItem.out), { recursive: true });
+  const r = runFfmpeg(ffmpeg, bothArgs(spriteItem, pvItem, src, o));
+  const spriteOk = r.ok && alreadyDone(spriteItem.out);
+  const pvOk = r.ok && alreadyDone(pvItem.out);
+  if (spriteOk && pvOk) {
+    return { sprite: { ok: true, reason: null }, pvclip: { ok: true, reason: null } };
+  }
+  const result = {};
+  result.sprite = spriteOk ? { ok: true, reason: null } : buildOne(ffmpeg, spriteItem, root, o);
+  result.pvclip = pvOk ? { ok: true, reason: null } : buildOne(ffmpeg, pvItem, root, o);
+  if (!r.ok && result.sprite.ok && result.pvclip.ok) {
+    // 双输出那一版失败但逐项都成了：不算错，只是没有合并成功
+    warn('合并生成失败、逐项重试成功：' + spriteItem.src);
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------- 编码器探测 / GC
+
+/** 按 ffmpeg -encoders 的输出挑一个能用的预览视频编码器（mp4 优先，退 .webm） */
+function detectPreviewEncoder(ffmpeg) {
+  const r = spawnSync(ffmpeg, ['-hide_banner', '-encoders'], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  const text = (r.stdout || '') + (r.stderr || '');
+  const has = (name) => new RegExp('\\b' + name + '\\b').test(text);
+  if (has('libx264')) {
+    return {
+      ext: 'mp4', name: 'libx264',
+      args: ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '32', '-pix_fmt', 'yuv420p', '-movflags', '+faststart'],
+    };
+  }
+  if (has('libvpx-vp9')) {
+    return {
+      ext: 'webm', name: 'libvpx-vp9',
+      args: ['-c:v', 'libvpx-vp9', '-b:v', '300k', '-deadline', 'realtime', '-cpu-used', '5', '-pix_fmt', 'yuv420p'],
+    };
+  }
+  if (has('libvpx')) {
+    return {
+      ext: 'webm', name: 'libvpx',
+      args: ['-c:v', 'libvpx', '-b:v', '300k', '-deadline', 'realtime', '-cpu-used', '5', '-pix_fmt', 'yuv420p'],
+    };
+  }
+  if (has('mpeg4')) {
+    return { ext: 'mp4', name: 'mpeg4', args: ['-c:v', 'mpeg4', '-q:v', '6', '-pix_fmt', 'yuv420p'] };
+  }
+  return null;
+}
+
+/**
+ * GC：扫 thumbs/v、thumbs/s、thumbs/pv2，把「文件名去掉扩展名后既不是任何
+ * media_video.content_hash、也不是任何 media_video.id」的文件当孤儿。
+ * 只处理这三个目录里的普通文件：不递归、不删目录、不碰媒体源。
+ * 默认干跑只打印，gcYes（--yes）才真删。
+ */
+function gcDerived(o, videos) {
+  const keep = new Set();
+  for (const v of videos) {
+    if (v.id != null && String(v.id) !== '') keep.add(String(v.id));
+    const hash = v.hash == null ? '' : String(v.hash).trim();
+    if (hash !== '') keep.add(hash);
+  }
+  const scanned = [];
+  for (const sub of ['v', 's', 'pv2']) {
+    const dir = path.join(o.thumbs, sub);
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (e) {
+      if (e.code !== 'ENOENT') warn('GC 目录读不到，跳过 ' + dir + '：' + (e.code || e.message));
+      continue;
+    }
+    for (const ent of entries) {
+      if (!ent.isFile()) continue; // 目录 / 链接一律不动
+      const full = path.join(dir, ent.name);
+      let size = 0;
+      try {
+        size = fs.statSync(full).size;
+      } catch (e) {
+        continue;
+      }
+      const stem = ent.name.replace(/\.[^.]+$/, '');
+      scanned.push({ sub, name: ent.name, full, size, orphan: !keep.has(stem) });
+    }
+  }
+  const orphans = scanned.filter((f) => f.orphan).sort((a, b) => b.size - a.size);
+  const bytes = orphans.reduce((s, f) => s + f.size, 0);
+  log('GC scan dirs=v,s,pv2 files=' + scanned.length + ' orphans=' + orphans.length + ' bytes=' + bytes);
+  for (const f of orphans.slice(0, 10)) log('GC TOP ' + f.sub + '/' + f.name + ' size=' + f.size);
+  if (!o.gcYes) {
+    log('GC dry-run 未删除任何文件（确认无误后加 --yes 才真删）');
+    return { removed: 0, kept: scanned.length };
+  }
+  let removed = 0;
+  let failed = 0;
+  for (const f of orphans) {
+    try {
+      fs.unlinkSync(f.full);
+      removed += 1;
+    } catch (e) {
+      failed += 1;
+      warn('GC 删除失败 ' + f.sub + '/' + f.name + '：' + (e.code || e.message));
+    }
+  }
+  log('GC remove dirs=v,s,pv2 removed=' + removed + ' failed=' + failed + ' bytes=' + bytes);
+  return { removed, kept: scanned.length - removed };
+}
+
+/**
+ * 找同一源视频、同样待重建的「另一种」视频派生任务（精灵图 <-> 预览视频），
+ * 好让一次 ffmpeg 解码出两张产物；找不到返回 null。
+ */
+function findMate(tasks, item, needBuild) {
+  if (item.kind !== 'sprite' && item.kind !== 'pvclip') return null;
+  for (const other of tasks) {
+    if (other === item || other.src !== item.src) continue;
+    if (other.kind !== 'sprite' && other.kind !== 'pvclip') continue;
+    if (other.kind === item.kind) continue;
+    return needBuild(other) ? other : null;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------- 主流程
@@ -368,25 +625,46 @@ function main() {
   const mysqlExe = resolveTool(o.mysql, 'MS_MYSQL', 'mysql', '--mysql');
   const password = readPassword(o);
 
+  // 预览视频的编码器只探测一次（--preview 没开就不花这次子进程）
+  if (o.preview) {
+    o.previewEncoder = detectPreviewEncoder(ffmpeg);
+    if (!o.previewEncoder) {
+      throw new Error('--preview 需要 ffmpeg 里至少有 libx264 / libvpx-vp9 / libvpx / mpeg4 之一，' +
+        '当前一个都没有：请换一个带编码器的 ffmpeg，或去掉 --preview');
+    }
+    warn('预览视频编码器：' + o.previewEncoder.name + ' -> pv2/<hash>.' + o.previewEncoder.ext);
+  }
+
   const videoRows = query(mysqlExe, o, password,
-    'SELECT id,rel_path,content_hash FROM media_video ORDER BY id;');
+    'SELECT id,rel_path,content_hash,dur FROM media_video ORDER BY id;');
   const photoRows = query(mysqlExe, o, password,
     'SELECT album_id,seq,rel_path,is_big FROM media_photo ORDER BY album_id,seq;');
   // mysql --batch 把 NULL 打成字面量 "NULL"，这里还原成 null，免得拿 "NULL" 当哈希拼文件名
-  const videos = videoRows.map((c) => ({ id: c[0], rel: c[1], hash: c[2] === 'NULL' ? null : c[2] }));
+  const videos = videoRows.map((c) => ({
+    id: c[0], rel: c[1], hash: c[2] === 'NULL' ? null : c[2], dur: c[3] === 'NULL' ? null : c[3],
+  }));
   const photos = photoRows.map((c) => ({ albumId: c[0], seq: Number(c[1]), rel: c[2], isBig: c[3] }));
 
   const tasks = planTasks(videos, photos, o);
   const total = tasks.length;
   const startedAt = Date.now();
   const counts = { ok: 0, skip: 0, fail: 0 };
-  log('START total=' + total + ' tasks=videos,photos,previews force=' + (o.force ? 1 : 0) +
-    ' fresh=' + (o.fresh ? 1 : 0) + ' root=' + root + ' thumbs=' + o.thumbs);
+  const taskNames = ['videos', 'photos', 'previews'];
+  if (o.sprite) taskNames.push('sprites');
+  if (o.preview) taskNames.push('pvclips');
+  log('START total=' + total + ' tasks=' + taskNames.join(',') + ' force=' + (o.force ? 1 : 0) +
+    ' fresh=' + (o.fresh ? 1 : 0) + ' sprite=' + (o.sprite ? 1 : 0) +
+    ' preview=' + (o.preview ? 1 : 0) + ' gc=' + (o.gc ? 1 : 0) +
+    ' root=' + root + ' thumbs=' + o.thumbs);
   // 哈希没回填的视频只能按老命名产出：整批提示一次，避免刷屏（stderr，不干扰管理端解析 stdout）
   const noHash = videos.filter((v) => !v.hash || String(v.hash).trim() === '').length;
   if (noHash > 0) {
     warn(noHash + ' 个视频 content_hash 为 NULL，封面回退 v/<videoId>.jpg（重命名后会重复生成，建议先回填哈希）');
   }
+
+  const needBuild = (t) => o.force || !isFresh(t.out, srcPathOf(t, root), o.fresh);
+  // 同一条视频的精灵图 + 预览视频都过期时合并成一次 ffmpeg：这里记「已被同伴顺带生成」的项
+  const doneByMate = new Map();
 
   let done = 0;
   const perTask = {};
@@ -394,11 +672,22 @@ function main() {
     if (!perTask[t.task]) perTask[t.task] = { total: 0, ok: 0, skip: 0, fail: 0 };
     perTask[t.task].total += 1;
     let result;
-    if (!o.force && isFresh(t.out, srcPathOf(t, root), o.fresh)) {
+    if (doneByMate.has(t)) {
+      result = doneByMate.get(t);
+    } else if (!needBuild(t)) {
       result = { ok: true, skip: true, reason: null };
     } else {
-      const r = buildOne(ffmpeg, t, root);
-      result = { ok: r.ok, skip: false, reason: r.reason };
+      const mate = findMate(tasks, t, needBuild);
+      if (mate) {
+        const spriteItem = t.kind === 'sprite' ? t : mate;
+        const pvItem = t.kind === 'pvclip' ? t : mate;
+        const pair = buildSpriteAndClip(ffmpeg, spriteItem, pvItem, root, o);
+        result = Object.assign({ skip: false }, pair[t.kind]);
+        doneByMate.set(mate, Object.assign({ skip: false }, pair[mate.kind]));
+      } else {
+        const r = buildOne(ffmpeg, t, root, o);
+        result = { ok: r.ok, skip: false, reason: r.reason };
+      }
     }
     if (!result.ok) {
       counts.fail += 1;
@@ -415,13 +704,21 @@ function main() {
     log('PROGRESS ' + done + '/' + total);
   }
 
-  for (const task of ['videos', 'photos', 'previews']) {
+  for (const task of ['videos', 'photos', 'previews', 'sprites', 'pvclips']) {
     const c = perTask[task];
     if (!c) continue;
     log('TASK ' + task + ' total=' + c.total + ' ok=' + c.ok + ' skip=' + c.skip + ' fail=' + c.fail);
   }
+
+  // GC 放在建完之后：刚产出的文件都是有效名字，不会被误当孤儿
+  let gcTail = '';
+  if (o.gc) {
+    const gc = gcDerived(o, videos);
+    gcTail = ' GC removed=' + gc.removed + ' kept=' + gc.kept;
+  }
+
   log('DONE ok=' + counts.ok + ' skip=' + counts.skip + ' fail=' + counts.fail +
-    ' seconds=' + Math.round((Date.now() - startedAt) / 1000));
+    ' seconds=' + Math.round((Date.now() - startedAt) / 1000) + gcTail);
   return 0; // 单条失败不改变退出码（与原作者 build_thumbs.js 一致）
 }
 

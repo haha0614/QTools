@@ -65,15 +65,28 @@ public interface IMediaFileService
     Path resolveMediaDir(String rel, Integer rootId);
 
     /**
-     * 校验一个「写入目标」路径：允许尚不存在，但规则与读取一致
-     *
-     * <p>用于软删后的恢复：rel 来自数据库的 rel_path / dir，仍须拒绝绝对路径、
-     * 盘符、UNC、越出媒体根与站内目录 {@code _媒体站}。</p>
+     * 校验一个「写入目标」路径（默认根，等价于 {@code resolveWriteTarget(rel, null)}）
      *
      * @param rel 相对媒体根的路径
-     * @return 规范化后的绝对路径（未做 realpath，文件可以还不存在）
+     * @return 规范化后的绝对路径（文件可以还不存在）
      */
-    Path resolveWriteTarget(String rel);
+    default Path resolveWriteTarget(String rel)
+    {
+        return resolveWriteTarget(rel, null);
+    }
+
+    /**
+     * 校验某个库根下的「写入目标」路径：允许尚不存在，但规则与读取一致
+     *
+     * <p>用于软删后的恢复：rel 来自数据库的 rel_path / dir，仍须拒绝绝对路径、
+     * 盘符、UNC、越出<b>所属库根</b>与站内目录 {@code _媒体站}；最近的已存在祖先还要
+     * 过一次 realpath（防符号链接把写入点带出根外）。</p>
+     *
+     * @param rel    相对所属库根的路径
+     * @param rootId 库根 id，null = 配置 {@code qtools.media.rootPath}
+     * @return 规范化后的绝对路径（文件可以还不存在）
+     */
+    Path resolveWriteTarget(String rel, Integer rootId);
 
     /** 媒体根 realpath（默认根） */
     default Path mediaRoot()
@@ -94,12 +107,45 @@ public interface IMediaFileService
     Path trashRoot();
 
     /**
-     * 回收站下按 kind 分类的目录（{@code _媒体站\trash\<kind>}），不存在时创建
+     * 回收站下按 kind 分类的目录（默认根的老结构，{@code _媒体站\trash\<kind>}），不存在时创建
      *
      * @param kind video / album / photo
      * @return 该分类的回收站目录
      */
-    Path resolveTrashDir(String kind);
+    default Path resolveTrashDir(String kind)
+    {
+        return resolveTrashDir(kind, null);
+    }
+
+    /**
+     * 某个库根在回收站里的分类目录（按 {@code root_id} 分桶）
+     *
+     * <p>回收站只有一个物理根（{@code _媒体站\trash}，缺省位于默认媒体根下），桶层级只负责
+     * 记住「这份文件原属哪个<b>库根</b>」——否则第二根的文件会被搬进默认根的桶里，
+     * 恢复时又写回默认根，位置就错位了：</p>
+     * <ul>
+     *   <li>{@code rootId} 非空 → {@code trash/<kind>/<rootId>/}；</li>
+     *   <li>{@code rootId} 为 null（{@code root_id} 列为 NULL 的存量行）→ {@code trash/<kind>/}
+     *       ——既有结构，老回收站条目照旧可读、可恢复。</li>
+     * </ul>
+     *
+     * @param kind   video / album / photo
+     * @param rootId 库根 id（{@code media_root.id}），null = 默认根老结构
+     * @return 该分类（该根）的回收站目录
+     */
+    Path resolveTrashDir(String kind, Integer rootId);
+
+    /**
+     * 某个真实路径属于哪个库根
+     *
+     * <p>相册表没有 {@code root_id} 列，软删相册时靠它把「这个目录其实在第二根」推断出来；
+     * 视频 / 图片优先用记录里的 {@code root_id}，不经过这里。</p>
+     *
+     * @param path 媒体库内的真实路径
+     * @return {@code media_root.id}；落在默认根（配置 {@code qtools.media.rootPath}）里、
+     *         已不存在或无法判断时返回 null
+     */
+    Integer rootIdOf(Path path);
 
     /** 把媒体根内的绝对路径转成相对路径（正斜杠，便于回给前端） */
     String relativize(Path path);

@@ -218,18 +218,19 @@ public class MediaFileServiceImpl implements IMediaFileService
     }
 
     @Override
-    public Path resolveWriteTarget(String rel)
+    public Path resolveWriteTarget(String rel, Integer rootId)
     {
         if (StringUtils.isEmpty(rel))
         {
             throw MediaException.badRequest("missing path");
         }
-        Path root = rootDir();
+        Path root = rootDir(rootId);
         Path target = resolveInside(root, rel);
         if (target.startsWith(stationDir(root)))
         {
             throw MediaException.forbidden();
         }
+        requireRealInside(root, target);
         return target;
     }
 
@@ -255,13 +256,19 @@ public class MediaFileServiceImpl implements IMediaFileService
     }
 
     @Override
-    public Path resolveTrashDir(String kind)
+    public Path resolveTrashDir(String kind, Integer rootId)
     {
         if (kind == null || !TRASH_KINDS.contains(kind))
         {
             throw MediaException.badRequest("invalid kind");
         }
-        Path dir = trashRoot().resolve(kind);
+        if (rootId != null && rootId <= 0)
+        {
+            throw MediaException.badRequest("invalid rootId");
+        }
+        Path base = trashRoot().resolve(kind);
+        // root_id 为 NULL 的存量行沿用老结构 trash/<kind>/；非空才分桶到 trash/<kind>/<rootId>/
+        Path dir = rootId == null ? base : base.resolve(String.valueOf(rootId));
         try
         {
             Files.createDirectories(dir);
@@ -271,6 +278,61 @@ public class MediaFileServiceImpl implements IMediaFileService
         {
             throw new MediaException(500, "回收站目录不可用: " + dir);
         }
+    }
+
+    @Override
+    public Integer rootIdOf(Path path)
+    {
+        if (path == null)
+        {
+            return null;
+        }
+        Path real = path.toAbsolutePath().normalize();
+        try
+        {
+            real = real.toRealPath();
+        }
+        catch (IOException | RuntimeException e)
+        {
+            // 文件已经不在了：退回规范化路径，下面的 startsWith 仍然成立
+        }
+        if (real.startsWith(rootDir()))
+        {
+            return null;
+        }
+        List<MediaRoot> roots;
+        try
+        {
+            roots = mediaRootMapper.selectRootList();
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+        if (roots == null)
+        {
+            return null;
+        }
+        for (MediaRoot root : roots)
+        {
+            if (root == null || root.getId() == null || StringUtils.isEmpty(root.getPath())
+                    || !"root".equalsIgnoreCase(root.getKind()))
+            {
+                continue;
+            }
+            try
+            {
+                if (real.startsWith(Paths.get(root.getPath()).toAbsolutePath().normalize().toRealPath()))
+                {
+                    return root.getId();
+                }
+            }
+            catch (IOException | RuntimeException e)
+            {
+                // 根没挂盘 / 路径写错：跳过，继续比下一个根
+            }
+        }
+        return null;
     }
 
     @Override
@@ -632,6 +694,36 @@ public class MediaFileServiceImpl implements IMediaFileService
             throw MediaException.forbidden();
         }
         return target;
+    }
+
+    /**
+     * 目标可以还不存在：取最近的已存在祖先做 realpath，仍必须在根内
+     *
+     * <p>{@code rootDir} 系列返回的已经是 realpath，所以这里直接比对即可。用于恢复写回：
+     * {@code rel} 来自数据库，父目录里若有符号链接指向根外，必须先拦下再创建/移动。</p>
+     */
+    private void requireRealInside(Path root, Path target)
+    {
+        Path probe = target;
+        while (probe != null && !Files.exists(probe))
+        {
+            probe = probe.getParent();
+        }
+        if (probe == null)
+        {
+            return;
+        }
+        try
+        {
+            if (!probe.toRealPath().startsWith(root))
+            {
+                throw MediaException.forbidden();
+            }
+        }
+        catch (IOException e)
+        {
+            throw MediaException.forbidden();
+        }
     }
 
     private Path toRealPath(Path target)
