@@ -196,6 +196,8 @@ public class MediaScanServiceImpl implements IMediaScanService
             {
                 applyThumbEnv(builder);
             }
+            // 两种模式都可能读库（import.js / scan-media.js / build-thumbs.js），mysql 不在 PATH 时必须靠 MS_MYSQL
+            applyMysqlEnv(builder);
             appendLine(tail, "== 开始执行 " + String.join(" ", builder.command()));
             Process process = builder.start();
             try (BufferedReader reader = new BufferedReader(
@@ -408,6 +410,23 @@ public class MediaScanServiceImpl implements IMediaScanService
         {
             builder.environment().put("MS_FFMPEG", ffmpeg);
         }
+    }
+
+    /**
+     * 脚本认 MS_MYSQL（优先级 {@code --mysql=} &gt; {@code MS_MYSQL} &gt; {@code PATH}）：
+     * mysql 不在 PATH 的机器上不注入就会读库失败（media_video / media_photo 拿不到 id / rel_path / content_hash）。
+     *
+     * <p>只有 {@code qtools.media.mysqlClient} 非空才注入，留空沿用旧行为（脚本自己找 PATH），
+     * 不影响已有部署与环境变量本已存在的 MS_MYSQL。</p>
+     */
+    private void applyMysqlEnv(ProcessBuilder builder)
+    {
+        String mysql = mediaProperties.getMysqlClient();
+        if (mysql == null || mysql.trim().isEmpty())
+        {
+            return;
+        }
+        builder.environment().put("MS_MYSQL", mysql.trim());
     }
 
     /** 从一行输出里解析 4 个条数并求和；不匹配返回 null */

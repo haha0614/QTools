@@ -27,8 +27,9 @@ qtools:
   #      且 scanArgs 必须带 --root=<媒体根> --secret=<secret.yml 绝对路径>（可再加 --big-bytes=…）；
   #      thumbScript 指向 doc/media-import/build-thumbs.js，
   #      且 thumbArgs 必须带 --root=<媒体根> --thumbs=<缩略图根> --secret=<secret.yml 绝对路径>。
-  #      Java 侧只传 nodePath + 脚本 + scanArgs/thumbArgs（缩略图另注入 MS_FFMPEG），
-  #      既不注入数据库口令、也会过滤 --truncate/--force，所以口令要走脚本的 --secret=。
+  #      Java 侧只传 nodePath + 脚本 + scanArgs/thumbArgs，另以环境变量注入 MS_FFMPEG（取 ffmpeg）
+  #      与 MS_MYSQL（取 mysqlClient）：管理端触发时自动注入，脚本参数里不必再写 --ffmpeg/--mysql
+  #      （显式传仍优先）。但不注入数据库口令、也会过滤 --truncate/--force，所以口令要走 --secret=。
   #   B. 旧 Node 站迁移（原作者场景，现状）：import.js + build_thumbs.js（读 index.json）。
   # 媒体库配置（M1 只读接口 + M3 管理端；媒体根只读，软删只移动不真删）
   media:
@@ -36,8 +37,11 @@ qtools:
     rootPath: '${qtools.home:E:/111}/视频'
     # 缩略图根目录（含 v/p/pv 三个子目录）
     thumbsPath: '${qtools.home:E:/111}/data/media/thumbs'
-    # ffmpeg 可执行文件
+    # ffmpeg 可执行文件（管理端触发缩略图任务时以 MS_FFMPEG 注入子进程）
     ffmpeg: '${qtools.home:E:/111}/data/media/runtime/ffmpeg.exe'
+    # mysql 客户端可执行文件（管理端触发扫描/缩略图任务时以 MS_MYSQL 注入子进程）
+    # 留空 = 不注入，由脚本自己从 PATH 找 mysql；mysql 不在 PATH 时必须配这一项
+    # mysqlClient: '${qtools.home:E:/111}/tools/mysql/bin/mysql.exe'
     # 实时转码并发上限（超出返回 429）
     maxTranscode: 2
     # 回收站根目录（软删只在此目录下落文件，恢复时移回原位）

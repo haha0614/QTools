@@ -23,6 +23,8 @@ import org.springframework.stereotype.Component;
  *       <td>QTOOLS_MEDIA_TRASHPATH</td></tr>
  *   <tr><td>ffmpeg</td><td>空</td><td>实时转码接口 503「ffmpeg 不可用」</td>
  *       <td>QTOOLS_MEDIA_FFMPEG</td></tr>
+ *   <tr><td>mysqlClient</td><td>空</td><td>不注入 {@code MS_MYSQL}，脚本自己从 PATH 找 mysql</td>
+ *       <td>QTOOLS_MEDIA_MYSQLCLIENT</td></tr>
  *   <tr><td>maxTranscode</td><td>2</td><td>按 1 计</td><td>QTOOLS_MEDIA_MAXTRANSCODE</td></tr>
  *   <tr><td>nodePath</td><td>空</td><td>扫描任务启动即报「nodePath 未配置」</td>
  *       <td>QTOOLS_MEDIA_NODEPATH</td></tr>
@@ -61,6 +63,15 @@ public class MediaProperties
 
     /** ffmpeg 可执行文件路径；留空则实时转码不可用 */
     private String ffmpeg;
+
+    /**
+     * mysql 客户端可执行文件路径；留空 = 不注入 {@code MS_MYSQL}（脚本自己从 PATH 找 mysql）
+     *
+     * <p>管理端触发「重建索引 / 重建缩略图」时，本值非空就以 {@code MS_MYSQL} 注入子进程环境变量，
+     * 脚本的优先级是 {@code --mysql=} &gt; {@code MS_MYSQL} &gt; {@code PATH}。mysql 不在 PATH 的机器
+     * （例如本机 {@code E:/111/tools/mysql/bin/mysql.exe}）必须配这一项，否则脚本读库失败。</p>
+     */
+    private String mysqlClient = "";
 
     /** 实时转码并发上限 */
     private int maxTranscode = 2;
@@ -146,6 +157,16 @@ public class MediaProperties
     public void setFfmpeg(String ffmpeg)
     {
         this.ffmpeg = ffmpeg;
+    }
+
+    public String getMysqlClient()
+    {
+        return mysqlClient;
+    }
+
+    public void setMysqlClient(String mysqlClient)
+    {
+        this.mysqlClient = mysqlClient;
     }
 
     public int getMaxTranscode()

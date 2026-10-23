@@ -92,7 +92,8 @@ node E:\111\project\QTools\QTools\doc\media-import\import-bundle.js --in='D:\bun
 > 本地跑一律显式写 `--port=3307`（见第 5 节「常见坑」）。
 
 > **管理端按钮触发时必须用 `--secret=`**：`MediaScanServiceImpl` 只把 `node + 脚本 + 参数` 拼进
-> `ProcessBuilder`（缩略图模式只额外注入 `MS_FFMPEG`），**不会**给你注入 `MYSQL_PWD`。
+> `ProcessBuilder`，管理端触发时自动注入 `MS_FFMPEG` / `MS_MYSQL`（取 `qtools.media.ffmpeg` /
+> `qtools.media.mysqlClient`，留空则不注入），但**不会**给你注入 `MYSQL_PWD`。
 > 所以把按钮指向新脚本时，要在 `scanArgs` / `thumbArgs` 里带上 `--secret=<secret.yml 绝对路径>`
 > （见下面第 4 节），或者让后端进程自己的环境变量里带 `MYSQL_PWD`。
 
@@ -166,7 +167,7 @@ ffprobe 报错）只打 `FAIL <rel_path>: <原因>` 并继续，**退出码仍�
 → `PENDING <n>`（跑完还剩多少待补）→ `enrich ok=<n> skip=<n> fail=<n> seconds=<n>`。
 
 > **管理端按钮目前触发不了它（待实现）**：`MediaProperties` 里只有 `scanScript` / `thumbScript` /
-> `scanArgs` / `thumbArgs`，没有 enrich 的配置项；`MediaScanServiceImpl` 也只注入 `MS_FFMPEG`，
+> `scanArgs` / `thumbArgs`，没有 enrich 的配置项；`MediaScanServiceImpl` 也只注入 `MS_FFMPEG` / `MS_MYSQL`，
 > 不注入 `MS_FFPROBE`。现阶段请手工执行（或先给后端进程的环境变量里配好 `MS_FFPROBE`）。
 
 `export-bundle.js` / `import-bundle.js` 关键参数（便携包，P3）：
@@ -226,8 +227,9 @@ ffprobe 报错）只打 `FAIL <rel_path>: <原因>` 并继续，**退出码仍�
     `--secret=<secret.yml 绝对路径>`（Java 还会自己追加 `--out=<dir>`，新脚本会忽略不认识的参数，不会因此报错）。
   - `thumbScript` → 本目录的 `build-thumbs.js`，`thumbArgs` 里给出
     `--root=<媒体根> --thumbs=<缩略图根> --secret=<secret.yml 绝对路径>`
-    （或改用环境变量 `MS_MEDIA_ROOT` / `MS_THUMBS`）。ffmpeg 走 `qtools.media.ffmpeg`，Java 会以
-    `MS_FFMPEG` 环境变量传进来，新脚本已支持。
+    （或改用环境变量 `MS_MEDIA_ROOT` / `MS_THUMBS`）。ffmpeg 走 `qtools.media.ffmpeg`、mysql 客户端走
+    `qtools.media.mysqlClient`，管理端触发时自动以 `MS_FFMPEG` / `MS_MYSQL` 环境变量传进来，新脚本已支持。
+  - 两个环境变量都只在配置非空时注入（留空 = 沿用脚本自己的 `PATH` 查找），脚本参数显式传 `--ffmpeg=` / `--mysql=` 仍优先。
   - 打印的行与 `MediaScanServiceImpl` 的正则一一对应：`videos=N albums=N photos=N people=N`、
     `条数 videos=N albums=N photos=N people=N`、`START … total=N`、`PROGRESS d/total`、
     `DONE ok=N skip=N fail=N`。改这些行之前先看那个类。
@@ -272,11 +274,11 @@ qtools:
   要么让后端进程的环境变量里带 `MYSQL_PWD`（优先级更高）。两者都没有时脚本会直接报错退出，不会拿空口令硬连。
 - `--truncate` 会被 Java 侧过滤掉（管理端永远不做全量清空）；脚本自身还要求 `--truncate` 必须同时给 `--yes`。
 - 无法识别的参数（例如旧脚本时代的 `--out=`、`--dir-mode=raw`）脚本只 `WARN` 忽略、不中断。
-- ffmpeg 路径由 Java 通过环境变量 `MS_FFMPEG` 传给缩略图脚本（优先级：`--ffmpeg=` > `MS_FFMPEG` > `PATH`）。
+- ffmpeg / mysql 路径由 Java 通过环境变量 `MS_FFMPEG` / `MS_MYSQL` 传给脚本（优先级：`--ffmpeg=` > `MS_FFMPEG` > `PATH`、`--mysql=` > `MS_MYSQL` > `PATH`）；配了 `qtools.media.mysqlClient` 才注入 `MS_MYSQL`，留空时脚本自己找 `PATH`。
 - 缩略图产物从 P4 起按 `v/<content_hash>.jpg` 落盘：老 `v/<id>.jpg` 不会被删，服务端先找 hash 再回退 id，
   所以「换脚本后老图还能显示」是设计如此，不是没生效——想确认的话看 `--thumbs` 下有没有新的 `v/<16位hex>.jpg`。
 - **`enrich-meta.js` 暂时没有对应的管理端配置项（待实现）**：`MediaProperties` 只有 `scanScript` /
-  `thumbScript` / `scanArgs` / `thumbArgs`，且 `MediaScanServiceImpl` 只注入 `MS_FFMPEG`。
+  `thumbScript` / `scanArgs` / `thumbArgs`，且 `MediaScanServiceImpl` 只注入 `MS_FFMPEG` / `MS_MYSQL`。
   要用 ffprobe 补元数据，现阶段手工跑（见第 2 节第 3 步）。
 
 ### 5. 常见坑（本机实测）
