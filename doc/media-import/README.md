@@ -241,9 +241,12 @@ ffprobe 报错）只打 `FAIL <rel_path>: <原因>` 并继续，**退出码仍�
   - 缩略图串行生成（一条 ffmpeg 一个进程，1 万张会慢，但不会打满 CPU）。
   - `rel_path` 超过 700 字符的文件直接跳过并告警。
   - 依赖外部 `mysql` / `ffmpeg` / `ffprobe` / `mysqldump`；缺哪个都要用 `--mysql= --ffmpeg= --ffprobe= --dump=` 显式指定。
-  - **P4 遗留**：`media_video.poster_path` 仍写旧命名 `thumbs/v/<id>.jpg`（封面文件本身已按
-    `<content_hash>.jpg` 落盘），两者不一致**待实现**统一；旧的 `<id>.jpg` 目前**没有回收**
-    （派生资源 GC 待做）。
+  - **封面命名与顺序**：封面文件按 `<content_hash>.jpg` 落盘，`media_video.poster_path` 由
+    `scan-media.js` 写（`posterPathOf()`：有 `content_hash` 就写 `thumbs/v/<content_hash>.jpg`，
+    没有才回落 `<id>.jpg`）。所以**先跑 `build-thumbs.js`，再让 `scan-media.js` 带上
+    `--fix-poster-path`**（该模式只 UPDATE `poster_path` 一列、不扫盘、不需要 `--root`），
+    存量行才会从旧的 `<id>.jpg` 改成 `<content_hash>.jpg` 并与磁盘文件对上；反序则指向还不存在的文件。
+    旧的 `<id>.jpg` 文件不会被删除（派生资源 GC 仍待做）。
   - 别名表只沉淀不消费（后端待实现读别名）；`enrich-meta.js` 还没接入管理端按钮（没有 `enrichScript`
     配置项，也没有 `MS_FFPROBE` 注入）。
 
