@@ -96,7 +96,7 @@ const HELP = `
   --user=<name>       默认 root
   --host=<host>       默认 127.0.0.1
   --port=<n>          默认 3306
-  --mysql=<exe>       mysql 客户端，默认从 PATH 找 mysql
+  --mysql=<exe>       mysql 客户端：显式路径 > 环境变量 MS_MYSQL > PATH 里的 mysql
   --truncate          先 DELETE FROM media_photo/media_album/media_video（危险，必须同时给 --yes）
   --yes               确认 --truncate（缺它会直接报错退出，不会写库）
   --dry-run           只统计并打印，不写库（不需要数据库/mysql 客户端；不读库内状态，所见即全部新建）
@@ -121,6 +121,11 @@ const HELP = `
                       再执行本模式；封面文件还是 <id>.jpg 时刷完会指向不存在的文件
   --limit=<n>         --backfill-hash 时最多处理多少行（默认不限）
   --help              显示本帮助
+
+查找 mysql 客户端（优先级）：
+  1) --mysql=<exe> 显式路径（不存在直接报错，不回退）
+  2) 环境变量 MS_MYSQL（为空视为未设置；指向的文件不存在直接报错，不回退）
+  3) PATH 里的 mysql
 
 密码优先级：
   1) 环境变量 MYSQL_PWD
@@ -289,14 +294,21 @@ function findInPath(name) {
   return null;
 }
 
-function resolveExe(explicit, name, label) {
+/** 显式路径 > 环境变量 > PATH（措辞与顺序同 build-thumbs.js 的 resolveTool） */
+function resolveExe(explicit, envName, name, label) {
   if (explicit) {
     if (!fs.existsSync(explicit)) throw new Error(label + ' 不存在：' + explicit);
     return explicit;
   }
+  const fromEnv = process.env[envName]; // 空字符串视为未设置
+  if (fromEnv) {
+    if (!fs.existsSync(fromEnv)) throw new Error(envName + ' 指向的文件不存在：' + fromEnv);
+    return fromEnv;
+  }
   const found = findInPath(name);
   if (!found) {
-    throw new Error('PATH 里找不到 ' + name + '，请用 --' + name + '=<exe> 显式指定');
+    throw new Error('PATH 里找不到 ' + name + '，请用 --' + name + '=<exe> 显式指定，' +
+      '或设置环境变量 ' + envName);
   }
   return found;
 }
@@ -1064,7 +1076,7 @@ function backfillAlbumDirKey(o, mysqlExe, password) {
 }
 
 function runBackfill(o, root) {
-  const mysqlExe = resolveExe(o.mysql, 'mysql', 'mysql 客户端');
+  const mysqlExe = resolveExe(o.mysql, 'MS_MYSQL', 'mysql', 'mysql 客户端');
   const password = readPassword(o);
   const stats = { videos: 0, photos: 0, missing: 0 };
   const budget = { left: o.limit === null ? Number.MAX_SAFE_INTEGER : o.limit };
@@ -1129,7 +1141,7 @@ function runFixPosterPath(o) {
     for (const line of lines) log('  | ' + line);
     return 0;
   }
-  const mysqlExe = resolveExe(o.mysql, 'mysql', 'mysql 客户端');
+  const mysqlExe = resolveExe(o.mysql, 'MS_MYSQL', 'mysql', 'mysql 客户端');
   const password = readPassword(o);
   log('== 修正 poster_path：' + o.db + '@' + o.host + ':' + o.port);
   const rows = queryRows(o, mysqlExe, password, sql);
@@ -1186,7 +1198,7 @@ function main() {
   let password = null;
   let state = emptyState();
   if (needDb) {
-    mysqlExe = resolveExe(o.mysql, 'mysql', 'mysql 客户端');
+    mysqlExe = resolveExe(o.mysql, 'MS_MYSQL', 'mysql', 'mysql 客户端');
     password = readPassword(o);
     // --truncate 会清空这三张表：库内状态一律作废，按空库重新分配 aNNN（与旧行为一致）
     state = o.truncate ? emptyState() : loadState(o, mysqlExe, password);
