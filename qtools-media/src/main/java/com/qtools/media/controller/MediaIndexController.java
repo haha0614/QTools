@@ -26,7 +26,7 @@ import com.qtools.media.service.IMediaIndexService;
  */
 @Anonymous
 @RestController
-@RequestMapping("/api/media")
+@RequestMapping("/media")
 public class MediaIndexController
 {
     private static final Logger log = LoggerFactory.getLogger(MediaIndexController.class);

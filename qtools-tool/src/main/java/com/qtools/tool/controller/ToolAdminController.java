@@ -29,7 +29,7 @@ import com.qtools.common.core.page.TableDataInfo;
  * @date 2026-10-21
  */
 @RestController
-@RequestMapping("/api/qtool/info")
+@RequestMapping("/qtool/info")
 public class ToolAdminController extends BaseController
 {
     @Autowired

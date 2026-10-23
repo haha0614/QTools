@@ -30,7 +30,7 @@ import com.qtools.media.service.IMediaStatsService;
  * @author qtools
  */
 @RestController
-@RequestMapping("/api/media/admin/stats")
+@RequestMapping("/media/admin/stats")
 public class MediaStatsController
 {
     private static final Logger log = LoggerFactory.getLogger(MediaStatsController.class);

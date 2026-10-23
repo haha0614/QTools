@@ -20,7 +20,7 @@ import com.qtools.tool.service.IToolInfoService;
  */
 @Anonymous
 @RestController
-@RequestMapping("/api/toolInfo")
+@RequestMapping("/toolInfo")
 public class ToolInfoController
 {
     @Autowired

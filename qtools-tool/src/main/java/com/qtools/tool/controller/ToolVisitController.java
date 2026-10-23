@@ -22,7 +22,7 @@ import com.qtools.tool.service.IToolVisitService;
  */
 @Anonymous
 @RestController
-@RequestMapping("/api/toolVisit")
+@RequestMapping("/toolVisit")
 public class ToolVisitController
 {
     @Autowired

@@ -29,7 +29,7 @@ import com.qtools.common.annotation.Anonymous;
  */
 @Anonymous
 @RestController
-@RequestMapping("/api/app/auth")
+@RequestMapping("/app/auth")
 public class AppAuthController
 {
     /** 只用于解析请求体，不参与响应序列化 */

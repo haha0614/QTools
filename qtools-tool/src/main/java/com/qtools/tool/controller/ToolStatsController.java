@@ -25,7 +25,7 @@ import com.qtools.tool.mapper.ToolStatsMapper;
  * @author qtools
  */
 @RestController
-@RequestMapping("/api/qtool/stats")
+@RequestMapping("/qtool/stats")
 public class ToolStatsController
 {
     /** 趋势图展示天数（含今天） */

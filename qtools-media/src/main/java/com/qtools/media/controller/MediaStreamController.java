@@ -22,7 +22,7 @@ import com.qtools.media.service.IMediaStreamService;
  */
 @Anonymous
 @RestController
-@RequestMapping("/api/media")
+@RequestMapping("/media")
 public class MediaStreamController
 {
     private static final Logger log = LoggerFactory.getLogger(MediaStreamController.class);

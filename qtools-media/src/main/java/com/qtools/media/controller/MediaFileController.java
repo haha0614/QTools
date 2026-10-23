@@ -46,7 +46,7 @@ import com.qtools.media.service.IMediaFileService;
  */
 @Anonymous
 @RestController
-@RequestMapping("/api/media")
+@RequestMapping("/media")
 public class MediaFileController
 {
     private static final Logger log = LoggerFactory.getLogger(MediaFileController.class);

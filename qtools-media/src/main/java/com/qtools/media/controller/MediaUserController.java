@@ -34,7 +34,7 @@ import com.qtools.media.service.IMediaUserService;
  */
 @Anonymous
 @RestController
-@RequestMapping("/api/media")
+@RequestMapping("/media")
 public class MediaUserController
 {
     private static final Logger log = LoggerFactory.getLogger(MediaUserController.class);

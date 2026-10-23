@@ -41,7 +41,7 @@ import com.qtools.media.service.IMediaScanService;
  * @author qtools
  */
 @RestController
-@RequestMapping("/api/media/admin")
+@RequestMapping("/media/admin")
 public class MediaAdminController extends BaseController
 {
     private static final Logger log = LoggerFactory.getLogger(MediaAdminController.class);

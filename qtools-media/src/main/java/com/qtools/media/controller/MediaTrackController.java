@@ -36,7 +36,7 @@ import com.qtools.media.service.IMediaTrackService;
  * @author qtools
  */
 @RestController
-@RequestMapping("/api/media")
+@RequestMapping("/media")
 public class MediaTrackController
 {
     private static final Logger log = LoggerFactory.getLogger(MediaTrackController.class);
