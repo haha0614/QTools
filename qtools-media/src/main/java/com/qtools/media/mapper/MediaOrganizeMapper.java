@@ -35,6 +35,15 @@ public interface MediaOrganizeMapper
 
     int deleteTag(@Param("id") Long id);
 
+    /** 标签改名（不改其它列） */
+    int updateTagName(@Param("id") Long id, @Param("name") String name);
+
+    /** 标签改色；color 传 null = 清空颜色 */
+    int updateTagColor(@Param("id") Long id, @Param("color") String color);
+
+    /** 改名时同步 media_video_tag.name 那一列冗余名（只动 tag_id = 本 id 的字典行） */
+    int updateVideoTagNameByTagId(@Param("tagId") Long tagId, @Param("name") String name);
+
     /** 删字典项时清掉它的全部关联行 */
     int deleteVideoTagByTagId(@Param("tagId") Long tagId);
 
@@ -88,6 +97,14 @@ public interface MediaOrganizeMapper
 
     int insertMarker(@Param("videoId") String videoId, @Param("pos") BigDecimal pos, @Param("label") String label,
             @Param("color") String color);
+
+    /**
+     * 插入单条标记并把自增主键回填到入参对象的 id 上（单条新增接口要回 {"id":...}）
+     *
+     * <p>入参用「单一对象」而不是多个 {@code @Param}：MyBatis 的 useGeneratedKeys
+     * 只对单一参数对象做属性回填，包装成 ParamMap 后 keyProperty 解析不到。</p>
+     */
+    int insertMarkerWithKey(MediaVideoMarker marker);
 
     /** 同一条标记广播到多个视频（批量 markerDelta.add 用） */
     int batchInsertMarker(@Param("videoIds") List<String> videoIds, @Param("pos") BigDecimal pos,

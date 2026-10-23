@@ -60,6 +60,20 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         delete from media_tag where id = #{id}
     </delete>
 
+    <update id="updateTagName">
+        update media_tag set name = #{name} where id = #{id}
+    </update>
+
+    <!-- color 传 null = 清空颜色（与 rating 的清空语义同风格） -->
+    <update id="updateTagColor">
+        update media_tag set color = #{color} where id = #{id}
+    </update>
+
+    <!-- 改名同步冗余列：只动字典行（tag_id IS NOT NULL），历史 facet 行一个字都不碰 -->
+    <update id="updateVideoTagNameByTagId">
+        update media_video_tag set name = #{name} where tag_id = #{tagId}
+    </update>
+
     <delete id="deleteVideoTagByTagId">
         delete from media_video_tag where tag_id = #{tagId}
     </delete>
@@ -160,6 +174,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </delete>
 
     <insert id="insertMarker">
+        insert into media_video_marker (video_id, pos, label, color)
+        values (#{videoId}, #{pos}, #{label}, #{color})
+    </insert>
+
+    <!-- 单条新增：单一参数对象 + keyProperty=id，主键回填到 MediaVideoMarker.id -->
+    <insert id="insertMarkerWithKey" parameterType="com.qtools.media.domain.MediaVideoMarker"
+            useGeneratedKeys="true" keyProperty="id">
         insert into media_video_marker (video_id, pos, label, color)
         values (#{videoId}, #{pos}, #{label}, #{color})
     </insert>

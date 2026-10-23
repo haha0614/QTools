@@ -1,7 +1,5 @@
 package com.qtools.media.controller;
 
-import java.math.BigDecimal;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -18,7 +16,6 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.qtools.common.annotation.Log;
 import com.qtools.common.core.controller.BaseController;
 import com.qtools.common.core.domain.AjaxResult;
@@ -26,11 +23,20 @@ import com.qtools.common.core.page.TableDataInfo;
 import com.qtools.common.enums.BusinessType;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.domain.MediaVideoMarker;
-import com.qtools.media.domain.dto.MediaMetaPatch;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.service.IMediaAdminService;
+import com.qtools.media.service.IMediaEditPolicyService;
 import com.qtools.media.service.IMediaOrganizeService;
 import com.qtools.media.service.IMediaScanService;
+import static com.qtools.media.support.MediaBodyParser.booleanValue;
+import static com.qtools.media.support.MediaBodyParser.boolValue;
+import static com.qtools.media.support.MediaBodyParser.decimalValue;
+import static com.qtools.media.support.MediaBodyParser.intValue;
+import static com.qtools.media.support.MediaBodyParser.integerValue;
+import static com.qtools.media.support.MediaBodyParser.longValue;
+import static com.qtools.media.support.MediaBodyParser.metaPatch;
+import static com.qtools.media.support.MediaBodyParser.parseObject;
+import static com.qtools.media.support.MediaBodyParser.stringValue;
 
 /**
  * 管理端媒体库接口（前缀 /api/media/admin）
@@ -52,9 +58,6 @@ public class MediaAdminController extends BaseController
 {
     private static final Logger log = LoggerFactory.getLogger(MediaAdminController.class);
 
-    /** 只用于解析请求体，不参与响应序列化 */
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-
     @Autowired
     private IMediaAdminService mediaAdminService;
 
@@ -63,6 +66,10 @@ public class MediaAdminController extends BaseController
 
     @Autowired
     private IMediaOrganizeService mediaOrganizeService;
+
+    /** 站端编辑策略（off / local / full）：管理端「编辑策略」面板读它、改它 */
+    @Autowired
+    private IMediaEditPolicyService mediaEditPolicyService;
 
     // ------------------------------------------------------------------ 列表
 
@@ -403,324 +410,66 @@ public class MediaAdminController extends BaseController
         return mediaOrganizeService.batchMeta(metaPatch(parseObject(rawBody, true), true));
     }
 
-    // ------------------------------------------------------------------ 工具
+    // ------------------------------------------------------------------ 站端编辑策略
 
-    /** 手工解析 body：空 body 允许；非法 JSON / 非对象一律 400（而不是落到 500） */
-    private static Map<String, Object> parseObject(String rawBody, boolean required)
+    /** 站端编辑策略：{@code {level}}，level ∈ off / local / full */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/edit-policy")
+    public Map<String, Object> editPolicy()
     {
-        if (StringUtils.isEmpty(rawBody) || rawBody.trim().isEmpty())
-        {
-            if (required)
-            {
-                throw MediaException.badRequest("missing request body");
-            }
-            return Map.of();
-        }
-        try
-        {
-            Map<String, Object> parsed = MAPPER.readValue(rawBody, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>()
-            {
-            });
-            return parsed == null ? Map.of() : parsed;
-        }
-        catch (Exception e)
-        {
-            throw MediaException.badRequest("invalid json body");
-        }
+        return Map.of("level", mediaEditPolicyService.getLevel());
     }
 
-    /** confirm：接受 true / "true" / 1 / "1"，其余（含缺省）一律算未确认 */
-    private static boolean booleanValue(Object value)
+    /** 保存站端编辑策略：body {@code {level}}，非法值 400；保存后立即失效本地缓存 */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-编辑策略", businessType = BusinessType.UPDATE)
+    @PutMapping("/edit-policy")
+    public Map<String, Object> updateEditPolicy(@RequestBody(required = false) String rawBody)
     {
-        if (value instanceof Boolean)
-        {
-            return ((Boolean) value).booleanValue();
-        }
-        String text = stringValue(value);
-        return "true".equalsIgnoreCase(text) || "1".equals(text);
+        Map<String, Object> body = parseObject(rawBody, true);
+        mediaEditPolicyService.setLevel(stringValue(body.get("level")));
+        return Map.of("level", mediaEditPolicyService.getLevel());
     }
 
-    /** limit：接受数字或数字字符串；非法字符串 400（而不是落到 500） */
-    private static Integer integerValue(Object value)
-    {
-        if (value == null)
-        {
-            return null;
-        }
-        if (value instanceof Number)
-        {
-            return Integer.valueOf(((Number) value).intValue());
-        }
-        String text = stringValue(value);
-        if (text == null)
-        {
-            return null;
-        }
-        try
-        {
-            return Integer.valueOf(text);
-        }
-        catch (NumberFormatException e)
-        {
-            throw MediaException.badRequest("limit 必须是整数");
-        }
-    }
-
-    private static String stringValue(Object value)
-    {
-        if (value == null)
-        {
-            return null;
-        }
-        String text = String.valueOf(value).trim();
-        if (text.isEmpty() || "null".equals(text))
-        {
-            return null;
-        }
-        return text;
-    }
-
-    private static Boolean boolValue(Object value)
-    {
-        if (value instanceof Boolean flag)
-        {
-            return flag;
-        }
-        if (value instanceof Number number)
-        {
-            return number.intValue() != 0;
-        }
-        String text = stringValue(value);
-        if (text == null)
-        {
-            return null;
-        }
-        String lower = text.toLowerCase();
-        if ("true".equals(lower) || "1".equals(lower))
-        {
-            return Boolean.TRUE;
-        }
-        if ("false".equals(lower) || "0".equals(lower))
-        {
-            return Boolean.FALSE;
-        }
-        throw MediaException.badRequest("hidden 只能是 true / false");
-    }
-
-    private static Integer intValue(Object value)
-    {
-        Long parsed = longValue(value);
-        return parsed == null ? null : parsed.intValue();
-    }
-
-    private static Long longValue(Object value)
-    {
-        if (value == null)
-        {
-            return null;
-        }
-        if (value instanceof Number number)
-        {
-            return number.longValue();
-        }
-        String text = stringValue(value);
-        if (text == null || "null".equalsIgnoreCase(text))
-        {
-            return null;
-        }
-        try
-        {
-            return Long.valueOf(text);
-        }
-        catch (NumberFormatException e)
-        {
-            throw MediaException.badRequest("数值参数格式错误: " + text);
-        }
-    }
-
-    // ------------------------------------------------------------------ 组织属性 body → DTO
+    // ------------------------------------------------------------------ 组织能力补充（标签改名 / 单条标记）
 
     /**
-     * body → {@link MediaMetaPatch}
+     * 标签改名 / 改色：body {@code {name?, color?}}
      *
-     * <p>这里只管「类型转换 + 字段是否出现」，取值范围 / 编号上限 / pos 与时长比较全部在服务层做。
-     * 判断「出现」一律用 {@code containsKey}：JSON 里的 {@code "rating": null} 是<b>有值且为 null</b>，
-     * 表示清空评分，不能用 get() == null 来当成缺省。</p>
+     * <p>{@code name} 缺省 = 不改名（撞别的字典项 409）；{@code color} 缺省 = 不改色，
+     * JSON 里显式给 {@code "color": null} = <b>清空颜色</b>。改名会同步
+     * {@code media_video_tag.name}，用户端索引立刻显示新名字。</p>
      *
-     * @param batch true = 批量接口（读 ids / markerDelta），false = 单条接口（读 markers）
+     * <p>站端也允许改标签时按策略放开，但<b>本期只在管理端</b>提供。</p>
      */
-    private static MediaMetaPatch metaPatch(Map<String, Object> body, boolean batch)
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-修改标签", businessType = BusinessType.UPDATE)
+    @PatchMapping("/tags/{id}")
+    public Map<String, Object> updateTag(@PathVariable("id") Long id,
+            @RequestBody(required = false) String rawBody)
     {
-        MediaMetaPatch patch = new MediaMetaPatch();
-        if (body.containsKey("rating"))
-        {
-            patch.setRatingPresent(true);
-            patch.setRating(ratingValue(body.get("rating")));
-        }
-        if (body.containsKey("tagIds"))
-        {
-            patch.setTagIdsPresent(true);
-            patch.setTagIds(longsValue(body.get("tagIds"), "tagIds"));
-        }
-        patch.setAddTagIds(longsValue(body.get("addTagIds"), "addTagIds"));
-        patch.setRemoveTagIds(longsValue(body.get("removeTagIds"), "removeTagIds"));
-
-        if (!batch)
-        {
-            if (body.containsKey("markers"))
-            {
-                patch.setMarkersPresent(true);
-                List<MediaVideoMarker> markers = markersValue(body.get("markers"), "markers");
-                patch.setMarkers(markers == null ? List.of() : markers);
-            }
-            return patch;
-        }
-
-        patch.setIds(stringsValue(body.get("ids"), "ids"));
-        Object delta = body.get("markerDelta");
-        if (delta != null)
-        {
-            if (!(delta instanceof Map))
-            {
-                throw MediaException.badRequest("markerDelta 必须是对象 {add:[], remove:[]}");
-            }
-            @SuppressWarnings("unchecked")
-            Map<String, Object> deltaMap = (Map<String, Object>) delta;
-            patch.setMarkerAdd(markersValue(deltaMap.get("add"), "markerDelta.add"));
-            patch.setMarkerRemoveIds(longsValue(deltaMap.get("remove"), "markerDelta.remove"));
-        }
-        return patch;
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaOrganizeService.updateTag(id, stringValue(body.get("name")),
+                stringValue(body.get("color")), body.containsKey("color"));
     }
 
-    /** rating：接受整数或整数字符串；null 原样返回（= 清空）；小数 / 非数字一律 400 */
-    private static Integer ratingValue(Object value)
+    /**
+     * 新增单个标记：body {@code {pos, label?, color?}}
+     *
+     * <p>与 {@code PUT /video/{id}/meta} 的 {@code markers} 全量替换互补：本接口只追加一条，
+     * pos 必须 {@code 0 <= pos <= dur}（dur 为 NULL 时跳过上限），返回 {@code {id,pos,label,color}}。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-新增标记", businessType = BusinessType.INSERT)
+    @PostMapping("/video/{id}/markers")
+    public Map<String, Object> addMarker(@PathVariable("id") String id,
+            @RequestBody(required = false) String rawBody)
     {
-        if (value == null)
-        {
-            return null;
-        }
-        if (value instanceof Number number)
-        {
-            double asDouble = number.doubleValue();
-            if (asDouble != Math.rint(asDouble))
-            {
-                throw MediaException.badRequest("rating 必须是整数 0-10");
-            }
-            return Integer.valueOf(number.intValue());
-        }
-        String text = stringValue(value);
-        if (text == null || "null".equalsIgnoreCase(text))
-        {
-            return null;
-        }
-        try
-        {
-            return Integer.valueOf(text);
-        }
-        catch (NumberFormatException e)
-        {
-            throw MediaException.badRequest("rating 必须是整数 0-10: " + text);
-        }
-    }
-
-    /** id 数组：接受 [1,2] 或 ["1","2"]；缺省返回 null（= 不改动），空数组返回空表（= 全量清空） */
-    private static List<Long> longsValue(Object value, String field)
-    {
-        if (value == null)
-        {
-            return null;
-        }
-        if (!(value instanceof List))
-        {
-            throw MediaException.badRequest(field + " 必须是数组");
-        }
-        List<?> raw = (List<?>) value;
-        List<Long> out = new ArrayList<>(raw.size());
-        for (Object item : raw)
-        {
-            Long id = longValue(item);
-            if (id == null)
-            {
-                throw MediaException.badRequest(field + " 里含空 id");
-            }
-            out.add(id);
-        }
-        return out;
-    }
-
-    /** 字符串数组：每个元素去首尾空格，空串 400（ids 里出现空 id 一定是前端 bug） */
-    private static List<String> stringsValue(Object value, String field)
-    {
-        if (value == null)
-        {
-            return null;
-        }
-        if (!(value instanceof List))
-        {
-            throw MediaException.badRequest(field + " 必须是数组");
-        }
-        List<?> raw = (List<?>) value;
-        List<String> out = new ArrayList<>(raw.size());
-        for (Object item : raw)
-        {
-            String text = stringValue(item);
-            if (text == null)
-            {
-                throw MediaException.badRequest(field + " 里含空值");
-            }
-            out.add(text);
-        }
-        return out;
-    }
-
-    /** 标记数组：[{pos, label?, color?}]；pos 必填（秒，允许小数） */
-    private static List<MediaVideoMarker> markersValue(Object value, String field)
-    {
-        if (value == null)
-        {
-            return null;
-        }
-        if (!(value instanceof List))
-        {
-            throw MediaException.badRequest(field + " 必须是数组");
-        }
-        List<?> raw = (List<?>) value;
-        List<MediaVideoMarker> out = new ArrayList<>(raw.size());
-        for (Object item : raw)
-        {
-            if (!(item instanceof Map))
-            {
-                throw MediaException.badRequest(field + " 的每一项必须是对象 {pos,label,color}");
-            }
-            Map<?, ?> map = (Map<?, ?>) item;
-            MediaVideoMarker marker = new MediaVideoMarker();
-            marker.setPos(decimalValue(map.get("pos"), field + ".pos"));
-            marker.setLabel(stringValue(map.get("label")));
-            marker.setColor(stringValue(map.get("color")));
-            out.add(marker);
-        }
-        return out;
-    }
-
-    /** 秒数：接受数字或数字字符串；缺失 / 非数字 400 */
-    private static BigDecimal decimalValue(Object value, String field)
-    {
-        if (value == null)
-        {
-            throw MediaException.badRequest(field + " 必填（秒，可为小数）");
-        }
-        String text = stringValue(value);
-        if (text == null)
-        {
-            throw MediaException.badRequest(field + " 必填（秒，可为小数）");
-        }
-        try
-        {
-            return new BigDecimal(text);
-        }
-        catch (NumberFormatException e)
-        {
-            throw MediaException.badRequest(field + " 必须是数字（秒）: " + text);
-        }
+        Map<String, Object> body = parseObject(rawBody, true);
+        MediaVideoMarker marker = new MediaVideoMarker();
+        marker.setPos(decimalValue(body.get("pos"), "pos"));
+        marker.setLabel(stringValue(body.get("label")));
+        marker.setColor(stringValue(body.get("color")));
+        return mediaOrganizeService.addMarker(id, marker);
     }
 }

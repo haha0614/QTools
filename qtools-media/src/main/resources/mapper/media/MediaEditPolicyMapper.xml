@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    媒体库「站端编辑策略」映射文件：sys_config 里 media.userEditing 一行的读写。
+
+    sys_config 在本实例没有 config_key 唯一索引（见 doc/media_edit_policy.sql 的说明），
+    因此「插入」用 INSERT ... SELECT ... WHERE NOT EXISTS，而不是 ON DUPLICATE KEY。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaEditPolicyMapper">
+
+    <select id="selectValueByKey" resultType="java.lang.String">
+        select config_value
+        from sys_config
+        where config_key = #{configKey}
+        order by config_id asc
+        limit 1
+    </select>
+
+    <insert id="insertIfAbsent">
+        insert into sys_config (config_name, config_key, config_value, config_type, create_by, create_time, remark)
+        select '媒体库站端编辑策略',
+               #{configKey},
+               #{configValue},
+               'N',
+               'admin',
+               SYSDATE(),
+               '站端编辑策略：off=站端禁止编辑 / local=只在浏览器本地改（服务端拒写） / full=完全编辑（默认）'
+        from DUAL
+        where not exists (select 1 from sys_config where config_key = #{configKey})
+    </insert>
+
+    <update id="updateValue">
+        update sys_config
+        set config_value = #{configValue},
+            update_time = SYSDATE()
+        where config_key = #{configKey}
+    </update>
+
+</mapper>

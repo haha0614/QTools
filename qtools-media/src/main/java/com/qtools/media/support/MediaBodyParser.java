@@ -1,0 +1,351 @@
+package com.qtools.media.support;
+
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.qtools.common.utils.StringUtils;
+import com.qtools.media.domain.MediaVideoMarker;
+import com.qtools.media.domain.dto.MediaMetaPatch;
+import com.qtools.media.exception.MediaException;
+
+/**
+ * 媒体库控制器共用的 body 解析工具
+ *
+ * <p>管理端（{@code /api/media/admin/**}）与站端（{@code /api/media/**}）对组织属性的
+ * body 形状要求完全一致，所以 JSON → DTO 的转换只保留这一份：把一个 body 解析成
+ * {@link MediaMetaPatch} 的规则（{@code containsKey} 即「字段出现」、{@code null} 即「清空」）
+ * 两处必须逐字相同，否则同一个前端 payload 在两端会有不同结果。</p>
+ *
+ * <p>这里只管「类型转换 + 字段是否出现」，取值范围 / 编号上限 / pos 与时长比较全部在服务层做。
+ * 非法 JSON、非对象 body、错误类型一律转 {@link MediaException#badRequest(String)}（400），
+ * 不落到 500。</p>
+ *
+ * @author qtools
+ */
+public final class MediaBodyParser
+{
+    /** 只用于解析请求体，不参与响应序列化 */
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private MediaBodyParser()
+    {
+    }
+
+    /** 手工解析 body：空 body 允许；非法 JSON / 非对象一律 400（而不是落到 500） */
+    public static Map<String, Object> parseObject(String rawBody, boolean required)
+    {
+        if (StringUtils.isEmpty(rawBody) || rawBody.trim().isEmpty())
+        {
+            if (required)
+            {
+                throw MediaException.badRequest("missing request body");
+            }
+            return Map.of();
+        }
+        try
+        {
+            Map<String, Object> parsed = MAPPER.readValue(rawBody, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>()
+            {
+            });
+            return parsed == null ? Map.of() : parsed;
+        }
+        catch (Exception e)
+        {
+            throw MediaException.badRequest("invalid json body");
+        }
+    }
+
+    /** confirm：接受 true / "true" / 1 / "1"，其余（含缺省）一律算未确认 */
+    public static boolean booleanValue(Object value)
+    {
+        if (value instanceof Boolean)
+        {
+            return ((Boolean) value).booleanValue();
+        }
+        String text = stringValue(value);
+        return "true".equalsIgnoreCase(text) || "1".equals(text);
+    }
+
+    /** limit：接受数字或数字字符串；非法字符串 400（而不是落到 500） */
+    public static Integer integerValue(Object value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (value instanceof Number)
+        {
+            return Integer.valueOf(((Number) value).intValue());
+        }
+        String text = stringValue(value);
+        if (text == null)
+        {
+            return null;
+        }
+        try
+        {
+            return Integer.valueOf(text);
+        }
+        catch (NumberFormatException e)
+        {
+            throw MediaException.badRequest("limit 必须是整数");
+        }
+    }
+
+    public static String stringValue(Object value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        String text = String.valueOf(value).trim();
+        if (text.isEmpty() || "null".equals(text))
+        {
+            return null;
+        }
+        return text;
+    }
+
+    public static Boolean boolValue(Object value)
+    {
+        if (value instanceof Boolean flag)
+        {
+            return flag;
+        }
+        if (value instanceof Number number)
+        {
+            return number.intValue() != 0;
+        }
+        String text = stringValue(value);
+        if (text == null)
+        {
+            return null;
+        }
+        String lower = text.toLowerCase();
+        if ("true".equals(lower) || "1".equals(lower))
+        {
+            return Boolean.TRUE;
+        }
+        if ("false".equals(lower) || "0".equals(lower))
+        {
+            return Boolean.FALSE;
+        }
+        throw MediaException.badRequest("hidden 只能是 true / false");
+    }
+
+    public static Integer intValue(Object value)
+    {
+        Long parsed = longValue(value);
+        return parsed == null ? null : parsed.intValue();
+    }
+
+    public static Long longValue(Object value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (value instanceof Number number)
+        {
+            return number.longValue();
+        }
+        String text = stringValue(value);
+        if (text == null || "null".equalsIgnoreCase(text))
+        {
+            return null;
+        }
+        try
+        {
+            return Long.valueOf(text);
+        }
+        catch (NumberFormatException e)
+        {
+            throw MediaException.badRequest("数值参数格式错误: " + text);
+        }
+    }
+
+    /**
+     * body → {@link MediaMetaPatch}
+     *
+     * <p>判断「出现」一律用 {@code containsKey}：JSON 里的 {@code "rating": null} 是<b>有值且为 null</b>，
+     * 表示清空评分，不能用 get() == null 来当成缺省。</p>
+     *
+     * @param batch true = 批量接口（读 ids / markerDelta），false = 单条接口（读 markers）
+     */
+    public static MediaMetaPatch metaPatch(Map<String, Object> body, boolean batch)
+    {
+        MediaMetaPatch patch = new MediaMetaPatch();
+        if (body.containsKey("rating"))
+        {
+            patch.setRatingPresent(true);
+            patch.setRating(ratingValue(body.get("rating")));
+        }
+        if (body.containsKey("tagIds"))
+        {
+            patch.setTagIdsPresent(true);
+            patch.setTagIds(longsValue(body.get("tagIds"), "tagIds"));
+        }
+        patch.setAddTagIds(longsValue(body.get("addTagIds"), "addTagIds"));
+        patch.setRemoveTagIds(longsValue(body.get("removeTagIds"), "removeTagIds"));
+
+        if (!batch)
+        {
+            if (body.containsKey("markers"))
+            {
+                patch.setMarkersPresent(true);
+                List<MediaVideoMarker> markers = markersValue(body.get("markers"), "markers");
+                patch.setMarkers(markers == null ? List.of() : markers);
+            }
+            return patch;
+        }
+
+        patch.setIds(stringsValue(body.get("ids"), "ids"));
+        Object delta = body.get("markerDelta");
+        if (delta != null)
+        {
+            if (!(delta instanceof Map))
+            {
+                throw MediaException.badRequest("markerDelta 必须是对象 {add:[], remove:[]}");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> deltaMap = (Map<String, Object>) delta;
+            patch.setMarkerAdd(markersValue(deltaMap.get("add"), "markerDelta.add"));
+            patch.setMarkerRemoveIds(longsValue(deltaMap.get("remove"), "markerDelta.remove"));
+        }
+        return patch;
+    }
+
+    /** rating：接受整数或整数字符串；null 原样返回（= 清空）；小数 / 非数字一律 400 */
+    public static Integer ratingValue(Object value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (value instanceof Number number)
+        {
+            double asDouble = number.doubleValue();
+            if (asDouble != Math.rint(asDouble))
+            {
+                throw MediaException.badRequest("rating 必须是整数 0-10");
+            }
+            return Integer.valueOf(number.intValue());
+        }
+        String text = stringValue(value);
+        if (text == null || "null".equalsIgnoreCase(text))
+        {
+            return null;
+        }
+        try
+        {
+            return Integer.valueOf(text);
+        }
+        catch (NumberFormatException e)
+        {
+            throw MediaException.badRequest("rating 必须是整数 0-10: " + text);
+        }
+    }
+
+    /** id 数组：接受 [1,2] 或 ["1","2"]；缺省返回 null（= 不改动），空数组返回空表（= 全量清空） */
+    public static List<Long> longsValue(Object value, String field)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (!(value instanceof List))
+        {
+            throw MediaException.badRequest(field + " 必须是数组");
+        }
+        List<?> raw = (List<?>) value;
+        List<Long> out = new ArrayList<>(raw.size());
+        for (Object item : raw)
+        {
+            Long id = longValue(item);
+            if (id == null)
+            {
+                throw MediaException.badRequest(field + " 里含空 id");
+            }
+            out.add(id);
+        }
+        return out;
+    }
+
+    /** 字符串数组：每个元素去首尾空格，空串 400（ids 里出现空 id 一定是前端 bug） */
+    public static List<String> stringsValue(Object value, String field)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (!(value instanceof List))
+        {
+            throw MediaException.badRequest(field + " 必须是数组");
+        }
+        List<?> raw = (List<?>) value;
+        List<String> out = new ArrayList<>(raw.size());
+        for (Object item : raw)
+        {
+            String text = stringValue(item);
+            if (text == null)
+            {
+                throw MediaException.badRequest(field + " 里含空值");
+            }
+            out.add(text);
+        }
+        return out;
+    }
+
+    /** 标记数组：[{pos, label?, color?}]；pos 必填（秒，允许小数） */
+    public static List<MediaVideoMarker> markersValue(Object value, String field)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (!(value instanceof List))
+        {
+            throw MediaException.badRequest(field + " 必须是数组");
+        }
+        List<?> raw = (List<?>) value;
+        List<MediaVideoMarker> out = new ArrayList<>(raw.size());
+        for (Object item : raw)
+        {
+            if (!(item instanceof Map))
+            {
+                throw MediaException.badRequest(field + " 的每一项必须是对象 {pos,label,color}");
+            }
+            Map<?, ?> map = (Map<?, ?>) item;
+            MediaVideoMarker marker = new MediaVideoMarker();
+            marker.setPos(decimalValue(map.get("pos"), field + ".pos"));
+            marker.setLabel(stringValue(map.get("label")));
+            marker.setColor(stringValue(map.get("color")));
+            out.add(marker);
+        }
+        return out;
+    }
+
+    /** 秒数：接受数字或数字字符串；缺失 / 非数字 400 */
+    public static BigDecimal decimalValue(Object value, String field)
+    {
+        if (value == null)
+        {
+            throw MediaException.badRequest(field + " 必填（秒，可为小数）");
+        }
+        String text = stringValue(value);
+        if (text == null)
+        {
+            throw MediaException.badRequest(field + " 必填（秒，可为小数）");
+        }
+        try
+        {
+            return new BigDecimal(text);
+        }
+        catch (NumberFormatException e)
+        {
+            throw MediaException.badRequest(field + " 必须是数字（秒）: " + text);
+        }
+    }
+}

@@ -7,6 +7,10 @@
 --   (3) media_tag                 标签字典（id, name UNIQUE, color, use_count, create_time）
 --   (4) media_video_tag.tag_id    关联列 —— 字典标签挂到既有 media_video_tag 上
 --
+-- 另：站端能不能改这些属性由「站端编辑策略」决定（off / local / full），
+--     它不是 DDL，单独在 doc/media_edit_policy.sql（sys_config['media.userEditing']），
+--     语义见本文件末尾「7) 站端编辑策略」。
+--
 -- 语义约定（与 Java 侧 MediaOrganizeServiceImpl 严格一致）：
 --   * 评分刻度 0-10：10 最好，NULL = 未评分（0 是有效的最低分，不是"没有分"）
 --   * 字典标签写进 media_video_tag 时 facet 固定为 '标签'、tag_id = media_tag.id、
@@ -145,3 +149,30 @@ SELECT table_name, table_rows
  WHERE table_schema = DATABASE()
    AND table_name IN ('media_tag', 'media_video_marker')
  ORDER BY table_name;
+
+-- ---------------------------------------------------------------------
+-- 7) 站端编辑策略（语义说明；DDL/INSERT 在 doc/media_edit_policy.sql）
+--
+--   sys_config['media.userEditing'] 一行控制 /api/media 下的写接口：
+--
+--     full   完全编辑（默认）：站端可现场建标签、改评分、打标记、批量补丁，正常落库
+--     local  站端只在浏览器本地改：服务端写接口一律 403，前端可把改动存 localStorage
+--     off    站端禁止编辑：写接口一律 403，界面按只读渲染
+--
+--   闸门位置：MediaEditController 的每个写接口第一行就调
+--   IMediaEditPolicyService.requireWritable()，先于 body 解析和任何业务调用；
+--   非 full 时回 403 {"error":"当前为演示/本地模式，站端不允许写入
+--   （管理员可在媒体库「编辑策略」中改为完全编辑）"}。
+--
+--   读接口不受影响：GET /api/media/edit-policy（前端据此决定可编辑/只读）与
+--   GET /api/media/tags（标签选择器字典）在任何档位下都可用。
+--
+--   默认 full 的理由：本项目是单实例自托管（Stash 式），克隆者跑的是自己的实例、
+--   自己的媒体库，站端编辑就是主人的编辑能力。
+--   ★ 公网演示实例请务必改成 local 或 off，否则匿名访客可以直接往真库写标签 / 评分：
+--       UPDATE sys_config SET config_value = 'local' WHERE config_key = 'media.userEditing';
+--
+--   改档位两条路：管理端 PUT /api/media/admin/edit-policy body {"level":"local"}
+--   （需 media:admin:edit 权限），或直接执行上面那条 UPDATE。
+--   服务端读取带 30s 本地缓存，管理端接口写入时立即失效；直连改库最迟 30s 生效。
+-- ---------------------------------------------------------------------

@@ -160,6 +160,55 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
         return out;
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> updateTag(Long id, String name, String color, boolean colorPresent)
+    {
+        if (id == null)
+        {
+            throw MediaException.badRequest("missing id");
+        }
+        MediaTag current = mediaOrganizeMapper.selectTagById(id);
+        if (current == null)
+        {
+            throw MediaException.notFound("标签不存在: " + id);
+        }
+        String cleanName = trimToNull(name);
+        if (cleanName != null && cleanName.length() > TAG_NAME_MAX)
+        {
+            throw MediaException.badRequest("标签名最长 " + TAG_NAME_MAX + " 个字符");
+        }
+        String cleanColor = colorPresent ? trimToNull(color) : null;
+        if (cleanColor != null && cleanColor.length() > COLOR_MAX)
+        {
+            throw MediaException.badRequest("颜色值最长 " + COLOR_MAX + " 个字符（建议 #RRGGBB）");
+        }
+        if (cleanName == null && !colorPresent)
+        {
+            throw MediaException.badRequest("body 里没有任何可改字段（name / color）");
+        }
+
+        // 重名校验：改名撞上别的字典项直接 409（新建走的「重名复用」在改名场景会把两行合成一行，不能照搬）
+        if (cleanName != null && !cleanName.equals(current.getName()))
+        {
+            MediaTag other = mediaOrganizeMapper.selectTagByName(cleanName);
+            if (other != null && !other.getId().equals(id))
+            {
+                throw MediaException.conflict("标签名已存在: " + cleanName);
+            }
+            mediaOrganizeMapper.updateTagName(id, cleanName);
+            // media_video_tag.name 是冗余列，不同步的话用户端索引 / 详情仍旧显示旧名字
+            int synced = mediaOrganizeMapper.updateVideoTagNameByTagId(id, cleanName);
+            log.info("媒体标签改名 id={} {} -> {}，同步关联行 {} 条", id, current.getName(), cleanName, synced);
+        }
+        if (colorPresent)
+        {
+            mediaOrganizeMapper.updateTagColor(id, cleanColor);
+        }
+        invalidateIndex();
+        return tagNode(mediaOrganizeMapper.selectTagById(id));
+    }
+
     // ------------------------------------------------------------------ 单条元数据
 
     @Override
@@ -245,6 +294,40 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
             invalidateIndex();
         }
         return metaNode(video);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> addMarker(String videoId, MediaVideoMarker marker)
+    {
+        MediaVideo video = requireVideo(videoId);
+        if (marker == null || marker.getPos() == null)
+        {
+            throw MediaException.badRequest("pos 必填（秒，可为小数）");
+        }
+        checkMarkerFields(marker);
+        checkMarkerPos(videoId, video, marker);
+        int existing = mediaOrganizeMapper.selectMarkersByVideoId(videoId).size();
+        if (existing >= MARKERS_MAX)
+        {
+            throw MediaException.badRequest("单个视频标记最多 " + MARKERS_MAX + " 条，当前已有 " + existing + " 条");
+        }
+
+        MediaVideoMarker fresh = new MediaVideoMarker();
+        fresh.setVideoId(videoId);
+        fresh.setPos(marker.getPos());
+        fresh.setLabel(trimToNull(marker.getLabel()));
+        fresh.setColor(trimToNull(marker.getColor()));
+        mediaOrganizeMapper.insertMarkerWithKey(fresh);
+        invalidateIndex();
+        log.debug("视频 {} 新增标记 id={} pos={}", videoId, fresh.getId(), fresh.getPos());
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", fresh.getId());
+        out.put("pos", fresh.getPos());
+        out.put("label", fresh.getLabel());
+        out.put("color", fresh.getColor());
+        return out;
     }
 
     // ------------------------------------------------------------------ 批量
@@ -465,16 +548,22 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
             {
                 throw MediaException.badRequest("markers 每项都必须带 pos（秒）");
             }
-            String label = trimToNull(marker.getLabel());
-            if (label != null && label.length() > MARKER_LABEL_MAX)
-            {
-                throw MediaException.badRequest("标记名最长 " + MARKER_LABEL_MAX + " 个字符: " + label);
-            }
-            String color = trimToNull(marker.getColor());
-            if (color != null && color.length() > COLOR_MAX)
-            {
-                throw MediaException.badRequest("标记颜色最长 " + COLOR_MAX + " 个字符（建议 #RRGGBB）: " + color);
-            }
+            checkMarkerFields(marker);
+        }
+    }
+
+    /** 标记的 label / color 长度校验（全量替换与新增单条标记共用） */
+    private static void checkMarkerFields(MediaVideoMarker marker)
+    {
+        String label = trimToNull(marker.getLabel());
+        if (label != null && label.length() > MARKER_LABEL_MAX)
+        {
+            throw MediaException.badRequest("标记名最长 " + MARKER_LABEL_MAX + " 个字符: " + label);
+        }
+        String color = trimToNull(marker.getColor());
+        if (color != null && color.length() > COLOR_MAX)
+        {
+            throw MediaException.badRequest("标记颜色最长 " + COLOR_MAX + " 个字符（建议 #RRGGBB）: " + color);
         }
     }
 
