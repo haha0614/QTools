@@ -513,6 +513,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
             if (video != null)
             {
                 originalRel = video.getRelPath();
+                // 内容寻址 + 回退都在 resolveThumbVideo 里做，这里只负责拼固定格式的 URL
                 thumbUrl = "/api/media/thumb/v/" + video.getId();
             }
         }

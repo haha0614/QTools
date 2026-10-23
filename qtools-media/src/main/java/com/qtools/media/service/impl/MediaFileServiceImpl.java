@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.config.MediaProperties;
 import com.qtools.media.exception.MediaException;
+import com.qtools.media.mapper.MediaVideoMapper;
 import com.qtools.media.service.IMediaFileService;
 
 /**
@@ -59,6 +60,9 @@ public class MediaFileServiceImpl implements IMediaFileService
 
     /** 册内序号：纯数字，最多 6 位 */
     private static final Pattern SAFE_INDEX = Pattern.compile("^\\d{1,6}$");
+
+    /** 内容哈希文件名片段：十六进制（content_hash 取 sha1 前 16 位）；脏数据不进文件路径 */
+    private static final Pattern SAFE_CONTENT_HASH = Pattern.compile("^[0-9a-fA-F]{6,64}$");
 
     /** 缩略图文件名固定 4 位序号（0000.jpg），不足补零 */
     private static final int THUMB_INDEX_WIDTH = 4;
@@ -111,6 +115,10 @@ public class MediaFileServiceImpl implements IMediaFileService
 
     @Autowired
     private MediaProperties mediaProperties;
+
+    /** 视频内容哈希来源：只有「按内容寻址取封面」需要读库，读不到就回退老命名 */
+    @Autowired
+    private MediaVideoMapper mediaVideoMapper;
 
     /** 已解析的媒体根 realpath 及其对应的配置值（配置变更后自动重算） */
     private volatile String rootConfig;
@@ -241,6 +249,18 @@ public class MediaFileServiceImpl implements IMediaFileService
         return root.relativize(normalized).toString().replace('\\', '/');
     }
 
+    /**
+     * 视频缩略图：内容寻址 + 回退
+     *
+     * <p>P4 起封面按<b>内容</b>落盘：{@code thumbs/v/<content_hash>.jpg}。{@code videoId} 是
+     * {@code sha1(rel_path)[:12]}，改名 / 移动就会变；{@code content_hash} 不会，因此同一份内容
+     * 改名后仍复用同一张封面。</p>
+     *
+     * <p>查找顺序：<b>先 {@code <content_hash>.jpg}，命中不了再回退 {@code <id>.jpg}</b>。
+     * 哈希未回填、老库还没重建、产物缺失时都自然落到老命名，所以新老文件共存、不迁移即可用。</p>
+     *
+     * <p>对外 URL 依旧是 {@code /api/media/thumb/v/<id>}：只在服务端内部换文件，前端零改动。</p>
+     */
     @Override
     public Path resolveThumbVideo(String id)
     {
@@ -248,7 +268,44 @@ public class MediaFileServiceImpl implements IMediaFileService
         {
             throw MediaException.forbidden();
         }
-        return requireFile(thumbsDir().resolve(THUMB_VIDEO_DIR), id + JPG_SUFFIX);
+        Path dir = thumbsDir().resolve(THUMB_VIDEO_DIR);
+        Path contentAddressed = contentAddressedThumb(dir, id);
+        if (contentAddressed != null)
+        {
+            return contentAddressed;
+        }
+        // 回退：老命名 thumbs/v/<videoId>.jpg
+        return requireFile(dir, id + JPG_SUFFIX);
+    }
+
+    /**
+     * 内容寻址封面 thumbs/v/<content_hash>.jpg
+     *
+     * @return 命中返回真实路径；哈希未回填、产物还没生成、读库异常都返回 null，由调用方回退老命名
+     */
+    private Path contentAddressedThumb(Path dir, String videoId)
+    {
+        String hash;
+        try
+        {
+            hash = mediaVideoMapper.selectContentHashById(videoId);
+        }
+        catch (RuntimeException e)
+        {
+            // 读库失败按「没有哈希」处理：退到老命名，别让缩略图接口跟着库一起挂
+            return null;
+        }
+        if (StringUtils.isEmpty(hash))
+        {
+            return null;
+        }
+        String name = hash.trim();
+        if (!SAFE_CONTENT_HASH.matcher(name).matches())
+        {
+            return null;
+        }
+        Path target = dir.resolve(name + JPG_SUFFIX).normalize();
+        return target.startsWith(dir) && Files.isRegularFile(target) ? target : null;
     }
 
     @Override

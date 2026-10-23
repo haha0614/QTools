@@ -3,16 +3,22 @@
 /**
  * 通用媒体缩略图生成器（零依赖，child_process 调 ffmpeg）
  *
- * 从库里读 media_video / media_photo，按 Java 端（MediaController / MediaServiceImpl）的磁盘约定生成：
- *   视频封面   <thumbs>/v/<videoId>.jpg                       scale=480:-2
+ * 从库里读 media_video / media_photo，按 Java 端（MediaFileServiceImpl）的磁盘约定生成：
+ *   视频封面   <thumbs>/v/<content_hash>.jpg                  scale=480:-2
+ *              content_hash 为 NULL 时回退 <thumbs>/v/<videoId>.jpg（老命名，仍可用）
  *   图片缩略图 <thumbs>/p/<albumId>/<%04d>.jpg                 scale=400:-2
  *   大图预览   <thumbs>/pv/<albumId>/<%04d>.jpg（仅 is_big=1）  scale=1600:-2
  *
- * 增量：目标文件已存在且非空、且没给 --force -> skip。
+ * 视频封面按内容寻址：videoId = sha1(rel_path)[:12] 会随改名变化，content_hash 不会，
+ * 所以同一份内容改名 / 移动后复用同一张封面。新老命名共存：Java 端先找 <hash>.jpg，
+ * 找不到再回退 <id>.jpg，历史产物不迁移也能直接上线。
+ *
+ * 增量：产物存在、非空，且产物 mtime >= 源文件 mtime -> skip（源被替换 / 重编码后自动重建）；
+ *       --force 强制重建；--no-fresh 关掉 mtime 判断，退回「存在即跳过」的旧语义。
  * 幂等：只写缩略图根目录，不碰源媒体目录。
  *
  * 输出（管理端 MediaScanServiceImpl 的 thumb 模式按这些行解析，改动前先看它）：
- *   START total=<n> tasks=videos,photos,previews force=<0|1>
+ *   START total=<n> tasks=videos,photos,previews force=<0|1> fresh=<0|1>
  *   PROGRESS <done>/<total>          每条之后一行
  *   FAIL <rel_path>: <原因>           单条失败不中断
  *   TASK <task> total=<n> ok=<n> skip=<n> fail=<n>
@@ -39,6 +45,7 @@ const DEFAULTS = {
   host: '127.0.0.1',
   port: 3306,
   force: false,
+  fresh: true,
   limit: 0,
 };
 
@@ -53,7 +60,8 @@ const HELP = `
   --user=<name>       默认 root
   --host=<host>       默认 127.0.0.1
   --port=<n>          默认 3306
-  --force             重建已存在的产物（默认按「存在即跳过」增量）
+  --force             无条件重建全部产物（忽略 mtime 与存在性）
+  --no-fresh          关闭新鲜度检查：产物存在即跳过（等价改动前的旧语义）
   --limit=<n>         只处理前 n 条（调试用）
   --secret=<file>     密码来源②：从 secret.yml 取 spring.datasource.druid.master.password
                       （管理端「重建缩略图」按钮触发时没有 MYSQL_PWD，用它）
@@ -67,9 +75,13 @@ const HELP = `
   取到后只通过子进程的 MYSQL_PWD 传给 mysql 客户端：不打印、不落盘、不进命令行参数。
 
 产物路径（相对 --thumbs）：
-  v/<videoId>.jpg           视频封面（-ss 3 抽帧；不足 3 秒自动回退 -ss 0）
+  v/<content_hash>.jpg      视频封面，按内容寻址（-ss 3 抽帧；不足 3 秒自动回退 -ss 0）
+  v/<videoId>.jpg           仅当 content_hash 为 NULL 时的回退命名
   p/<albumId>/0000.jpg...   图片缩略图（seq 4 位补零）
   pv/<albumId>/0000.jpg...  大图预览（仅 is_big=1）
+
+增量判定：产物存在且非空，且产物 mtime >= 源文件 mtime 才算「已是最新」。
+源文件被替换 / 重编码后 mtime 变新，下一次运行自动重建该条产物。
 
 输出行（管理端解析，不要改）：
   START total=<n> ... / PROGRESS <done>/<total> / DONE ok=<n> skip=<n> fail=<n>
@@ -81,6 +93,7 @@ function parseArgs(argv) {
   const o = Object.assign({}, DEFAULTS, { ignored: [] });
   for (const a of argv) {
     if (a === '--force') o.force = true;
+    else if (a === '--no-fresh') o.fresh = false;
     else if (a === '--help' || a === '-h') o.help = true;
     else if (a.startsWith('--root=')) o.root = a.slice('--root='.length);
     else if (a.startsWith('--thumbs=')) o.thumbs = a.slice('--thumbs='.length);
@@ -232,10 +245,17 @@ function query(mysqlExe, o, password, sql) {
 
 // ---------------------------------------------------------------- 任务清单
 
+/** 视频封面文件名：content_hash 优先（内容寻址），为空回退 videoId（老命名） */
+function thumbName(v) {
+  const hash = v.hash == null ? '' : String(v.hash).trim();
+  return hash !== '' ? hash : v.id;
+}
+
 function planTasks(videos, photos, o) {
   const t = [];
   for (const v of videos) {
-    t.push({ task: 'videos', src: v.rel, out: path.join(o.thumbs, 'v', v.id + '.jpg'), kind: 'video' });
+    // 内容寻址：同一份内容改名 / 移动后 content_hash 不变，仍复用同一张封面
+    t.push({ task: 'videos', src: v.rel, out: path.join(o.thumbs, 'v', thumbName(v) + '.jpg'), kind: 'video' });
   }
   for (const p of photos) {
     t.push({
@@ -253,12 +273,41 @@ function planTasks(videos, photos, o) {
   return o.limit > 0 ? t.slice(0, o.limit) : t;
 }
 
+/** 产物存在且非空（旧语义，--no-fresh / ffmpeg 产物校验都用它） */
 function alreadyDone(out) {
   try {
     return fs.statSync(out).size > 0;
   } catch (e) {
     return false;
   }
+}
+
+/** 源文件绝对路径（库里存的是相对媒体根的正斜杠路径） */
+function srcPathOf(item, root) {
+  return path.resolve(root, item.src.replace(/[\\/]+/g, path.sep));
+}
+
+/**
+ * 新鲜度判定：产物存在、非空，且产物 mtime >= 源文件 mtime。
+ * 源文件被替换 / 重编码后 mtime 变新 -> 判定为过期 -> 重建。
+ * checkMtime=false（--no-fresh）时只要求产物存在，等价改动前的旧语义。
+ */
+function isFresh(out, src, checkMtime) {
+  let outStat;
+  try {
+    outStat = fs.statSync(out);
+  } catch (e) {
+    return false; // 没产物，必须生成
+  }
+  if (outStat.size <= 0) return false; // 空文件（上次 ffmpeg 中断）也算没产物
+  if (!checkMtime) return true;
+  let srcStat;
+  try {
+    srcStat = fs.statSync(src);
+  } catch (e) {
+    return false; // 源文件不见了交给 buildOne 报 FAIL，不在这里静默跳过
+  }
+  return outStat.mtimeMs >= srcStat.mtimeMs;
 }
 
 function runFfmpeg(ffmpeg, args) {
@@ -279,7 +328,7 @@ function ffmpegArgsFor(item, src) {
 }
 
 function buildOne(ffmpeg, item, root) {
-  const src = path.resolve(root, item.src.replace(/[\\/]+/g, path.sep));
+  const src = srcPathOf(item, root);
   if (!fs.existsSync(src)) return { ok: false, reason: '源文件不存在：' + src };
   fs.mkdirSync(path.dirname(item.out), { recursive: true });
   let r = runFfmpeg(ffmpeg, ffmpegArgsFor(item, src));
@@ -320,10 +369,11 @@ function main() {
   const password = readPassword(o);
 
   const videoRows = query(mysqlExe, o, password,
-    'SELECT id,rel_path FROM media_video ORDER BY id;');
+    'SELECT id,rel_path,content_hash FROM media_video ORDER BY id;');
   const photoRows = query(mysqlExe, o, password,
     'SELECT album_id,seq,rel_path,is_big FROM media_photo ORDER BY album_id,seq;');
-  const videos = videoRows.map((c) => ({ id: c[0], rel: c[1] }));
+  // mysql --batch 把 NULL 打成字面量 "NULL"，这里还原成 null，免得拿 "NULL" 当哈希拼文件名
+  const videos = videoRows.map((c) => ({ id: c[0], rel: c[1], hash: c[2] === 'NULL' ? null : c[2] }));
   const photos = photoRows.map((c) => ({ albumId: c[0], seq: Number(c[1]), rel: c[2], isBig: c[3] }));
 
   const tasks = planTasks(videos, photos, o);
@@ -331,7 +381,12 @@ function main() {
   const startedAt = Date.now();
   const counts = { ok: 0, skip: 0, fail: 0 };
   log('START total=' + total + ' tasks=videos,photos,previews force=' + (o.force ? 1 : 0) +
-    ' root=' + root + ' thumbs=' + o.thumbs);
+    ' fresh=' + (o.fresh ? 1 : 0) + ' root=' + root + ' thumbs=' + o.thumbs);
+  // 哈希没回填的视频只能按老命名产出：整批提示一次，避免刷屏（stderr，不干扰管理端解析 stdout）
+  const noHash = videos.filter((v) => !v.hash || String(v.hash).trim() === '').length;
+  if (noHash > 0) {
+    warn(noHash + ' 个视频 content_hash 为 NULL，封面回退 v/<videoId>.jpg（重命名后会重复生成，建议先回填哈希）');
+  }
 
   let done = 0;
   const perTask = {};
@@ -339,7 +394,7 @@ function main() {
     if (!perTask[t.task]) perTask[t.task] = { total: 0, ok: 0, skip: 0, fail: 0 };
     perTask[t.task].total += 1;
     let result;
-    if (!o.force && alreadyDone(t.out)) {
+    if (!o.force && isFresh(t.out, srcPathOf(t, root), o.fresh)) {
       result = { ok: true, skip: true, reason: null };
     } else {
       const r = buildOne(ffmpeg, t, root);

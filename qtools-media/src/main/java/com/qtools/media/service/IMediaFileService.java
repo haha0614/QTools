@@ -58,7 +58,10 @@ public interface IMediaFileService
     String relativize(Path path);
 
     /**
-     * 定位视频缩略图 thumbs/v/{id}.jpg
+     * 定位视频缩略图：<b>内容寻址优先</b> thumbs/v/{content_hash}.jpg，
+     * 命中不了再<b>回退</b>老命名 thumbs/v/{id}.jpg
+     *
+     * <p>对外 URL 始终是 /api/media/thumb/v/{id}，换文件只发生在服务端内部。</p>
      *
      * @param id 视频 id
      * @return 缩略图路径
