@@ -60,6 +60,14 @@ public class MediaVideo
     /** 是否隐藏（1/0）；仅管理端查询会填充 */
     private Integer hidden;
 
+    /**
+     * 人工评分 0-10（10 最好；<b>null = 未评分</b>，0 是有效的最低分）
+     *
+     * <p>由 {@code media_video.rating} 承载，只在 M3-A 组织能力接口里写入；
+     * 扫描脚本从不写这一列，因此重建索引不会冲掉人工评分。</p>
+     */
+    private Integer rating;
+
     public String getId()
     {
         return id;
@@ -228,5 +236,15 @@ public class MediaVideo
     public void setHidden(Integer hidden)
     {
         this.hidden = hidden;
+    }
+
+    public Integer getRating()
+    {
+        return rating;
+    }
+
+    public void setRating(Integer rating)
+    {
+        this.rating = rating;
     }
 }

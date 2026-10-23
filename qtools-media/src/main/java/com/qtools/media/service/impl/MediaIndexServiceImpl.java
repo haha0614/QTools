@@ -57,6 +57,14 @@ public class MediaIndexServiceImpl implements IMediaIndexService
 
     private static final String BUILT_PATTERN = "yyyy年M月d日 HH:mm:ss";
 
+    /**
+     * 字典标签在 media_video_tag 里固定的 facet 值（M3-A）
+     *
+     * <p>管理端打标签写的就是这一行，因此索引里「成对 tags」天然带上它；
+     * 另外单独回一份 {@code dictTags}（纯名称数组）给用户端，省得前端自己拆对。</p>
+     */
+    private static final String FACET_TAG = "标签";
+
     /** 内置 ObjectMapper：不依赖 MVC 的序列化配置，保证 ETag 计算与响应体完全一致 */
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -293,6 +301,27 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         node.put("browserOk", isTrue(video.getBrowserOk()));
         node.put("tags", tags == null ? List.of() : tags);
         node.put("actors", actors == null ? List.of() : actors);
+        // 组织属性（M3-A）：字典标签只给名称、评分只给数值，**为空时整键不输出**，
+        // 没整理过的库（绝大多数视频）索引体积一个字节都不涨。
+        List<String> dictTags = new ArrayList<>();
+        if (tags != null)
+        {
+            for (String[] pair : tags)
+            {
+                if (pair != null && pair.length > 1 && FACET_TAG.equals(pair[0]))
+                {
+                    dictTags.add(pair[1]);
+                }
+            }
+        }
+        if (!dictTags.isEmpty())
+        {
+            node.put("dictTags", dictTags);
+        }
+        if (video.getRating() != null)
+        {
+            node.put("rating", video.getRating());
+        }
         node.put("poster", video.getPosterPath());
         node.put("doc", video.getDocPath());
         node.put("sub", video.getSubPath());

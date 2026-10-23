@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    媒体库组织能力（M3-A）映射文件：标签字典 / 评分 / 时间点标记。
+
+    字典标签写进 media_video_tag 时 facet 固定 '标签'、name 冗余标签名、tag_id 指向字典，
+    因此索引 / 详情接口既有的 facet+name 读取路径一行都不用改。
+    历史行（扫描脚本写的 facet 标签）tag_id IS NULL，所有字典相关的删改都带 tag_id 条件，
+    永远不会误删它们。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaOrganizeMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaTag" id="MediaTagResult">
+        <id     property="id"         column="id"          />
+        <result property="name"       column="name"        />
+        <result property="color"      column="color"       />
+        <result property="useCount"   column="use_count"   />
+        <result property="createTime" column="create_time" />
+    </resultMap>
+
+    <resultMap type="com.qtools.media.domain.MediaVideoMarker" id="MediaVideoMarkerResult">
+        <id     property="id"         column="id"          />
+        <result property="videoId"    column="video_id"    />
+        <result property="pos"        column="pos"         />
+        <result property="label"      column="label"       />
+        <result property="color"      column="color"       />
+        <result property="createTime" column="create_time" />
+    </resultMap>
+
+    <!-- ================================================================ 标签字典 -->
+
+    <select id="selectTagList" resultMap="MediaTagResult">
+        select id, name, color, use_count, create_time
+        from media_tag
+        order by use_count desc, name asc
+    </select>
+
+    <select id="selectTagById" resultMap="MediaTagResult">
+        select id, name, color, use_count, create_time
+        from media_tag
+        where id = #{id}
+    </select>
+
+    <select id="selectTagByName" resultMap="MediaTagResult">
+        select id, name, color, use_count, create_time
+        from media_tag
+        where name = #{name}
+        limit 1
+    </select>
+
+    <insert id="insertTag" parameterType="com.qtools.media.domain.MediaTag"
+            useGeneratedKeys="true" keyProperty="id">
+        insert into media_tag (name, color, use_count)
+        values (#{name}, #{color}, 0)
+    </insert>
+
+    <delete id="deleteTag">
+        delete from media_tag where id = #{id}
+    </delete>
+
+    <delete id="deleteVideoTagByTagId">
+        delete from media_video_tag where tag_id = #{tagId}
+    </delete>
+
+    <select id="countTagsByIds" resultType="int">
+        select count(*) from media_tag
+        where id in
+        <foreach collection="tagIds" item="tagId" open="(" separator="," close=")">#{tagId}</foreach>
+    </select>
+
+    <!-- 重算 use_count：只扫字典表 + 关联表，几十行量级 -->
+    <update id="recomputeUseCount">
+        update media_tag t
+        set t.use_count = (select count(*) from media_video_tag v where v.tag_id = t.id)
+        where t.id in
+        <foreach collection="tagIds" item="tagId" open="(" separator="," close=")">#{tagId}</foreach>
+    </update>
+
+    <!-- ================================================================ 视频 ↔ 字典标签 -->
+
+    <select id="selectTagsByVideoId" resultMap="MediaTagResult">
+        select t.id, t.name, t.color, t.use_count, t.create_time
+        from media_video_tag v
+        inner join media_tag t on t.id = v.tag_id
+        where v.video_id = #{videoId}
+        order by t.name asc
+    </select>
+
+    <!-- 只删字典行；tag_id IS NULL 的历史 facet 行不受影响 -->
+    <delete id="deleteVideoTagsByVideoId">
+        delete from media_video_tag
+        where video_id = #{videoId} and tag_id is not null
+    </delete>
+
+    <delete id="deleteVideoTagsByVideoIdAndTagIds">
+        delete from media_video_tag
+        where video_id = #{videoId} and tag_id in
+        <foreach collection="tagIds" item="tagId" open="(" separator="," close=")">#{tagId}</foreach>
+    </delete>
+
+    <!-- INSERT IGNORE + uk_tag_video_tag(video_id, tag_id) = 天然去重 -->
+    <insert id="insertVideoTags">
+        insert ignore into media_video_tag (video_id, facet, name, tag_id)
+        select #{videoId}, '标签', t.name, t.id
+        from media_tag t
+        where t.id in
+        <foreach collection="tagIds" item="tagId" open="(" separator="," close=")">#{tagId}</foreach>
+    </insert>
+
+    <insert id="batchInsertVideoTags">
+        insert ignore into media_video_tag (video_id, facet, name, tag_id)
+        select v.video_id, '标签', t.name, t.id
+        from media_tag t
+        cross join (
+        <foreach collection="videoIds" item="videoId" separator=" union all ">select #{videoId} as video_id</foreach>
+        ) v
+        where t.id in
+        <foreach collection="tagIds" item="tagId" open="(" separator="," close=")">#{tagId}</foreach>
+    </insert>
+
+    <delete id="batchDeleteVideoTags">
+        delete from media_video_tag
+        where tag_id in
+        <foreach collection="tagIds" item="tagId" open="(" separator="," close=")">#{tagId}</foreach>
+        and video_id in
+        <foreach collection="videoIds" item="videoId" open="(" separator="," close=")">#{videoId}</foreach>
+    </delete>
+
+    <select id="selectTagIdsByVideoIds" resultType="java.lang.Long">
+        select distinct tag_id from media_video_tag
+        where tag_id is not null and video_id in
+        <foreach collection="videoIds" item="videoId" open="(" separator="," close=")">#{videoId}</foreach>
+    </select>
+
+    <!-- ================================================================ 评分 -->
+
+    <update id="updateRating">
+        update media_video set rating = #{rating} where id = #{id}
+    </update>
+
+    <update id="batchUpdateRating">
+        update media_video set rating = #{rating}
+        where id in
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </update>
+
+    <!-- ================================================================ 标记 -->
+
+    <select id="selectMarkersByVideoId" resultMap="MediaVideoMarkerResult">
+        select id, video_id, pos, label, color, create_time
+        from media_video_marker
+        where video_id = #{videoId}
+        order by pos asc, id asc
+    </select>
+
+    <delete id="deleteMarkersByVideoId">
+        delete from media_video_marker where video_id = #{videoId}
+    </delete>
+
+    <insert id="insertMarker">
+        insert into media_video_marker (video_id, pos, label, color)
+        values (#{videoId}, #{pos}, #{label}, #{color})
+    </insert>
+
+    <insert id="batchInsertMarker">
+        insert into media_video_marker (video_id, pos, label, color)
+        select v.video_id, #{pos}, #{label}, #{color}
+        from (
+        <foreach collection="videoIds" item="videoId" separator=" union all ">select #{videoId} as video_id</foreach>
+        ) v
+    </insert>
+
+    <delete id="batchDeleteMarkersByIds">
+        delete from media_video_marker
+        where video_id in
+        <foreach collection="videoIds" item="videoId" open="(" separator="," close=")">#{videoId}</foreach>
+        and id in
+        <foreach collection="markerIds" item="markerId" open="(" separator="," close=")">#{markerId}</foreach>
+    </delete>
+
+    <!-- ================================================================ 视频存在性 / 时长 -->
+
+    <select id="selectVideoDurList" resultType="java.util.LinkedHashMap">
+        select id, dur from media_video
+        where id in
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </select>
+
+    <select id="countVideosByIds" resultType="int">
+        select count(*) from media_video
+        where id in
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </select>
+
+</mapper>

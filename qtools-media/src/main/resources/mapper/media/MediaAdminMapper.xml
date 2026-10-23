@@ -28,6 +28,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="subPath"    column="sub_path"    />
         <result property="hidden"     column="hidden"      />
         <result property="mtime"      column="mtime"       />
+        <!-- M3-A 组织能力：管理端列表直接回显人工评分 0-10（null = 未评分） -->
+        <result property="rating"     column="rating"      />
     </resultMap>
 
     <resultMap type="com.qtools.media.domain.MediaAlbum" id="MediaAdminAlbumResult">
@@ -62,7 +64,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <select id="selectVideoPage" resultMap="MediaAdminVideoResult">
         select v.id, v.folder, v.rel_path, v.title, v.size, v.dur, v.w, v.h, v.vcodec,
-               v.browser_ok, v.poster_path, v.doc_path, v.sub_path, v.hidden, v.mtime
+               v.browser_ok, v.poster_path, v.doc_path, v.sub_path, v.hidden, v.mtime, v.rating
         from media_video v
         <where>
             <if test="hidden != null and hidden != ''">
@@ -129,7 +131,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     <!-- root_id 必须取出：软删 / 恢复按记录所属根选根、选回收站桶 -->
     <select id="selectVideoAnyById" resultMap="MediaAdminVideoResult">
         select id, root_id, folder, rel_path, title, size, dur, w, h, vcodec, browser_ok,
-               poster_path, doc_path, sub_path, hidden, mtime
+               poster_path, doc_path, sub_path, hidden, mtime, rating
         from media_video
         where id = #{id}
     </select>

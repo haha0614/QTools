@@ -1,5 +1,7 @@
 package com.qtools.media.controller;
 
+import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -11,6 +13,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -22,8 +25,11 @@ import com.qtools.common.core.domain.AjaxResult;
 import com.qtools.common.core.page.TableDataInfo;
 import com.qtools.common.enums.BusinessType;
 import com.qtools.common.utils.StringUtils;
+import com.qtools.media.domain.MediaVideoMarker;
+import com.qtools.media.domain.dto.MediaMetaPatch;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.service.IMediaAdminService;
+import com.qtools.media.service.IMediaOrganizeService;
 import com.qtools.media.service.IMediaScanService;
 
 /**
@@ -54,6 +60,9 @@ public class MediaAdminController extends BaseController
 
     @Autowired
     private IMediaScanService mediaScanService;
+
+    @Autowired
+    private IMediaOrganizeService mediaOrganizeService;
 
     // ------------------------------------------------------------------ 列表
 
@@ -299,6 +308,101 @@ public class MediaAdminController extends BaseController
         return mediaScanService.getJob(jobId);
     }
 
+    // ------------------------------------------------------------------ 组织能力（M3-A：标签 / 评分 / 标记）
+
+    /**
+     * 标签字典（含引用次数），按 useCount 降序
+     *
+     * <p>返回 {@code [{id,name,color,useCount}]}；前端据此渲染标签选择器，
+     * 打标签时把 {@code id} 交给 {@code PUT /video/{id}/meta} 或批量接口。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/tags")
+    public List<Map<String, Object>> tags()
+    {
+        return mediaOrganizeService.tagList();
+    }
+
+    /**
+     * 新建标签：body {@code {name, color?}}
+     *
+     * <p><b>重名复用</b>：name 唯一，已存在则直接返回既有行（不报 409、不改颜色），
+     * 响应里的 {@code created} 标识这次是新建成还是复用。name 去首尾空格后 1-32 字符。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-新建标签", businessType = BusinessType.INSERT)
+    @PostMapping("/tags")
+    public Map<String, Object> createTag(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaOrganizeService.createTag(stringValue(body.get("name")), stringValue(body.get("color")));
+    }
+
+    /** 删除标签字典项：同时清掉它在 media_video_tag 的全部关联（返回 unlinked 行数） */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-删除标签", businessType = BusinessType.DELETE)
+    @DeleteMapping("/tags/{id}")
+    public Map<String, Object> deleteTag(@PathVariable("id") Long id)
+    {
+        return mediaOrganizeService.deleteTag(id);
+    }
+
+    /**
+     * 单条元数据：{@code {rating, tags:[{id,name,color}], markers:[{id,pos,label,color}]}}
+     *
+     * <p>{@code rating} 为 0-10 的整数，{@code null} = 未评分；{@code markers} 按 pos 升序。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/video/{id}/meta")
+    public Map<String, Object> videoMeta(@PathVariable("id") String id)
+    {
+        return mediaOrganizeService.videoMeta(id);
+    }
+
+    /**
+     * 给单条视频打补丁：body 支持全量与增量两种写法
+     *
+     * <table border="1">
+     *   <caption>body 字段 → 语义</caption>
+     *   <tr><th>字段</th><th>语义</th></tr>
+     *   <tr><td>{@code rating}</td><td>0-10 整数；出现即覆盖，{@code null} = 清空评分</td></tr>
+     *   <tr><td>{@code tagIds}</td><td><b>全量替换</b>：出现即把该视频的字典标签整体换成这一组（{@code []} = 清空）</td></tr>
+     *   <tr><td>{@code removeTagIds}</td><td><b>增量摘除</b>（不存在的关联静默忽略，天然幂等）</td></tr>
+     *   <tr><td>{@code addTagIds}</td><td><b>增量追加</b>（重复打同一个标签不会产生第二行）</td></tr>
+     *   <tr><td>{@code markers}</td><td><b>全量替换</b>标记列表（{@code []} = 清空；pos 必须 0 &lt;= pos &lt;= dur，dur 为空则跳过上限）</td></tr>
+     * </table>
+     *
+     * <p>合并顺序：{@code tagIds} 全量替换 → {@code removeTagIds} → {@code addTagIds}，
+     * 同一 tagId 同时出现在 remove 与 add 时以 add 为准。返回补丁后的完整元数据。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-组织属性", businessType = BusinessType.UPDATE)
+    @PutMapping("/video/{id}/meta")
+    public Map<String, Object> updateVideoMeta(@PathVariable("id") String id,
+            @RequestBody(required = false) String rawBody)
+    {
+        return mediaOrganizeService.updateVideoMeta(id, metaPatch(parseObject(rawBody, true), false));
+    }
+
+    /**
+     * 批量打补丁：body {@code {ids:[...], addTagIds?, removeTagIds?, rating?, markerDelta?}}
+     *
+     * <p>ids 上限 500（去重后计算）。字段语义与单条一致，但标签只提供<b>增量</b>写法
+     * （批量全量替换会把每个视频的其它标签一起清掉，风险大于收益，因此不提供）。</p>
+     *
+     * <p>{@code markerDelta} = {@code {"add":[{pos,label,color}],"remove":[markerId]}}：
+     * add 的每条标记会广播到本批<b>每个</b>视频；remove 只删本批视频名下的标记 id。
+     * 返回 {@code {updated, tagsAdded, tagsRemoved, markersAdded, markersRemoved}}，
+     * 其中 {@code updated} = ids 里实际存在的视频条数（不存在的 id 静默跳过）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-批量组织属性", businessType = BusinessType.UPDATE)
+    @PostMapping("/videos/batch-meta")
+    public Map<String, Object> batchMeta(@RequestBody(required = false) String rawBody)
+    {
+        return mediaOrganizeService.batchMeta(metaPatch(parseObject(rawBody, true), true));
+    }
+
     // ------------------------------------------------------------------ 工具
 
     /** 手工解析 body：空 body 允许；非法 JSON / 非对象一律 400（而不是落到 500） */
@@ -431,6 +535,192 @@ public class MediaAdminController extends BaseController
         catch (NumberFormatException e)
         {
             throw MediaException.badRequest("数值参数格式错误: " + text);
+        }
+    }
+
+    // ------------------------------------------------------------------ 组织属性 body → DTO
+
+    /**
+     * body → {@link MediaMetaPatch}
+     *
+     * <p>这里只管「类型转换 + 字段是否出现」，取值范围 / 编号上限 / pos 与时长比较全部在服务层做。
+     * 判断「出现」一律用 {@code containsKey}：JSON 里的 {@code "rating": null} 是<b>有值且为 null</b>，
+     * 表示清空评分，不能用 get() == null 来当成缺省。</p>
+     *
+     * @param batch true = 批量接口（读 ids / markerDelta），false = 单条接口（读 markers）
+     */
+    private static MediaMetaPatch metaPatch(Map<String, Object> body, boolean batch)
+    {
+        MediaMetaPatch patch = new MediaMetaPatch();
+        if (body.containsKey("rating"))
+        {
+            patch.setRatingPresent(true);
+            patch.setRating(ratingValue(body.get("rating")));
+        }
+        if (body.containsKey("tagIds"))
+        {
+            patch.setTagIdsPresent(true);
+            patch.setTagIds(longsValue(body.get("tagIds"), "tagIds"));
+        }
+        patch.setAddTagIds(longsValue(body.get("addTagIds"), "addTagIds"));
+        patch.setRemoveTagIds(longsValue(body.get("removeTagIds"), "removeTagIds"));
+
+        if (!batch)
+        {
+            if (body.containsKey("markers"))
+            {
+                patch.setMarkersPresent(true);
+                List<MediaVideoMarker> markers = markersValue(body.get("markers"), "markers");
+                patch.setMarkers(markers == null ? List.of() : markers);
+            }
+            return patch;
+        }
+
+        patch.setIds(stringsValue(body.get("ids"), "ids"));
+        Object delta = body.get("markerDelta");
+        if (delta != null)
+        {
+            if (!(delta instanceof Map))
+            {
+                throw MediaException.badRequest("markerDelta 必须是对象 {add:[], remove:[]}");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> deltaMap = (Map<String, Object>) delta;
+            patch.setMarkerAdd(markersValue(deltaMap.get("add"), "markerDelta.add"));
+            patch.setMarkerRemoveIds(longsValue(deltaMap.get("remove"), "markerDelta.remove"));
+        }
+        return patch;
+    }
+
+    /** rating：接受整数或整数字符串；null 原样返回（= 清空）；小数 / 非数字一律 400 */
+    private static Integer ratingValue(Object value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (value instanceof Number number)
+        {
+            double asDouble = number.doubleValue();
+            if (asDouble != Math.rint(asDouble))
+            {
+                throw MediaException.badRequest("rating 必须是整数 0-10");
+            }
+            return Integer.valueOf(number.intValue());
+        }
+        String text = stringValue(value);
+        if (text == null || "null".equalsIgnoreCase(text))
+        {
+            return null;
+        }
+        try
+        {
+            return Integer.valueOf(text);
+        }
+        catch (NumberFormatException e)
+        {
+            throw MediaException.badRequest("rating 必须是整数 0-10: " + text);
+        }
+    }
+
+    /** id 数组：接受 [1,2] 或 ["1","2"]；缺省返回 null（= 不改动），空数组返回空表（= 全量清空） */
+    private static List<Long> longsValue(Object value, String field)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (!(value instanceof List))
+        {
+            throw MediaException.badRequest(field + " 必须是数组");
+        }
+        List<?> raw = (List<?>) value;
+        List<Long> out = new ArrayList<>(raw.size());
+        for (Object item : raw)
+        {
+            Long id = longValue(item);
+            if (id == null)
+            {
+                throw MediaException.badRequest(field + " 里含空 id");
+            }
+            out.add(id);
+        }
+        return out;
+    }
+
+    /** 字符串数组：每个元素去首尾空格，空串 400（ids 里出现空 id 一定是前端 bug） */
+    private static List<String> stringsValue(Object value, String field)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (!(value instanceof List))
+        {
+            throw MediaException.badRequest(field + " 必须是数组");
+        }
+        List<?> raw = (List<?>) value;
+        List<String> out = new ArrayList<>(raw.size());
+        for (Object item : raw)
+        {
+            String text = stringValue(item);
+            if (text == null)
+            {
+                throw MediaException.badRequest(field + " 里含空值");
+            }
+            out.add(text);
+        }
+        return out;
+    }
+
+    /** 标记数组：[{pos, label?, color?}]；pos 必填（秒，允许小数） */
+    private static List<MediaVideoMarker> markersValue(Object value, String field)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (!(value instanceof List))
+        {
+            throw MediaException.badRequest(field + " 必须是数组");
+        }
+        List<?> raw = (List<?>) value;
+        List<MediaVideoMarker> out = new ArrayList<>(raw.size());
+        for (Object item : raw)
+        {
+            if (!(item instanceof Map))
+            {
+                throw MediaException.badRequest(field + " 的每一项必须是对象 {pos,label,color}");
+            }
+            Map<?, ?> map = (Map<?, ?>) item;
+            MediaVideoMarker marker = new MediaVideoMarker();
+            marker.setPos(decimalValue(map.get("pos"), field + ".pos"));
+            marker.setLabel(stringValue(map.get("label")));
+            marker.setColor(stringValue(map.get("color")));
+            out.add(marker);
+        }
+        return out;
+    }
+
+    /** 秒数：接受数字或数字字符串；缺失 / 非数字 400 */
+    private static BigDecimal decimalValue(Object value, String field)
+    {
+        if (value == null)
+        {
+            throw MediaException.badRequest(field + " 必填（秒，可为小数）");
+        }
+        String text = stringValue(value);
+        if (text == null)
+        {
+            throw MediaException.badRequest(field + " 必填（秒，可为小数）");
+        }
+        try
+        {
+            return new BigDecimal(text);
+        }
+        catch (NumberFormatException e)
+        {
+            throw MediaException.badRequest(field + " 必须是数字（秒）: " + text);
         }
     }
 }

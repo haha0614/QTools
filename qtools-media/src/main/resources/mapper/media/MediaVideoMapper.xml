@@ -25,6 +25,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="docPath"    column="doc_path"    />
         <result property="subPath"    column="sub_path"    />
         <result property="mtime"      column="mtime"       />
+        <!-- M3-A 组织能力：人工评分 0-10（null = 未评分），索引条目按需输出 -->
+        <result property="rating"     column="rating"      />
     </resultMap>
 
     <resultMap type="com.qtools.media.domain.MediaVideoTag" id="MediaVideoTagResult">
@@ -45,7 +47,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     -->
     <sql id="selectVideoVo">
         select id, content_hash, root_id, folder, rel_path, title, size, dur, w, h, vcodec, browser_ok,
-               poster_path, doc_path, sub_path, mtime
+               poster_path, doc_path, sub_path, mtime, rating
         from media_video
     </sql>
 
