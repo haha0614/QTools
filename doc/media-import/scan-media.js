@@ -33,8 +33,17 @@
  *           命中且 rel_path 相同 -> 普通 upsert（更新 size/mtime/browser_ok/poster_path/content_hash）
  *           命中且 rel_path 不同 -> 判定改名/移动：UPDATE 该行 rel_path 等，**id 不变**
  *           未命中 -> 按现行规则新插（id = sha1(rel_path)[:12]）
- *         同内容的两份真实副本 -> 保留先入库那行，收尾打印 DUP <hash> 保留=<path> 忽略=<path>，不算失败
- *   图片：同理（命中且 rel_path/位置不同 -> UPDATE rel_path/bytes/is_big 与 album_id/seq），收藏靠 content_hash 不断线
+ *         同内容的两份真实副本 -> 保留先入库那行做主文件，其余路径写入 media_video_alias，
+ *                                  收尾打印 ALIAS 与「别名=N」，不再丢弃；别名表未建时退回老行为（打印 DUP … 忽略=<path>）
+ *   图片：同理（命中且 rel_path/位置不同 -> UPDATE rel_path/bytes/is_big 与 album_id/seq），收藏靠 content_hash 不断线；
+ *         同一本相册内出现同内容的两份文件时，后一份路径写入 media_photo_alias
+ *         （主表仍按磁盘顺序各占一行，册内张数不缩水）
+ *
+ * 多库根（配合 doc/media_multiroot.sql）：
+ *   --root-id=<n> 指定本次扫描写入 media_video/media_photo 的 root_id；
+ *   缺省取 media_root 里 kind='root' 的第一行，取不到写 NULL 并 WARN（NULL = 后端用配置 qtools.media.rootPath）。
+ *   已知限制：同一 rel_path 同时出现在两个库根下时主表仍会互相覆盖（uk_video_rel 建在 rel_path 上），
+ *   视频 id 也仍按 sha1(rel_path) 生成，因此两个根下的相对路径必须互不相同。
  *
  * 写库方式复用 import.js 已验证的做法：内存拼一个 SQL 文本，单事务，用 mysql 客户端经 stdin 灌入，
  * 固定 --default-character-set=utf8mb4；密码只从 MYSQL_PWD 环境变量读（不打印、不落盘）。
@@ -95,6 +104,8 @@ const HELP = `
                       （管理端「重建索引」按钮触发时没有 MYSQL_PWD，用它）
   --big-bytes=<n>     判定 is_big=1 的字节阈值，默认 2097152（2MB）
   --exclude=<a,b>     按目录名排除（任意层级），默认 _媒体站,trash,.git,node_modules,thumbs,pv
+  --root-id=<n>       本次扫描写入的库根 media_root.id（默认取 media_root 里 kind='root' 的第一行；
+                      取不到就写 NULL 并 WARN，NULL = 后端用配置 qtools.media.rootPath）
   --no-hash           不计算内容哈希：content_hash 写 NULL，同时关闭改名/移动自动识别
   --hash-bytes=<n>    oshash 每段字节数，默认 65536（64KB）；文件不超过 3 段时整文件顺序读
   --album-mode=dir|prefix
@@ -122,8 +133,9 @@ const HELP = `
 输出（管理端 MediaScanServiceImpl 按这些行解析，改动前先看它）：
   videos=<n> albums=<n> photos=<n> people=0            扫描到的源数据条数
   条数 videos=<n> albums=<n> photos=<n> people=<n>    写库后回读的库内条数
-  新插入=<n> 移动=<n> 更新=<n> 重复=<n> 跳过=<n>      本次写的分类计数
-  DUP <hash> 保留=<path> 忽略=<path>                   同内容副本（保留先入库那行）
+  新插入=<n> 移动=<n> 更新=<n> 重复=<n> 跳过=<n> 别名=<n>   本次写的分类计数
+  ALIAS <hash> 主=<path> 别名=<path>                   同内容副本：主文件留在主表，这条进别名表
+  DUP <hash> 保留=<path> 忽略=<path>                   同上，但别名表未建时退回老行为（副本被丢弃）
   回填 videos=<n> photos=<n> missing=<n>               --backfill-hash 的计数
 `;
 
@@ -132,7 +144,7 @@ const HELP = `
 function parseArgs(argv) {
   const o = Object.assign({}, DEFAULTS, {
     root: null, mysql: null, secret: null, dumpSql: null, truncate: false, yes: false, dryRun: false,
-    ignored: [], noHash: false, backfillHash: false, limit: null,
+    ignored: [], noHash: false, backfillHash: false, limit: null, rootId: null,
   });
   for (const a of argv) {
     if (a === '--truncate') o.truncate = true;
@@ -152,6 +164,7 @@ function parseArgs(argv) {
     else if (a.startsWith('--big-bytes=')) o.bigBytes = Number(a.slice('--big-bytes='.length));
     else if (a.startsWith('--hash-bytes=')) o.hashBytes = Number(a.slice('--hash-bytes='.length));
     else if (a.startsWith('--limit=')) o.limit = Number(a.slice('--limit='.length));
+    else if (a.startsWith('--root-id=')) o.rootId = Number(a.slice('--root-id='.length));
     else if (a.startsWith('--album-mode=')) o.albumMode = a.slice('--album-mode='.length);
     else if (a.startsWith('--exclude=')) {
       o.exclude = a.slice('--exclude='.length).split(',').map((s) => s.trim()).filter(Boolean);
@@ -168,6 +181,9 @@ function parseArgs(argv) {
     throw new Error('--album-mode 只接受 dir 或 prefix（收到：' + o.albumMode + '）');
   }
   if (o.limit !== null && (!Number.isFinite(o.limit) || o.limit <= 0)) throw new Error('--limit 必须是正整数');
+  if (o.rootId !== null && (!Number.isInteger(o.rootId) || o.rootId <= 0)) {
+    throw new Error('--root-id 必须是正整数（media_root.id）；不确定就省略它，脚本会取 kind=root 的第一行');
+  }
   if (o.noHash && o.backfillHash) throw new Error('--no-hash 与 --backfill-hash 互相矛盾：回填就是来算哈希的');
   o.port = String(o.port);
   o.excludeSet = new Set(o.exclude.map((s) => s.toLowerCase()));
@@ -195,6 +211,13 @@ function sqlStr(v) {
 function sqlInt(v) {
   const n = Number(v);
   return Number.isFinite(n) ? String(Math.trunc(n)) : '0';
+}
+
+/** 库根 id：null/undefined 写 NULL（= 后端用配置 rootPath），不能用 sqlInt（那会写 0） */
+function sqlRoot(v) {
+  if (v === null || v === undefined) return 'NULL';
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? String(Math.trunc(n)) : 'NULL';
 }
 
 /** 毫秒时间戳 -> FROM_UNIXTIME(秒)；NaN -> NULL */
@@ -568,6 +591,40 @@ function loadState(o, mysqlExe, password) {
   return s;
 }
 
+/**
+ * 本次扫描写入的库根 id
+ *
+ * 显式 --root-id 优先；否则取 media_root 里 kind='root' 的第一行。
+ * media_root 不存在 / 没有根行 / 库连不上都只 WARN，root_id 写 NULL（后端回退配置 rootPath），
+ * 绝不能因为一张可选的表让整次扫描失败。
+ */
+function resolveRootId(o, mysqlExe, password) {
+  if (o.rootId !== null) return o.rootId;
+  try {
+    const rows = queryRows(o, mysqlExe, password,
+      "SELECT id FROM media_root WHERE kind = 'root' ORDER BY id LIMIT 1;");
+    const id = rows.length && rows[0].length ? Number(rows[0][0]) : NaN;
+    if (Number.isInteger(id) && id > 0) return id;
+    warn('media_root 里没有 kind=root 的库根：root_id 写 NULL（后端用配置 rootPath）；' +
+      '要显式指定请加 --root-id=<n>');
+  } catch (e) {
+    warn('读取 media_root 失败，root_id 写 NULL：' + (e.message || e));
+  }
+  return null;
+}
+
+/** 别名表是否已建（doc/media_dup_alias.sql）；没建就把同内容副本退回老行为，不让整次扫描报错 */
+function aliasTablesReady(o, mysqlExe, password) {
+  const rows = queryRows(o, mysqlExe, password,
+    'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() ' +
+    "AND table_name IN ('media_video_alias', 'media_photo_alias');");
+  const n = rows.length && rows[0].length ? Number(rows[0][0]) : 0;
+  if (n === 2) return true;
+  warn('别名表 media_video_alias / media_photo_alias 未建（先执行 doc/media_dup_alias.sql）：' +
+    '同内容副本仍按老行为丢弃并打印 DUP，别名=0');
+  return false;
+}
+
 // ---------------------------------------------------------------- 计划（分配 id / 识别移动）
 
 /** 按 (dir_key,title) 认相册；老行 dir_key 为空时退化用 (dir,title) / 唯一 title / 前缀令牌匹配 */
@@ -602,16 +659,30 @@ function allocAlbumId(state, claimed, nextNo) {
   }
 }
 
-function planVideos(videos, state, stats, dupList) {
+/**
+ * 同内容副本（先入库那行是主文件，这份是别名）：
+ * 别名表可用 -> 写别名表并计入 别名=N；否则退回老的「丢弃 + DUP」行为。
+ */
+function recordAlias(ctx, table, hash, keepRel, rel, size) {
+  if (ctx.o.aliasEnabled) {
+    ctx.list.push({ table, hash, rel, size, rootId: ctx.o.rootId });
+    ctx.stats.alias += 1;
+    return;
+  }
+  ctx.stats.dup += 1;
+  ctx.dupList.push({ hash, keep: keepRel, drop: rel });
+}
+
+function planVideos(videos, state, ctx) {
+  const stats = ctx.stats;
   const rows = [];
   const moves = [];
-  const seen = new Map(); // hash -> 本次保留的 rel（同内容第二份算 DUP）
+  const seen = new Map(); // hash -> 本次保留的 rel（同内容第二份进别名表）
   for (const v of videos) {
     if (v.hash) {
       const keep = seen.get(v.hash);
       if (keep !== undefined) {
-        stats.dup += 1;
-        dupList.push({ hash: v.hash, keep, drop: v.rel });
+        recordAlias(ctx, 'media_video_alias', v.hash, keep, v.rel, v.size);
         continue;
       }
       seen.set(v.hash, v.rel);
@@ -642,13 +713,23 @@ function planVideos(videos, state, stats, dupList) {
   return { rows, moves };
 }
 
-function planPhotos(albums, state, stats, dupList) {
+function planPhotos(albums, state, ctx) {
+  const stats = ctx.stats;
   const rows = [];
   const moves = [];
   const claimed = new Set();
+  // 册内同内容副本：只在「同一本相册」里才算重复（同一张图出现在不同相册是合法的，
+  // 那是内容复用而不是重复文件）；主表照旧各占一行，册内张数与磁盘保持一致
+  const seenInAlbum = new Map();
   for (const a of albums) {
     a.photos.forEach((p, seq) => {
       p.seq = seq;
+      if (p.hash) {
+        const key = a.id + '\u0000' + p.hash;
+        const keep = seenInAlbum.get(key);
+        if (keep === undefined) seenInAlbum.set(key, p.rel);
+        else recordAlias(ctx, 'media_photo_alias', p.hash, keep, p.rel, p.bytes);
+      }
       let prior = null;
       if (p.hash) {
         const cands = state.photoByHash.get(p.hash) || [];
@@ -676,8 +757,9 @@ function planPhotos(albums, state, stats, dupList) {
 }
 
 function planImport(scan, state, o) {
-  const stats = { insert: 0, move: 0, update: 0, dup: 0, skip: scan.skipped };
+  const stats = { insert: 0, move: 0, update: 0, dup: 0, skip: scan.skipped, alias: 0 };
   const dupList = [];
+  const ctx = { list: [], dupList, stats, o };
   const claimed = new Set();
   const nextNo = { v: state.maxAlbumNo };
   const albums = [];
@@ -716,14 +798,15 @@ function planImport(scan, state, o) {
     });
   }
 
-  const videoPlan = planVideos(scan.videos, state, stats, dupList);
-  const photoPlan = planPhotos(albums, state, stats, dupList);
+  const videoPlan = planVideos(scan.videos, state, ctx);
+  const photoPlan = planPhotos(albums, state, ctx);
   return {
     albums,
     videoRows: videoPlan.rows,
     movedVideos: videoPlan.moves,
     photoRows: photoPlan.rows,
     movedPhotos: photoPlan.moves,
+    aliasList: ctx.list,
     dupList,
     stats,
   };
@@ -766,14 +849,15 @@ function buildSql(model, o) {
   const videoRows = model.videoRows.map((v) => '(' + [
     sqlStr(v.id), sqlStr(v.folder), sqlStr(v.rel), sqlStr(v.title), sqlInt(v.size),
     'NULL', 'NULL', 'NULL', 'NULL', sqlInt(v.browserOk), sqlStr('thumbs/v/' + v.id + '.jpg'), '0',
-    sqlDateTime(v.mtimeMs), sqlStr(v.hash),
+    sqlDateTime(v.mtimeMs), sqlStr(v.hash), sqlRoot(o.rootId),
   ].join(',') + ')');
   for (const part of chunks(videoRows, o.batch)) {
-    lines.push('INSERT INTO media_video (id,folder,rel_path,title,size,dur,w,h,vcodec,browser_ok,poster_path,hidden,mtime,content_hash) VALUES ' +
+    lines.push('INSERT INTO media_video (id,folder,rel_path,title,size,dur,w,h,vcodec,browser_ok,poster_path,hidden,mtime,content_hash,root_id) VALUES ' +
       part.join(',') +
       // dur/w/h/vcodec 不覆盖：本脚本不跑 ffprobe，别把别的工具填好的元数据清空
       ' AS n ON DUPLICATE KEY UPDATE folder=n.folder,rel_path=n.rel_path,title=n.title,' +
-      'size=n.size,browser_ok=n.browser_ok,poster_path=n.poster_path,mtime=n.mtime,content_hash=n.content_hash;');
+      'size=n.size,browser_ok=n.browser_ok,poster_path=n.poster_path,mtime=n.mtime,' +
+      'content_hash=n.content_hash,root_id=n.root_id;');
   }
 
   // 3) 视频改名/移动：UPDATE 同一行，id 保持不变
@@ -783,6 +867,7 @@ function buildSql(model, o) {
       ',size=' + sqlInt(v.size) + ',browser_ok=' + sqlInt(v.browserOk) +
       ',poster_path=' + sqlStr('thumbs/v/' + v.id + '.jpg') +
       ',mtime=' + sqlDateTime(v.mtimeMs) + ',content_hash=' + sqlStr(v.hash) +
+      ',root_id=' + sqlRoot(o.rootId) +
       ' WHERE id=' + sqlStr(v.id) + ';');
   }
 
@@ -802,12 +887,13 @@ function buildSql(model, o) {
   // 5) 图片 upsert（content_hash 一并写入）
   const photoRows = model.photoRows.map((r) => '(' + [
     sqlStr(r.albumId), sqlInt(r.seq), sqlStr(r.photo.rel), sqlInt(r.photo.bytes), 'NULL', 'NULL',
-    sqlInt(r.photo.isBig), '0', sqlStr(r.photo.hash),
+    sqlInt(r.photo.isBig), '0', sqlStr(r.photo.hash), sqlRoot(o.rootId),
   ].join(',') + ')');
   for (const part of chunks(photoRows, o.batch)) {
-    lines.push('INSERT INTO media_photo (album_id,seq,rel_path,bytes,w,h,is_big,hidden,content_hash) VALUES ' + part.join(',') +
+    lines.push('INSERT INTO media_photo (album_id,seq,rel_path,bytes,w,h,is_big,hidden,content_hash,root_id) VALUES ' + part.join(',') +
       // w/h 不覆盖：本脚本不探测图片尺寸，别把别的工具填好的值清空
-      ' AS n ON DUPLICATE KEY UPDATE rel_path=n.rel_path,bytes=n.bytes,is_big=n.is_big,content_hash=n.content_hash;');
+      ' AS n ON DUPLICATE KEY UPDATE rel_path=n.rel_path,bytes=n.bytes,is_big=n.is_big,' +
+      'content_hash=n.content_hash,root_id=n.root_id;');
   }
 
   // 6) 图片改名/移动：UPDATE 同一行，并按新目录更新 album_id/seq
@@ -815,6 +901,7 @@ function buildSql(model, o) {
     lines.push('UPDATE media_photo SET album_id=' + sqlStr(m.albumId) + ',seq=' + sqlInt(m.seq) +
       ',rel_path=' + sqlStr(m.photo.rel) + ',bytes=' + sqlInt(m.photo.bytes) +
       ',is_big=' + sqlInt(m.photo.isBig) + ',content_hash=' + sqlStr(m.photo.hash) +
+      ',root_id=' + sqlRoot(o.rootId) +
       ' WHERE id=' + sqlInt(m.photo.id) + ';');
   }
 
@@ -825,6 +912,17 @@ function buildSql(model, o) {
   }
   // 孤儿图（相册已被删掉）：保证「每张图都能找到相册」恒成立
   lines.push('DELETE p FROM media_photo p LEFT JOIN media_album a ON a.id = p.album_id WHERE a.id IS NULL;');
+
+  // 8) 同内容副本 -> 别名表（本期只沉淀数据，后端不读）
+  for (const table of ['media_video_alias', 'media_photo_alias']) {
+    const aliasRows = model.aliasList.filter((x) => x.table === table)
+      .map((x) => '(' + [sqlStr(x.hash), sqlStr(x.rel), sqlRoot(x.rootId), sqlInt(x.size)].join(',') + ')');
+    for (const part of chunks(aliasRows, o.batch)) {
+      lines.push('INSERT INTO ' + table + ' (content_hash,rel_path,root_id,size) VALUES ' + part.join(',') +
+        // 重扫幂等：(hash, rel_path) 唯一键命中就只刷 root_id/size，create_time 保留首次登记时间
+        ' AS n ON DUPLICATE KEY UPDATE root_id=n.root_id,size=n.size;');
+    }
+  }
 
   lines.push('COMMIT;');
   return lines.join('\n') + '\n';
@@ -965,11 +1063,18 @@ function runBackfill(o, root) {
 
 function statsLine(stats) {
   return '新插入=' + stats.insert + ' 移动=' + stats.move + ' 更新=' + stats.update +
-    ' 重复=' + stats.dup + ' 跳过=' + stats.skip;
+    ' 重复=' + stats.dup + ' 跳过=' + stats.skip + ' 别名=' + stats.alias;
 }
 
 function printDups(dupList) {
   for (const d of dupList) log('DUP ' + d.hash + ' 保留=' + d.keep + ' 忽略=' + d.drop);
+}
+
+function printAliases(aliasList) {
+  for (const a of aliasList) {
+    log('ALIAS ' + a.hash + ' 主表=' + a.table + ' 别名=' + a.rel +
+      (a.rootId === null ? '' : ' root-id=' + a.rootId));
+  }
 }
 
 function main() {
@@ -999,6 +1104,11 @@ function main() {
     password = readPassword(o);
     // --truncate 会清空这三张表：库内状态一律作废，按空库重新分配 aNNN（与旧行为一致）
     state = o.truncate ? emptyState() : loadState(o, mysqlExe, password);
+    o.rootId = resolveRootId(o, mysqlExe, password);
+    o.aliasEnabled = aliasTablesReady(o, mysqlExe, password);
+  } else {
+    // dry-run / dump-sql 不连库：按「别名表已建」生成 SQL（执行前请确认已 source media_dup_alias.sql）
+    o.aliasEnabled = true;
   }
 
   const scan = scanDisk(root, o);
@@ -1007,7 +1117,8 @@ function main() {
 
   log('videos=' + scan.videos.length + ' albums=' + model.albums.length +
     ' photos=' + photoCount + ' people=0');
-  log('root=' + root + ' big-bytes=' + o.bigBytes + ' album-mode=' + o.albumMode +
+  log('root=' + root + ' root-id=' + (o.rootId === null ? 'NULL' : o.rootId) +
+    ' big-bytes=' + o.bigBytes + ' album-mode=' + o.albumMode +
     ' hash=' + (o.noHash ? 'off' : o.hashBytes + 'B') +
     ' exclude=' + o.exclude.join(',') + (o.truncate ? ' truncate=1' : ''));
   for (const a of model.albums.slice(0, 20)) {
@@ -1032,6 +1143,7 @@ function main() {
   if (o.dryRun || o.dumpSql) {
     log(statsLine(model.stats));
     printDups(model.dupList);
+    printAliases(model.aliasList);
     return 0;
   }
 
@@ -1048,6 +1160,7 @@ function main() {
   log('相册 复用=' + model.albums.filter((a) => a.reused).length +
     ' 新建=' + model.albums.filter((a) => !a.reused).length);
   printDups(model.dupList);
+  printAliases(model.aliasList);
   log('== 下一步：node build-thumbs.js --root=' + root + ' --thumbs=<缩略图根>');
   return 0;
 }

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    媒体库根 media_root 映射文件（多库根，M1 只读）。
+    表由 doc/media_portability.sql 建立，索引补强见 doc/media_multiroot.sql。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaRootMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaRoot" id="MediaRootResult">
+        <id     property="id"        column="id"         />
+        <result property="name"      column="name"       />
+        <result property="path"      column="path"       />
+        <result property="kind"      column="kind"       />
+        <result property="note"      column="note"       />
+        <result property="createdAt" column="created_at" />
+    </resultMap>
+
+    <sql id="selectRootVo">
+        select id, name, path, kind, note, created_at from media_root
+    </sql>
+
+    <select id="selectRootList" resultMap="MediaRootResult">
+        <include refid="selectRootVo"/>
+        order by id asc
+    </select>
+
+    <select id="selectRootById" parameterType="java.lang.Integer" resultMap="MediaRootResult">
+        <include refid="selectRootVo"/>
+        where id = #{id} limit 1
+    </select>
+
+    <select id="selectDefaultRootId" resultType="java.lang.Integer">
+        select id from media_root where kind = 'root' order by id asc limit 1
+    </select>
+
+</mapper>

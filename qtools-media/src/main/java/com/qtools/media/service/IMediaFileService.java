@@ -12,13 +12,35 @@ import java.nio.file.Path;
 public interface IMediaFileService
 {
     /**
-     * 校验并定位媒体根下的真实文件
+     * 校验并定位媒体根下的真实文件（默认根，等价于 {@code resolveMedia(rel, null)}）
      *
      * @param rel 相对媒体根的路径（客户端传入的 p 参数）
      * @return realpath 之后的文件路径
      * @throws com.qtools.media.exception.MediaException 400 缺参 / 403 越权 / 404 不存在
      */
-    Path resolveMedia(String rel);
+    default Path resolveMedia(String rel)
+    {
+        return resolveMedia(rel, null);
+    }
+
+    /**
+     * 校验并定位某个库根下的真实文件（多库根）
+     *
+     * <p><b>多根语义</b>：</p>
+     * <ul>
+     *   <li>{@code rootId} 非空：只在该 {@code media_root.id} 指向的根里找，越出这个根一律 403；</li>
+     *   <li>{@code rootId} 为 null（{@code root_id} 列为 NULL 的存量行）：先按配置
+     *       {@code qtools.media.rootPath} 找，找不到再依次试其它 {@code kind='root'} 的根
+     *       ——每个候选根都走同一套「绝对路径/UNC 拒绝 + realpath 后仍在根内」校验，
+     *       因此多根不会放宽越权边界；找不到才 404。</li>
+     * </ul>
+     *
+     * @param rel    相对所属库根的路径
+     * @param rootId 库根 id（{@code media_root.id}），null = 配置默认根 + 多根兜底
+     * @return realpath 之后的文件路径
+     * @throws com.qtools.media.exception.MediaException 400 缺参 / 403 越权 / 404 不存在
+     */
+    Path resolveMedia(String rel, Integer rootId);
 
     /**
      * 校验并定位媒体根下的真实目录（相册软删要移动整个目录）
@@ -27,7 +49,20 @@ public interface IMediaFileService
      * @return realpath 之后的目录路径
      * @throws com.qtools.media.exception.MediaException 400 缺参 / 403 越权 / 404 不存在
      */
-    Path resolveMediaDir(String rel);
+    default Path resolveMediaDir(String rel)
+    {
+        return resolveMediaDir(rel, null);
+    }
+
+    /**
+     * 校验并定位某个库根下的真实目录（多根语义同 {@link #resolveMedia(String, Integer)}）
+     *
+     * @param rel    相对所属库根的目录路径
+     * @param rootId 库根 id，null = 配置默认根 + 多根兜底
+     * @return realpath 之后的目录路径
+     * @throws com.qtools.media.exception.MediaException 400 缺参 / 403 越权 / 404 不存在
+     */
+    Path resolveMediaDir(String rel, Integer rootId);
 
     /**
      * 校验一个「写入目标」路径：允许尚不存在，但规则与读取一致
@@ -40,8 +75,20 @@ public interface IMediaFileService
      */
     Path resolveWriteTarget(String rel);
 
-    /** 媒体根 realpath */
-    Path mediaRoot();
+    /** 媒体根 realpath（默认根） */
+    default Path mediaRoot()
+    {
+        return mediaRoot(null);
+    }
+
+    /**
+     * 某个库根的 realpath
+     *
+     * @param rootId 库根 id，null = 配置 {@code qtools.media.rootPath}
+     * @return realpath 之后的根目录
+     * @throws com.qtools.media.exception.MediaException 500 配置缺失 / 404 根不存在或不可访问
+     */
+    Path mediaRoot(Integer rootId);
 
     /** 回收站根目录（{@code _媒体站\trash}），不创建、不校验存在 */
     Path trashRoot();

@@ -6,7 +6,9 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -15,7 +17,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.config.MediaProperties;
+import com.qtools.media.domain.MediaRoot;
 import com.qtools.media.exception.MediaException;
+import com.qtools.media.mapper.MediaRootMapper;
 import com.qtools.media.mapper.MediaVideoMapper;
 import com.qtools.media.service.IMediaFileService;
 
@@ -120,6 +124,10 @@ public class MediaFileServiceImpl implements IMediaFileService
     @Autowired
     private MediaVideoMapper mediaVideoMapper;
 
+    /** 多库根来源：只有显式 root_id 或默认根找不到文件时才读库 */
+    @Autowired
+    private MediaRootMapper mediaRootMapper;
+
     /** 已解析的媒体根 realpath 及其对应的配置值（配置变更后自动重算） */
     private volatile String rootConfig;
 
@@ -131,54 +139,82 @@ public class MediaFileServiceImpl implements IMediaFileService
     private volatile Path thumbsReal;
 
     @Override
-    public Path resolveMedia(String rel)
+    public Path resolveMedia(String rel, Integer rootId)
     {
         if (StringUtils.isEmpty(rel))
         {
             throw MediaException.badRequest("missing p");
         }
-        Path root = rootDir();
-        Path target = resolveInside(root, rel);
-        Path real = toRealPath(target);
-        if (!real.startsWith(root))
+        // 路径语法与根无关：先判一次，绝对路径/UNC/盘符/.. 逃逸一律 403，
+        // 不给多根兜底任何「换个根再试试」的机会
+        checkRelSyntax(rel);
+        Path root = rootDir(rootId);
+        if (rootId != null)
         {
-            throw MediaException.forbidden();
+            return fileIn(root, rel);
         }
-        if (real.startsWith(stationDir(root)))
+        try
         {
-            throw MediaException.forbidden();
+            return fileIn(root, rel);
         }
-        if (!Files.isRegularFile(real))
+        catch (MediaException e)
         {
-            throw MediaException.notFound();
+            if (e.getStatus() != 404)
+            {
+                throw e;
+            }
         }
-        return real;
+        // root_id 为 NULL 的存量行 / 前端未传 root_id：默认根没有就试其它媒体根
+        for (Path other : otherRoots(root))
+        {
+            try
+            {
+                return fileIn(other, rel);
+            }
+            catch (MediaException e)
+            {
+                // 这个根里没有或越界：换下一个；最终仍回 404，不泄漏其它根的情况
+            }
+        }
+        throw MediaException.notFound();
     }
 
     @Override
-    public Path resolveMediaDir(String rel)
+    public Path resolveMediaDir(String rel, Integer rootId)
     {
         if (StringUtils.isEmpty(rel))
         {
             throw MediaException.badRequest("missing dir");
         }
-        Path root = rootDir();
-        Path target = resolveInside(root, rel);
-        Path real = toRealPath(target);
-        if (!real.startsWith(root))
+        checkRelSyntax(rel);
+        Path root = rootDir(rootId);
+        if (rootId != null)
         {
-            throw MediaException.forbidden();
+            return dirIn(root, rel);
         }
-        if (real.startsWith(stationDir(root)))
+        try
         {
-            // 站内目录（_媒体站）下的任何对象都不得作为删除/隐藏目标
-            throw MediaException.forbidden();
+            return dirIn(root, rel);
         }
-        if (!Files.isDirectory(real))
+        catch (MediaException e)
         {
-            throw MediaException.notFound();
+            if (e.getStatus() != 404)
+            {
+                throw e;
+            }
         }
-        return real;
+        for (Path other : otherRoots(root))
+        {
+            try
+            {
+                return dirIn(other, rel);
+            }
+            catch (MediaException e)
+            {
+                // 同上：换下一个根
+            }
+        }
+        throw MediaException.notFound();
     }
 
     @Override
@@ -198,9 +234,9 @@ public class MediaFileServiceImpl implements IMediaFileService
     }
 
     @Override
-    public Path mediaRoot()
+    public Path mediaRoot(Integer rootId)
     {
-        return rootDir();
+        return rootDir(rootId);
     }
 
     @Override
