@@ -376,12 +376,12 @@ function runFfmpeg(ffmpeg, args) {
   return { ok: true, reason: null };
 }
 
-function ffmpegArgsFor(item, src) {
+function ffmpegArgsFor(item, src, o) {
   const base = ['-y', '-loglevel', 'error'];
   if (item.kind === 'video') return base.concat(['-ss', '3', '-i', src, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', item.out]);
   if (item.kind === 'photo') return base.concat(['-i', src, '-frames:v', '1', '-vf', 'scale=400:-2', '-q:v', '4', item.out]);
   if (item.kind === 'sprite') return base.concat(['-i', src, '-vf', spriteFilter(item), '-frames:v', '1', '-q:v', '4', item.out]);
-  if (item.kind === 'pvclip') return base.concat(pvclipArgs(item, src));
+  if (item.kind === 'pvclip') return base.concat(pvclipArgs(item, src, o));
   return base.concat(['-i', src, '-frames:v', '1', '-vf', 'scale=1600:-2', '-q:v', '4', item.out]);
 }
 
@@ -441,7 +441,9 @@ function pvPlan(item) {
 function pvFilter(item) {
   const p = pvPlan(item);
   return "select='isnan(prev_selected_t)+gte(t-prev_selected_t," + round6(p.step) + ")'," +
-    'setpts=N/(' + PV.fps + '*TB),scale=' + PV.w + ':' + PV.h;
+    'setpts=N/(' + PV.fps + '*TB),scale=' + PV.w + ':' + PV.h +
+    // 素材本身不满 5 秒时补最后一帧，保证成片仍落在 5~8 秒（不做二次编码、不引入音频）
+    ',tpad=stop_mode=clone:stop_duration=' + round6(p.seconds);
 }
 
 /** 预览视频编码参数（不含输入 / 输出路径，-vf 由调用方拼） */
