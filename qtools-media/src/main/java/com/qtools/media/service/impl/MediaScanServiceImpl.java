@@ -11,6 +11,7 @@ import java.util.Date;
 import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -84,6 +85,22 @@ public class MediaScanServiceImpl implements IMediaScanService
 
     private static final String DATE_PATTERN = "yyyy-MM-dd HH:mm:ss";
 
+    /** 允许的 mode 原子值 */
+    private static final List<String> MODES = List.of("scan", "thumb", "sprite", "preview", "gc");
+
+    /** 只能单独使用的 mode（sprite / preview 允许组合成 sprite,preview） */
+    private static final List<String> SINGLE_MODES = List.of("scan", "thumb", "gc");
+
+    /** limit 上限：176 个视频的真实规模下，超过这个数只可能是手滑 */
+    private static final int MAX_LIMIT = 10000;
+
+    /** 缩略图脚本的受管开关：一律由 buildThumbCommand 按 mode 追加，配置里写了也过滤 */
+    private static final List<String> THUMB_MANAGED_ARGS =
+            List.of("--force", "--sprite", "--preview", "--gc", "--yes", "-y");
+
+    /** 扫描脚本的禁用参数：--truncate 会清掉 hidden 与收藏引用 */
+    private static final List<String> SCAN_FORBIDDEN_ARGS = List.of("--truncate");
+
     @Autowired
     private MediaScanJobMapper mediaScanJobMapper;
 
@@ -114,13 +131,21 @@ public class MediaScanServiceImpl implements IMediaScanService
     @Override
     public Map<String, Object> start(String type)
     {
-        String jobType = StringUtils.isEmpty(type) ? "full" : type.trim();
-        if (!"full".equals(jobType) && !"thumb".equals(jobType))
+        return start(type, null, false, null);
+    }
+
+    @Override
+    public Map<String, Object> start(String type, String mode, boolean gcConfirm, Integer limit)
+    {
+        String jobType = normalizeMode(type, mode);
+        if ("gc".equals(jobType) && !gcConfirm)
         {
-            throw MediaException.badRequest("type 只能是 full / thumb");
+            // 派生文件 GC 是真删：不能只靠前端弹窗，后端没有 confirm=true 一律拒绝
+            throw MediaException.badRequest("mode=gc 需要显式 confirm=true（会真删 v/ s/ pv2/ 下的孤儿派生文件）");
         }
+        int limited = normalizeLimit(jobType, limit);
         // 配置缺失必须在建 job 之前就报可读错误：否则子进程只会给 CreateProcess error=2 / NPE
-        boolean thumb = "thumb".equals(jobType);
+        boolean thumb = isThumbScript(jobType);
         requireConfigured(mediaProperties.getNodePath(), "nodePath");
         requireConfigured(mediaProperties.getScanOutPath(), "scanOutPath");
         requireConfigured(thumb ? mediaProperties.getThumbScript() : mediaProperties.getScanScript(),
@@ -136,8 +161,8 @@ public class MediaScanServiceImpl implements IMediaScanService
             job.setStatus(STATUS_RUNNING);
             mediaScanJobMapper.insertJob(job);
             runningJobId.set(job.getId());
-            log.info("管理端触发重建索引 job={} type={}", job.getId(), jobType);
-            executor.submit(() -> runJob(job.getId()));
+            log.info("管理端触发扫描任务 job={} mode={} limit={}", job.getId(), jobType, limited);
+            executor.submit(() -> runJob(job.getId(), limited));
             return toView(mediaScanJobMapper.selectJobById(job.getId()));
         }
     }
@@ -173,10 +198,13 @@ public class MediaScanServiceImpl implements IMediaScanService
 
     // ------------------------------------------------------------------ 执行
 
-    private void runJob(Long jobId)
+    private void runJob(Long jobId, int limit)
     {
         MediaScanJob job = mediaScanJobMapper.selectJobById(jobId);
-        boolean thumb = job != null && "thumb".equals(job.getType());
+        // type 落的就是 normalizeMode 的归一化结果：full 走 import.js，其余（thumb / sprite / preview /
+        // sprite,preview / gc）全部走 build-thumbs.js，只有子进程参数不同
+        String jobType = job == null || StringUtils.isEmpty(job.getType()) ? "full" : job.getType();
+        boolean thumb = isThumbScript(jobType);
         long begin = System.currentTimeMillis();
         Deque<String> tail = new ArrayDeque<>();
         // counters[0]=total, counters[1]=done（full 取脚本回读条数；thumb 取 START/PROGRESS 行）
@@ -184,7 +212,7 @@ public class MediaScanServiceImpl implements IMediaScanService
         int exit = -1;
         try
         {
-            ProcessBuilder builder = new ProcessBuilder(thumb ? buildThumbCommand() : buildCommand());
+            ProcessBuilder builder = new ProcessBuilder(thumb ? buildThumbCommand(jobType, limit) : buildCommand());
             // 子进程工作目录必须先存在（import.js 会把 import.sql / report.md 写进去）
             String outPath = mediaProperties.getScanOutPath();
             requireConfigured(outPath, "scanOutPath");
@@ -227,8 +255,7 @@ public class MediaScanServiceImpl implements IMediaScanService
                     }
                 }
             }
-            int timeout = Math.max(1, thumb ? mediaProperties.getThumbTimeoutMinutes()
-                    : mediaProperties.getScanTimeoutMinutes());
+            int timeout = Math.max(1, timeoutMinutesOf(jobType));
             if (!process.waitFor(timeout, TimeUnit.MINUTES))
             {
                 process.destroyForcibly();
@@ -265,8 +292,8 @@ public class MediaScanServiceImpl implements IMediaScanService
         runningJobId.set(0L);
         // 扫描改动了 media_* 或缩略图，索引快照必须失效，否则用户端 60s 内看不到新数据
         mediaIndexService.invalidateSnapshot();
-        log.info("扫描结束 job={} type={} status={} total={} done={} cost={}ms", jobId,
-                thumb ? "thumb" : "full", status, counters[0], counters[1], cost);
+        log.info("扫描结束 job={} mode={} status={} total={} done={} cost={}ms", jobId,
+                jobType, status, counters[0], counters[1], cost);
     }
 
     /** full：total 取源数据条数行，done 取落库回读行 */
@@ -358,48 +385,176 @@ public class MediaScanServiceImpl implements IMediaScanService
         command.add(requireNode());
         command.add(requireScript(mediaProperties.getScanScript(), "scanScript"));
         command.add("--out=" + mediaProperties.getScanOutPath());
-        String extra = mediaProperties.getScanArgs();
-        if (StringUtils.isNotEmpty(extra))
-        {
-            for (String arg : extra.trim().split("\\s+"))
-            {
-                if (arg.isEmpty() || "--truncate".equals(arg))
-                {
-                    // --truncate 会清掉 hidden 与收藏引用，配置写错也不执行
-                    continue;
-                }
-                command.add(arg);
-            }
-        }
+        appendConfiguredArgs(command, mediaProperties.getScanArgs(), SCAN_FORBIDDEN_ARGS);
         return command.toArray(new String[0]);
     }
 
     /**
-     * 缩略图增量命令：{@code node build_thumbs.js}
+     * 缩略图 / 生成类命令：{@code node build-thumbs.js [配置参数] [--sprite] [--preview] [--gc --yes] [--limit=n]}
      *
-     * <p>脚本自带增量判定（按源文件 mtime 跳过已存在的产物），默认参数就是增量模式；这里显式
-     * 过滤 {@code --force}，配置写错也不会重建全部 1 万多张。</p>
+     * <p>脚本自带增量判定（按源文件 mtime 跳过已存在的产物），默认参数就是增量模式。</p>
+     *
+     * <p>生成开关（{@code --sprite} / {@code --preview}）与删除开关（{@code --gc --yes}）
+     * <b>只在本方法内按 mode 追加</b>：配置里写了同类开关会被过滤（见 {@link #THUMB_MANAGED_ARGS}），
+     * 前端也传不进任意参数——mode 只有白名单里的 5 个原子值。</p>
      */
-    private String[] buildThumbCommand()
+    private String[] buildThumbCommand(String jobType, int limit)
     {
         String script = requireScript(mediaProperties.getThumbScript(), "thumbScript");
         List<String> command = new ArrayList<>();
         command.add(requireNode());
         command.add(script);
-        String extra = mediaProperties.getThumbArgs();
-        if (StringUtils.isNotEmpty(extra))
+        appendConfiguredArgs(command, mediaProperties.getThumbArgs(), THUMB_MANAGED_ARGS);
+        // jobType 是 normalizeMode 归一化后的逗号拼接值：sprite,preview 两个开关都会带上
+        if (jobType.contains("sprite"))
         {
-            for (String arg : extra.trim().split("\\s+"))
-            {
-                if (arg.isEmpty() || "--force".equals(arg))
-                {
-                    // --force 会忽略 mtime 重建全部缩略图，配置写错也不执行
-                    continue;
-                }
-                command.add(arg);
-            }
+            command.add("--sprite");
+        }
+        if (jobType.contains("preview"))
+        {
+            command.add("--preview");
+        }
+        if ("gc".equals(jobType))
+        {
+            // --yes 由后端追加：缺了它脚本只干跑统计，不会真删
+            command.add("--gc");
+            command.add("--yes");
+        }
+        if (limit > 0)
+        {
+            command.add("--limit=" + limit);
         }
         return command.toArray(new String[0]);
+    }
+
+    /**
+     * mode 归一化：{@code scan | thumb | sprite | preview | gc | sprite,preview}
+     *
+     * <p>组合模式只接受<b>逗号分隔</b>这一种写法（{@code sprite,preview}），不额外接受
+     * {@code spritepreview} 之类的缩写——一种写法便于文档、日志与运维检索；token 顺序无关，
+     * 落库与日志统一写成 {@code sprite,preview}，重复 token 去重而不报错。</p>
+     *
+     * @param type 旧参数：mode 为空时兜底（full → scan，thumb → thumb）
+     * @param mode 前端传入的 mode
+     * @return 落库到 {@code media_scan_job.type} 的值：scan → {@code full}（沿用旧值），其余为 mode 本身
+     */
+    private static String normalizeMode(String type, String mode)
+    {
+        String raw = StringUtils.isEmpty(mode) ? defaultModeOf(type) : mode.trim().toLowerCase(Locale.ROOT);
+        List<String> tokens = new ArrayList<>();
+        for (String part : raw.split(","))
+        {
+            String token = part.trim();
+            if (token.isEmpty())
+            {
+                continue;
+            }
+            if (!MODES.contains(token))
+            {
+                throw MediaException.badRequest("mode 不支持：" + token + "（可用 " + String.join(" / ", MODES)
+                        + "，组合模式写成 sprite,preview）");
+            }
+            if (!tokens.contains(token))
+            {
+                tokens.add(token);
+            }
+        }
+        if (tokens.isEmpty())
+        {
+            throw MediaException.badRequest("mode 不能为空（可用 " + String.join(" / ", MODES) + " 或 sprite,preview）");
+        }
+        if (tokens.size() > 1)
+        {
+            for (String single : SINGLE_MODES)
+            {
+                if (tokens.contains(single))
+                {
+                    throw MediaException.badRequest("mode=" + single + " 不能与其他 mode 组合（组合只允许 sprite,preview）");
+                }
+            }
+        }
+        if (tokens.contains("scan"))
+        {
+            return "full";
+        }
+        if (tokens.contains("thumb"))
+        {
+            return "thumb";
+        }
+        if (tokens.contains("gc"))
+        {
+            return "gc";
+        }
+        List<String> generate = new ArrayList<>();
+        for (String name : List.of("sprite", "preview"))
+        {
+            if (tokens.contains(name))
+            {
+                generate.add(name);
+            }
+        }
+        return String.join(",", generate);
+    }
+
+    /** 旧调用只有 type：thumb → thumb，其余（含空）→ scan */
+    private static String defaultModeOf(String type)
+    {
+        return "thumb".equals(StringUtils.isEmpty(type) ? "" : type.trim()) ? "thumb" : "scan";
+    }
+
+    /** full（import.js）之外的 mode 一律执行 thumbScript（build-thumbs.js） */
+    private static boolean isThumbScript(String jobType)
+    {
+        return !"full".equals(jobType);
+    }
+
+    /** limit 只对逐条生成的 mode 生效；scan / gc 传了直接 400，避免误以为已经「试跑过」 */
+    private static int normalizeLimit(String jobType, Integer limit)
+    {
+        if (limit == null)
+        {
+            return 0;
+        }
+        if (limit < 0 || limit > MAX_LIMIT)
+        {
+            throw MediaException.badRequest("limit 必须是 0 ~ " + MAX_LIMIT + " 的整数（0 或留空 = 不限）");
+        }
+        if (limit > 0 && ("full".equals(jobType) || "gc".equals(jobType)))
+        {
+            throw MediaException.badRequest("mode=" + ("full".equals(jobType) ? "scan" : jobType) + " 不支持 limit");
+        }
+        return limit;
+    }
+
+    /** 超时预算：扫描 10 分钟、缩略图 30 分钟，精灵图/预览/GC 走 deriveTimeoutMinutes（默认 12 小时） */
+    private int timeoutMinutesOf(String jobType)
+    {
+        if ("full".equals(jobType))
+        {
+            return mediaProperties.getScanTimeoutMinutes();
+        }
+        if ("thumb".equals(jobType))
+        {
+            return mediaProperties.getThumbTimeoutMinutes();
+        }
+        return mediaProperties.getDeriveTimeoutMinutes();
+    }
+
+    /** 追加配置里的附加参数：跳过空白与被禁用的受管开关 */
+    private static void appendConfiguredArgs(List<String> command, String extra, List<String> forbidden)
+    {
+        if (StringUtils.isEmpty(extra))
+        {
+            return;
+        }
+        for (String arg : extra.trim().split("\\s+"))
+        {
+            if (arg.isEmpty() || forbidden.contains(arg))
+            {
+                continue;
+            }
+            command.add(arg);
+        }
     }
 
     /** build_thumbs.js 认 MS_FFMPEG；用它替代脚本内默认的 runtime/ffmpeg.exe */

@@ -13,13 +13,25 @@ import java.util.Map;
 public interface IMediaScanService
 {
     /**
-     * 触发一次扫描
+     * 触发一次扫描（旧入口，等价于 {@code start(type, null, false, null)}）
      *
-     * @param type full | thumb（当前仅 full 有实现）
+     * @param type full | thumb
      * @return 任务视图（含 jobId）
      * @throws com.qtools.media.exception.MediaException 409 已有任务在运行
      */
     Map<String, Object> start(String type);
+
+    /**
+     * 触发一次扫描 / 生成类任务
+     *
+     * @param type      旧参数：mode 为空时兜底（full → scan，thumb → thumb）
+     * @param mode      {@code scan | thumb | sprite | preview | gc | sprite,preview}，可为空
+     * @param gcConfirm mode=gc 时必须为 true，否则 400（真删派生文件）
+     * @param limit     只处理前 n 条（仅 thumb / sprite / preview 生效，0 或 null = 不限）
+     * @return 任务视图（含 jobId）
+     * @throws com.qtools.media.exception.MediaException 400 参数非法 / 409 已有任务在运行
+     */
+    Map<String, Object> start(String type, String mode, boolean gcConfirm, Integer limit);
 
     /** 最近一次任务（无任务时返回 null 字段的空视图） */
     Map<String, Object> latest();

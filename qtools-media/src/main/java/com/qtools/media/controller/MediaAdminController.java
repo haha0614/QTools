@@ -245,15 +245,34 @@ public class MediaAdminController extends BaseController
 
     // ------------------------------------------------------------------ 扫描
 
-    /** 触发重建索引（异步，同一时刻只允许 1 个） */
+    /**
+     * 触发一次扫描 / 生成类任务（异步，同一时刻只允许 1 个）
+     *
+     * <p>body 可选字段：{@code mode} / {@code confirm} / {@code limit}；{@code type} 是旧参数，
+     * mode 缺省时按 type 兜底（full → scan，thumb → thumb），既有调用行为不变。</p>
+     *
+     * <table border="1">
+     *   <caption>mode → 子进程命令</caption>
+     *   <tr><th>mode</th><th>命令</th></tr>
+     *   <tr><td>scan</td><td>{@code node scanScript --out=…} + scanArgs（= 旧 type=full）</td></tr>
+     *   <tr><td>thumb</td><td>{@code node thumbScript} + thumbArgs（= 旧 type=thumb）</td></tr>
+     *   <tr><td>sprite</td><td>thumb 命令 + {@code --sprite}</td></tr>
+     *   <tr><td>preview</td><td>thumb 命令 + {@code --preview}</td></tr>
+     *   <tr><td>sprite,preview</td><td>thumb 命令 + {@code --sprite --preview}（组合模式只接受逗号分隔）</td></tr>
+     *   <tr><td>gc</td><td>thumb 命令 + {@code --gc --yes}；必须 {@code confirm=true}，否则 400</td></tr>
+     * </table>
+     *
+     * <p>生成 / 删除开关全部由后端按 mode 追加，前端<b>不能</b>传任意子进程参数；
+     * {@code limit} 只对逐条生成的 mode（thumb / sprite / preview）生效，scan 与 gc 传了直接 400。</p>
+     */
     @PreAuthorize("@ss.hasPermi('media:admin:scan')")
     @Log(title = "媒体库-重建索引", businessType = BusinessType.OTHER)
     @PostMapping("/scan")
     public Map<String, Object> scan(@RequestBody(required = false) String rawBody)
     {
         Map<String, Object> body = parseObject(rawBody, false);
-        String type = stringValue(body.get("type"));
-        return mediaScanService.start(StringUtils.isEmpty(type) ? "full" : type);
+        return mediaScanService.start(stringValue(body.get("type")), stringValue(body.get("mode")),
+                booleanValue(body.get("confirm")), integerValue(body.get("limit")));
     }
 
     /** 最近一次扫描任务 */
@@ -303,6 +322,43 @@ public class MediaAdminController extends BaseController
         catch (Exception e)
         {
             throw MediaException.badRequest("invalid json body");
+        }
+    }
+
+    /** confirm：接受 true / "true" / 1 / "1"，其余（含缺省）一律算未确认 */
+    private static boolean booleanValue(Object value)
+    {
+        if (value instanceof Boolean)
+        {
+            return ((Boolean) value).booleanValue();
+        }
+        String text = stringValue(value);
+        return "true".equalsIgnoreCase(text) || "1".equals(text);
+    }
+
+    /** limit：接受数字或数字字符串；非法字符串 400（而不是落到 500） */
+    private static Integer integerValue(Object value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (value instanceof Number)
+        {
+            return Integer.valueOf(((Number) value).intValue());
+        }
+        String text = stringValue(value);
+        if (text == null)
+        {
+            return null;
+        }
+        try
+        {
+            return Integer.valueOf(text);
+        }
+        catch (NumberFormatException e)
+        {
+            throw MediaException.badRequest("limit 必须是整数");
         }
     }
 

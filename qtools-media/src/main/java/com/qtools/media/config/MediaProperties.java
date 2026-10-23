@@ -39,6 +39,7 @@ import org.springframework.stereotype.Component;
  *       <td>QTOOLS_MEDIA_THUMBSCRIPT</td></tr>
  *   <tr><td>thumbArgs</td><td>空（= 增量全量跑一遍）</td><td>-</td><td>QTOOLS_MEDIA_THUMBARGS</td></tr>
  *   <tr><td>thumbTimeoutMinutes</td><td>30</td><td>-</td><td>QTOOLS_MEDIA_THUMBTIMEOUTMINUTES</td></tr>
+ *   <tr><td>deriveTimeoutMinutes</td><td>720</td><td>-</td><td>QTOOLS_MEDIA_DERIVETIMEOUTMINUTES</td></tr>
  *   <tr><td>allowOrigins</td><td>*</td><td>-</td><td>QTOOLS_MEDIA_ALLOWORIGINS</td></tr>
  * </table>
  *
@@ -119,6 +120,14 @@ public class MediaProperties
 
     /** 缩略图扫描超时（分钟）：1 万条约 8-10 分钟，留足余量 */
     private int thumbTimeoutMinutes = 30;
+
+    /**
+     * 精灵图 / 预览视频 / GC 的超时（分钟），默认 720（12 小时）
+     *
+     * <p>精灵图与预览视频是<b>全片解码</b>（176 个视频约 5 小时），远超缩略图那 30 分钟的预算；
+     * GC 要扫 {@code v/ s/ pv2/} 三个目录，一并按这一档放宽。超时强杀子进程并置 failed。</p>
+     */
+    private int deriveTimeoutMinutes = 720;
 
     /**
      * 允许的跨域来源，逗号分隔；* 表示不限（本地开发）
@@ -277,5 +286,15 @@ public class MediaProperties
     public void setThumbTimeoutMinutes(int thumbTimeoutMinutes)
     {
         this.thumbTimeoutMinutes = thumbTimeoutMinutes;
+    }
+
+    public int getDeriveTimeoutMinutes()
+    {
+        return deriveTimeoutMinutes;
+    }
+
+    public void setDeriveTimeoutMinutes(int deriveTimeoutMinutes)
+    {
+        this.deriveTimeoutMinutes = deriveTimeoutMinutes;
     }
 }
