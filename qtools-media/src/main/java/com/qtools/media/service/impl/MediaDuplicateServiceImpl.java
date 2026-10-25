@@ -229,6 +229,51 @@ public class MediaDuplicateServiceImpl implements IMediaDuplicateService
         return keepOut(cleanKind, hash, kept, previous);
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> remove(String kind, String aliasId, boolean deleteFile)
+    {
+        String cleanKind = requireKind(kind);
+        String id = StringUtils.isEmpty(aliasId) ? null : aliasId.trim();
+        if (id == null)
+        {
+            throw MediaException.badRequest("aliasId 必填（别名行 id）");
+        }
+
+        Map<String, Object> alias = mediaDuplicateMapper.selectAliasById(cleanKind, id);
+        if (alias == null)
+        {
+            // 幂等口径：行不存在就是 404，与「aliasId 不存在 404」同一条判据（不造 200+0 的第二种语义）
+            throw MediaException.notFound("别名不存在: " + cleanKind + "#" + id);
+        }
+        // 主行是否还在不影响：孤立别名（主行已被删）同样要能清掉，否则永远没有出口
+
+        List<String> movedToTrash = new ArrayList<>();
+        int deletedFiles = 0;
+        if (deleteFile)
+        {
+            // 文件已不在盘上 → moveAliasToTrash 返回 0：行照删、deletedFiles=0，仍是 200
+            deletedFiles = moveAliasToTrash(cleanKind, integer(alias.get("rootId")), str(alias.get("relPath")), id,
+                    movedToTrash);
+        }
+
+        int removedRows = mediaDuplicateMapper.deleteAliasById(cleanKind, id);
+        if (removedRows > 0 || deletedFiles > 0)
+        {
+            mediaIndexService.invalidateSnapshot();
+        }
+        log.info("重复文件单条清理 kind={} aliasId={} deleteFile={} removedRows={} deletedFiles={} trash={}", cleanKind, id,
+                deleteFile, removedRows, deletedFiles, movedToTrash);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("kind", cleanKind);
+        out.put("aliasId", id);
+        out.put("removedRows", removedRows);
+        out.put("deletedFiles", deletedFiles);
+        out.put("movedToTrash", movedToTrash);
+        return out;
+    }
+
     // ------------------------------------------------------------------ 内部
 
     /** 把一个别名文件搬进回收站：跳过（0）/ 已搬（1）；路径越界或 IO 失败直接抛 */

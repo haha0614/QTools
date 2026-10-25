@@ -18,6 +18,7 @@ import com.qtools.media.exception.MediaException;
 import com.qtools.media.service.IMediaDuplicateService;
 import static com.qtools.media.support.MediaBodyParser.boolValue;
 import static com.qtools.media.support.MediaBodyParser.intValue;
+import static com.qtools.media.support.MediaBodyParser.longValue;
 import static com.qtools.media.support.MediaBodyParser.parseObject;
 import static com.qtools.media.support.MediaBodyParser.stringValue;
 
@@ -37,6 +38,8 @@ import static com.qtools.media.support.MediaBodyParser.stringValue;
  *       <td>删别名行；{@code deleteFiles=true} 时先把副本文件搬进回收站</td></tr>
  *   <tr><td>{@code POST /duplicates/keep}</td><td>media:admin:edit</td>
  *       <td>把指定别名提升为主行指向的文件（交换 rel_path，主行 id 不变）</td></tr>
+ *   <tr><td>{@code POST /duplicates/remove}</td><td>media:admin:edit</td>
+ *       <td>按 aliasId 只清<b>一条</b>副本（P4.3）；{@code deleteFile=true} 时先把那份文件搬进回收站</td></tr>
  * </table>
  *
  * <p><b>风险提示（面板必须显式告知用户）</b>：{@code merge(deleteFiles=true)} 会把文件移进
@@ -125,5 +128,41 @@ public class MediaDuplicateController extends BaseController
             throw MediaException.badRequest("id 必填（别名行 id）");
         }
         return mediaDuplicateService.keep(kind, contentHash, id);
+    }
+
+    /**
+     * 清理单条副本：{@code POST /api/media/admin/duplicates/remove}
+     *
+     * <p>body {@code {kind:"video"|"photo", aliasId:"<别名行 id>", deleteFile:true|false}}。
+     * 与 {@code /merge} 的区别是<b>定位方式</b>：这里只认别名行 id，不认 contentHash，
+     * 因此天然只动一条；同一组里点几次「清理」就发几次这个请求。</p>
+     *
+     * <p>{@code deleteFile=true} → 该别名文件移入回收站（{@code _媒体站/trash/<kind>/<rootId>/<别名id>__<原名>}，
+     * 与 merge 同一套命名，回收站列表认得出），然后删行；{@code false} → 只删行，磁盘不动。</p>
+     *
+     * <p>返回 {@code {kind,aliasId,removedRows,deletedFiles,movedToTrash:[...]}}。
+     * aliasId 不存在 → 404（<b>幂等口径</b>：重复调用就是 404，不返回 200 + removedRows=0）；
+     * 别名文件已不在磁盘 → {@code deletedFiles=0} 且照样 200。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-重复文件单条清理", businessType = BusinessType.DELETE)
+    @PostMapping("/remove")
+    public Map<String, Object> remove(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        String kind = stringValue(body.get("kind"));
+        String aliasId = stringValue(body.get("aliasId"));
+        if (aliasId == null)
+        {
+            // 兼容前端把别名 id 当数字传（别名 id 是 BIGINT）
+            Long asLong = longValue(body.get("aliasId"));
+            aliasId = asLong == null ? null : String.valueOf(asLong);
+        }
+        if (aliasId == null)
+        {
+            throw MediaException.badRequest("aliasId 必填（别名行 id）");
+        }
+        Boolean deleteFile = boolValue(body.get("deleteFile"));
+        return mediaDuplicateService.remove(kind, aliasId, Boolean.TRUE.equals(deleteFile));
     }
 }

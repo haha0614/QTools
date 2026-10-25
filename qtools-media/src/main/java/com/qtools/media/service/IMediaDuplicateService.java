@@ -51,4 +51,20 @@ public interface IMediaDuplicateService
      * @return {@code {kind,contentHash,kept:{id,relPath,size,rootId},previous:{relPath,size,rootId}}}
      */
     Map<String, Object> keep(String kind, String contentHash, String id);
+
+    /**
+     * 清理<b>单条</b>别名（P4.3：清理粒度到「一条副本」）
+     *
+     * <p>与 {@link #merge} 的差别只有一处：{@code merge} 按 {@code contentHash} 整组删，
+     * 这里按<b>别名行 id</b>只删一行。主行是否还在<b>不参与判断</b>——孤立别名（主行已被删）
+     * 同样允许清掉，否则那种行永远没有出口。</p>
+     *
+     * <p><b>幂等</b>：行不存在 = 404（与「aliasId 不存在 404」同一判据，不另造
+     * 200 + removedRows=0 的第二种语义）；因此重复调用拿到的是 404，而不是静默成功。</p>
+     *
+     * @param aliasId 别名行 id（{@code media_video_alias.id} / {@code media_photo_alias.id}）
+     * @param deleteFile true = 先把该别名文件搬进回收站再删行；false = 只删行
+     * @return {@code {kind,aliasId,removedRows,deletedFiles,movedToTrash:[trashRel]}}
+     */
+    Map<String, Object> remove(String kind, String aliasId, boolean deleteFile);
 }
