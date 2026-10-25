@@ -20,6 +20,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="w"          column="w"           />
         <result property="h"          column="h"           />
         <result property="vcodec"     column="vcodec"      />
+        <!-- P5.16 帧率（doc/media_fps.sql）：索引/详情输出给前端做帧级 seek；NULL = 未探测 -->
+        <result property="fps"        column="fps"         />
         <result property="browserOk"  column="browser_ok"  />
         <result property="posterPath" column="poster_path" />
         <result property="docPath"    column="doc_path"    />
@@ -49,7 +51,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         复用 selectVideoById 就不再额外查一次库。这两列不出现在任何接口出参里。
     -->
     <sql id="selectVideoVo">
-        select id, content_hash, root_id, folder, rel_path, title, size, dur, w, h, vcodec, browser_ok,
+        select id, content_hash, root_id, folder, rel_path, title, size, dur, w, h, vcodec, fps, browser_ok,
                poster_path, doc_path, sub_path, mtime, rating, missing, last_seen
         from media_video
     </sql>

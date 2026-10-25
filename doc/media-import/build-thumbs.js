@@ -10,8 +10,8 @@
  *              content_hash 为 NULL 时回退 <thumbs>/p/<albumId>/<%04d>.jpg（老命名，仍可用）
  *   大图预览   <thumbs>/pv/<content_hash>.jpg（仅 is_big=1）     scale=1600:-2
  *              content_hash 为 NULL 时回退 <thumbs>/pv/<albumId>/<%04d>.jpg
- *   精灵图     <thumbs>/s/<content_hash>.jpg                  10x10 网格，每格 160x90
- *              （fps=tile 一次成型，间隔由时长决定，目标 ≤100 帧，图片恒为 1600 宽）
+ *   精灵图     <thumbs>/s/<content_hash>.jpg                  20x20 网格，每格 160x90（成品恒 3200x1800）
+ *              （select 绝对时间格栅 + tile 一次成型，400 格；格数可用 --sprite-cols/rows 改）
  *   预览视频   <thumbs>/pv2/<content_hash>.mp4（或 .webm）       静音 320x180 5~8 秒
  *              （帧数 = 影片时长/sampleSec，夹在 32~300 帧；帧率由此反推，见 pvPlan）
  *              （按 ffmpeg 里的编码器择一：libx264 > libvpx-vp9 > libvpx > mpeg4）
@@ -29,7 +29,8 @@
  *
  * 派生资源回收（--gc）：扫 thumbs/v、thumbs/s、thumbs/pv2（按 video 的 hash/id 判定）与
  * thumbs/p、thumbs/pv（按 photo 的 content_hash 判定），删掉孤儿产物；p/ pv/ 只看顶层
- * 文件，老命名的 <albumId>/ 子目录一律不动。只碰这几类派生文件，绝不碰媒体源。
+ * 文件，老命名的 <albumId>/ 子目录一律不动。P5.15 起还扫 thumbs/frames/（实时取帧缓存，
+ * 目录名 = 内容哈希，见下行注释）。只碰这几类派生文件，绝不碰媒体源。
  * 默认干跑只打印，--gc --yes 才真删
  * （与 scan-media.js 的 --truncate/--yes 同一套确认语义）。
  *
@@ -50,9 +51,9 @@
  *        内容寻址的产物比行数少是正常的（多张重复内容共用一个 <content_hash>.jpg），
  *        rows 是库里的行数、files 是去重后应有的文件数、missing 才是真缺文件。
  *        「ok=0 skip=470」不代表该建未建：先看这一行的 missing。
- *   GC scan dirs=v,s,pv2 files=<n> orphans=<n> bytes=<n>
- *   GC TOP <v|s|pv2>/<name> size=<n>   最多 10 行（按体积从大到小）
- *   GC dry-run ... / GC remove dirs=v,s,pv2 removed=<n> failed=<n> bytes=<n>
+ *   GC scan dirs=v,s,pv2,p,pv,frames files=<n> orphans=<n> bytes=<n>
+ *   GC TOP <v|s|pv2|p|pv|frames/<bucket>>/<name> size=<n>   最多 10 行（按体积从大到小）
+ *   GC dry-run ... / GC remove dirs=v,s,pv2,p,pv,frames removed=<n> failed=<n> bytes=<n>
  *   ITEM video=<id> task=<video|sprite|pvclip> result=<ok|skip|fail> out=<相对路径> seconds=<n> [reason=...]
  *        逐条结果行（每完成一项一行）：后端按它汇总「哪几条生成了」，见 MediaScanServiceImpl 的 RESULT 行
  *   DONE ok=<n> skip=<n> fail=<n> seconds=<n>[ GC removed=<n> kept=<n>] ids=<逗号分隔的已处理 videoId>
@@ -81,6 +82,9 @@ const DEFAULTS = {
   fresh: true,
   limit: 0,
   sprite: false,
+  // 精灵图网格（null = 用 SPRITE 的默认 20x20）：整库重采样时阶段性换网格用，产物文件名不变
+  spriteCols: null,
+  spriteRows: null,
   preview: false,
   gc: false,
   gcYes: false,
@@ -89,8 +93,12 @@ const DEFAULTS = {
   idsFile: null,
 };
 
-// 精灵图：10 列 x 10 行、每格 160x90 -> 成品恒为 1600x900，最多 100 帧
-const SPRITE = { cols: 10, rows: 10, w: 160, h: 90 };
+// 精灵图：默认 20 列 x 20 行（= 400 格）、每格 160x90 -> 成品恒为 3200x1800。
+// P5.14：10x10 时一格覆盖影片时长/100（2 小时片 ≈ 72 秒），悬停/标记取到的帧太粗；
+// 400 格把它压到 /400（同片 ≈ 18 秒）。网格可由 --sprite-cols= / --sprite-rows= 覆盖，
+// 但**整库必须一次全换成同一套网格**：文件名不变（s/<hash>.jpg），前端靠 SPRITE_COLS/SPRITE_ROWS
+// 常量切格，10x10 与 20x20 的产物混在一起会整体切错帧（见 docs/精灵图重采样与重生成.md）。
+const SPRITE = { cols: 20, rows: 20, w: 160, h: 90 };
 // 预览视频：静音、低码率，时长夹在 5~8 秒（需求是 5-10 秒）。
 // 帧数（= 悬停定位精度）由**影片时长**决定，见 pvPlan：旧实现固定 4fps×8s = 32 帧，
 // 把 464 秒的片子压成 32 个采样点（每帧覆盖 14.5 秒），悬停到 50% 时显示的是第 15 帧
@@ -127,9 +135,12 @@ const HELP = `
   --video=<id[,id]>   只处理这些 videoId（排查 / 单条重生成用）：可重复传、可逗号分隔，
                       给了它就只处理这些视频的 v/ s/ pv2/ 产物，不再碰任何图片缩略图
   --ids-file=<path>   从文件读 videoId（每行一个，空行与 # 注释忽略）：与 --video 叠加
-  --sprite            顺手生成视频精灵图 s/<hash>.jpg（10x10 网格，每格 160x90；默认关）
+  --sprite            顺手生成视频精灵图 s/<hash>.jpg（默认 20x20 网格 = 400 格，每格 160x90；
+                      成品恒 3200x1800；默认关）
+  --sprite-cols=<n>   精灵图列数，默认 20（1~64）
+  --sprite-rows=<n>   精灵图行数，默认 20（1~64）；改了网格就必须整库重生成，见下
   --preview           顺手生成预览视频 pv2/<hash>.mp4|webm（静音 5~8 秒，帧数按影片时长取；默认关）
-  --gc                扫 v/ s/ pv2/ p/ pv/ 删孤儿派生文件（默认只打印，配 --yes 才真删）
+  --gc                扫 v/ s/ pv2/ p/ pv/ frames/ 删孤儿派生文件（默认只打印，配 --yes 才真删）
   --yes, -y           确认 --gc 的删除动作（不给就只是干跑统计）
   --secret=<file>     密码来源②：从 secret.yml 取 spring.datasource.druid.master.password
                       （管理端「重建缩略图」按钮触发时没有 MYSQL_PWD，用它）
@@ -151,9 +162,12 @@ const HELP = `
   pv/<albumId>/0000.jpg...  同上（大图预览的回退命名）
   s/<content_hash>.jpg      精灵图（--sprite）
   pv2/<content_hash>.mp4    预览视频（--preview；编码器只有 VP9/VP8 时是 .webm）
+  frames/<content_hash>/<秒>.jpg
+                            实时取帧缓存（P5.15，后端 /media/frame/{id}?t=<秒> 按需写入，
+                            不是本脚本的产物；--gc 只负责回收孤儿目录，见下）
 
-精灵图 / 预览视频的取帧间隔都由 media_video.dur 决定：精灵图目标是铺满
-10x10=100 格（fps=100/时长），预览视频是「成片 5~8 秒、帧数 = 时长/1 秒（32~300）」——
+精灵图 / 预览视频的取帧间隔都由 media_video.dur 决定：精灵图目标是铺满 cols*rows 格
+（默认 20x20=400 格，step=时长/400），预览视频是「成片 5~8 秒、帧数 = 时长/1 秒（32~300）」——
 帧数就是悬停定位精度，一个采样帧代表时长/帧数 秒的影片。两者同时开启时
 **一次 ffmpeg 解码同时出两张产物**（-filter_complex 分两路），不做二次解码。
 一张图/一段视频失败只计一次 fail，不中断整批。
@@ -163,6 +177,11 @@ media_video.content_hash 里、也不在 media_video.id 里」的文件，以及
 顶层「文件名去掉扩展名后不是任何 media_photo.content_hash」的文件；不递归、不碰
 媒体源目录、不删目录本身（老命名的 p/<albumId>/、pv/<albumId>/ 子目录整棵保留）。
 删除前打印 TOP 10 与总数，只有再加 --yes 才真删。
+
+--gc 与 thumbs/frames/（P5.15 实时取帧缓存）：结构是 frames/<桶>/<秒>.jpg，桶名与 v/ s/ pv2/
+同一套（content_hash 优先，回退 videoId）。回收规则因此按「桶」判：桶名既不是任何
+content_hash 也不是任何 videoId -> 整棵目录删除；桶内的 <秒>.jpg 全部保留（秒是无限的，
+只有视频被删 / 换了内容才会整桶变孤儿）。顶层落单文件按 v/ s/ pv2 同一条 stem 规则判。
 
 增量判定：产物存在且非空，且产物 mtime >= 源文件 mtime 才算「已是最新」。
 源文件被替换 / 重编码后 mtime 变新，下一次运行自动重建该条产物。
@@ -201,6 +220,9 @@ function parseArgs(argv) {
     else if (a.startsWith('--host=')) o.host = a.slice('--host='.length);
     else if (a.startsWith('--port=')) o.port = a.slice('--port='.length);
     else if (a.startsWith('--limit=')) o.limit = Number(a.slice('--limit='.length));
+    // 精灵图网格（默认 20x20）：整库一次性重生成时用同一组参数，产物文件名不变
+    else if (a.startsWith('--sprite-cols=')) o.spriteCols = parseGrid(a.slice('--sprite-cols='.length), '--sprite-cols');
+    else if (a.startsWith('--sprite-rows=')) o.spriteRows = parseGrid(a.slice('--sprite-rows='.length), '--sprite-rows');
     // 只跑某一档产物（pvclips 用来「全库重生成预览片段」而不动 1 万张图片缩略图）
     else if (a.startsWith('--only=')) {
       o.only = a.slice('--only='.length).split(',').map((s) => s.trim()).filter(Boolean);
@@ -564,7 +586,7 @@ function ffmpegArgsFor(item, src, o) {
   const base = ['-y', '-loglevel', 'error'];
   if (item.kind === 'video') return base.concat(['-ss', '3', '-i', src, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', item.out]);
   if (item.kind === 'photo') return base.concat(['-i', src, '-frames:v', '1', '-vf', 'scale=400:-2', '-q:v', '4', item.out]);
-  if (item.kind === 'sprite') return base.concat(['-i', src, '-vf', spriteFilter(item), '-frames:v', '1', '-q:v', '4', item.out]);
+  if (item.kind === 'sprite') return base.concat(['-i', src, '-vf', spriteFilter(item, o), '-frames:v', '1', '-q:v', '4', item.out]);
   if (item.kind === 'pvclip') return base.concat(pvclipArgs(item, src, o));
   return base.concat(['-i', src, '-frames:v', '1', '-vf', 'scale=1600:-2', '-q:v', '4', item.out]);
 }
@@ -597,15 +619,41 @@ function round6(x) {
   return String(Number(x.toFixed(6)));
 }
 
-/** 精灵图取帧速率：铺满 10x10=100 格，间隔由时长反推（100/时长）；时长未知按 1fps */
-function spriteFps(item) {
-  const dur = durOf(item);
-  return dur > 0 ? Math.min(100 / dur, 100) : 1;
+/** --sprite-cols / --sprite-rows 的取值：正整数，1~64（64x64 已经是 10240x5760，再大没有意义） */
+function parseGrid(raw, flag) {
+  const n = Number(String(raw).trim());
+  if (!Number.isInteger(n) || n < 1 || n > 64) {
+    throw new Error(flag + ' 必须是 1~64 的整数（当前 ' + raw + '）');
+  }
+  return n;
 }
 
-function spriteFilter(item) {
-  return 'fps=' + round6(spriteFps(item)) + ',scale=' + SPRITE.w + ':' + SPRITE.h +
-    ',tile=' + SPRITE.cols + 'x' + SPRITE.rows;
+/** 本次运行用的精灵图网格：命令行给了就用，否则用 SPRITE 默认值（20x20） */
+function spriteGrid(o) {
+  const cols = (o && o.spriteCols) || SPRITE.cols;
+  const rows = (o && o.spriteRows) || SPRITE.rows;
+  return { cols, rows, cells: cols * rows, w: SPRITE.w, h: SPRITE.h };
+}
+
+/** 精灵图采样格宽（秒）：整片切成 cells 个等宽格，一格一帧；时长未知退回 1 秒一格 */
+function spriteStep(item, grid) {
+  const dur = durOf(item);
+  return dur > 0 ? dur / grid.cells : 1;
+}
+
+/**
+ * 精灵图滤镜：格栅取帧 → 缩到单格尺寸 → tile 拼成一张。
+ *
+ * 取帧与 pvFilter 用**同一套绝对时间格栅**（第 k 格 = [k*step,(k+1)*step)，每格取第一帧），
+ * 所以第 k 格严格对应影片 k*step 秒——前端「ratio → 格号」的换算因此成立。
+ * 不用旧的 fps=cells/时长 滤镜：fps 要被舍入到 6 位小数，乘上几百格后整段会偏出几格；
+ * 格栅按绝对时间算，误差恒在一个源帧内（30fps 源 ≤33ms），不随格号累积。
+ */
+function spriteFilter(item, o) {
+  const g = spriteGrid(o);
+  const step = round6(spriteStep(item, g));
+  return "select='isnan(prev_selected_t)+gt(floor(t/" + step + "),floor(prev_selected_t/" + step + "))'" +
+    ',scale=' + g.w + ':' + g.h + ',tile=' + g.cols + 'x' + g.rows;
 }
 
 /**
@@ -678,7 +726,7 @@ function pvclipArgs(item, src, o) {
 function bothArgs(spriteItem, pvItem, src, o) {
   const p = pvPlan(pvItem);
   return ['-y', '-loglevel', 'error', '-i', src,
-    '-filter_complex', '[0:v]' + spriteFilter(spriteItem) + '[s];[0:v]' + pvFilter(pvItem) + '[p]',
+    '-filter_complex', '[0:v]' + spriteFilter(spriteItem, o) + '[s];[0:v]' + pvFilter(pvItem) + '[p]',
     '-map', '[s]', '-frames:v', '1', '-q:v', '4', spriteItem.out,
   ].concat(['-map', '[p]', '-an']).concat(pvEncodeArgs(o))
     .concat(pvOutArgs(p)).concat([pvItem.out]);
@@ -744,6 +792,64 @@ function detectPreviewEncoder(ffmpeg) {
 }
 
 /**
+ * thumbs/frames/ 的桶扫描（P5.15 实时取帧缓存）
+ *
+ * 结构与 v/ s/ pv2/ 不同：不是一层平铺文件，而是 frames/<桶>/<秒>.jpg。所以孤儿判定落在
+ * <b>桶</b>上 —— 桶名与 v/ s/ pv2 同一套（content_hash 优先，回退 videoId），桶内的秒数是
+ * 无限的、全部保留；只有视频被删或内容变了（哈希换了）才会整桶变孤儿。
+ * 顶层落单文件（历史残留）仍按 v/ s/ pv2 的 stem 规则判。
+ *
+ * 体积按整棵目录累加，GC TOP 里才能看出「这部片到底占了多少盘」。
+ */
+function scanFrameBuckets(o, keep, scanned) {
+  const root = path.join(o.thumbs, 'frames');
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch (e) {
+    if (e.code !== 'ENOENT') warn('GC 目录读不到，跳过 ' + root + '：' + (e.code || e.message));
+    return;
+  }
+  for (const ent of entries) {
+    const full = path.join(root, ent.name);
+    if (ent.isDirectory()) {
+      let size = 0;
+      try {
+        size = dirBytes(full);
+      } catch (e) {
+        size = 0; // 权限 / 竞态：体积算不出不影响判孤儿
+      }
+      scanned.push({ sub: 'frames', name: ent.name, full, size, orphan: !keep.has(ent.name), dir: true });
+      continue;
+    }
+    if (!ent.isFile()) continue; // 链接一律不动
+    let size = 0;
+    try {
+      size = fs.statSync(full).size;
+    } catch (e) {
+      continue;
+    }
+    const stem = ent.name.replace(/\.[^.]+$/, '');
+    scanned.push({ sub: 'frames', name: ent.name, full, size, orphan: !keep.has(stem), dir: false });
+  }
+}
+
+/** 目录总字节（递归，只统计普通文件；读不到的子项跳过） */
+function dirBytes(dir) {
+  let total = 0;
+  for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, ent.name);
+    try {
+      if (ent.isDirectory()) total += dirBytes(full);
+      else total += fs.statSync(full).size;
+    } catch (e) {
+      continue;
+    }
+  }
+  return total;
+}
+
+/**
  * GC：扫 thumbs/v、thumbs/s、thumbs/pv2、thumbs/p、thumbs/pv，把「文件名去掉扩展名后
  * 不在对应 keep 集合里」的文件当孤儿：
  *   · v/ s/ pv2/ 的 keep = 所有 media_video.content_hash + media_video.id；
@@ -769,6 +875,7 @@ function gcDerived(o, videos, photos) {
     { sub: 'p', keep: photoKeep }, { sub: 'pv', keep: photoKeep },
   ];
   const scanned = [];
+  scanFrameBuckets(o, videoKeep, scanned);
   for (const { sub, keep } of scanPlan) {
     const dir = path.join(o.thumbs, sub);
     let entries;
@@ -793,7 +900,7 @@ function gcDerived(o, videos, photos) {
   }
   const orphans = scanned.filter((f) => f.orphan).sort((a, b) => b.size - a.size);
   const bytes = orphans.reduce((s, f) => s + f.size, 0);
-  log('GC scan dirs=v,s,pv2,p,pv files=' + scanned.length + ' orphans=' + orphans.length + ' bytes=' + bytes);
+  log('GC scan dirs=v,s,pv2,p,pv,frames files=' + scanned.length + ' orphans=' + orphans.length + ' bytes=' + bytes);
   for (const f of orphans.slice(0, 10)) log('GC TOP ' + f.sub + '/' + f.name + ' size=' + f.size);
   if (!o.gcYes) {
     log('GC dry-run 未删除任何文件（确认无误后加 --yes 才真删）');
@@ -803,14 +910,16 @@ function gcDerived(o, videos, photos) {
   let failed = 0;
   for (const f of orphans) {
     try {
-      fs.unlinkSync(f.full);
+      // frames/<桶> 是整棵目录（秒数不限，只能整桶回收）；其余都是平铺文件
+      if (f.dir) fs.rmSync(f.full, { recursive: true, force: true });
+      else fs.unlinkSync(f.full);
       removed += 1;
     } catch (e) {
       failed += 1;
       warn('GC 删除失败 ' + f.sub + '/' + f.name + '：' + (e.code || e.message));
     }
   }
-  log('GC remove dirs=v,s,pv2,p,pv removed=' + removed + ' failed=' + failed + ' bytes=' + bytes);
+  log('GC remove dirs=v,s,pv2,p,pv,frames removed=' + removed + ' failed=' + failed + ' bytes=' + bytes);
   return { removed, kept: scanned.length - removed };
 }
 
@@ -830,6 +939,20 @@ function findMate(tasks, item, needBuild) {
 }
 
 // ---------------------------------------------------------------- 主流程
+
+/**
+ * START 汇总行（管理端逐 token 解析，加 token 只能追加、不能挪用已有的键）。
+ * sprite=<0|1> 是开关；P5.14 起追加 spritegrid=<cols>x<rows>，让日志自己说清这批产物是几宫格
+ * （10x10 与 20x20 的产物**不能混用**，出问题时先看这一格对不上前端常量）。
+ */
+function startLine(o, total, taskNames, root) {
+  const g = spriteGrid(o);
+  return 'START total=' + total + ' tasks=' + taskNames.join(',') + ' force=' + (o.force ? 1 : 0) +
+    ' fresh=' + (o.fresh ? 1 : 0) + ' sprite=' + (o.sprite ? 1 : 0) +
+    ' spritegrid=' + g.cols + 'x' + g.rows +
+    ' preview=' + (o.preview ? 1 : 0) + ' gc=' + (o.gc ? 1 : 0) +
+    ' root=' + root + ' thumbs=' + o.thumbs;
+}
 
 function main() {
   const o = parseArgs(process.argv.slice(2));
@@ -892,10 +1015,7 @@ function main() {
   const taskNames = ['videos', 'photos', 'previews'];
   if (o.sprite) taskNames.push('sprites');
   if (o.preview) taskNames.push('pvclips');
-  log('START total=' + total + ' tasks=' + taskNames.join(',') + ' force=' + (o.force ? 1 : 0) +
-    ' fresh=' + (o.fresh ? 1 : 0) + ' sprite=' + (o.sprite ? 1 : 0) +
-    ' preview=' + (o.preview ? 1 : 0) + ' gc=' + (o.gc ? 1 : 0) +
-    ' root=' + root + ' thumbs=' + o.thumbs);
+  log(startLine(o, total, taskNames, root));
   // 哈希没回填的视频只能按老命名产出：整批提示一次，避免刷屏（stderr，不干扰管理端解析 stdout）
   const noHash = videos.filter((v) => !v.hash || String(v.hash).trim() === '').length;
   if (noHash > 0) {
@@ -994,9 +1114,17 @@ function main() {
   return 0; // 单条失败不改变退出码（与原作者 build_thumbs.js 一致）
 }
 
-try {
-  process.exitCode = main();
-} catch (e) {
-  process.stderr.write('ERROR ' + (e && e.message ? e.message : String(e)) + '\n');
-  process.exitCode = 1;
+// 只有被当脚本跑才执行主流程：被 require（单测直接调 spriteFilter / buildOne）时只导出纯函数
+if (require.main === module) {
+  try {
+    process.exitCode = main();
+  } catch (e) {
+    process.stderr.write('ERROR ' + (e && e.message ? e.message : String(e)) + '\n');
+    process.exitCode = 1;
+  }
 }
+
+module.exports = {
+  SPRITE, PV, parseArgs, parseGrid, spriteGrid, spriteStep, spriteFilter, pvPlan, pvFilter,
+  planTasks, ffmpegArgsFor, buildOne, startLine, log,
+};

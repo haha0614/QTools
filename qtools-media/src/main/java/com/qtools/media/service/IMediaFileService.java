@@ -166,8 +166,9 @@ public interface IMediaFileService
      * 定位视频精灵图：<b>内容寻址优先</b> thumbs/s/{content_hash}.jpg，
      * 命中不了再<b>回退</b>老命名 thumbs/s/{id}.jpg
      *
-     * <p>精灵图由 build-thumbs.js 的 {@code --sprite} 生成（10 列 × 10 行，每格 160×90，
-     * 成品恒 1600×900），<b>默认不生成</b>：产物缺失就在这里 404，前端靠 /media/index 的
+     * <p>精灵图由 build-thumbs.js 的 {@code --sprite} 生成（P5.14 起 20 列 × 20 行 = 400 格，
+     * 每格 160×90，成品恒 3200×1800；旧产物是 10 列 × 10 行 / 1600×900，两种网格不能混用），
+     * <b>默认不生成</b>：产物缺失就在这里 404，前端靠 /media/index 的
      * {@code hasSprite} 决定要不要请求，不会拿 404 当常态。</p>
      *
      * @param id 视频 id
@@ -241,6 +242,18 @@ public interface IMediaFileService
      * @param preview     true=预览图（pv），false=缩略图（p）
      */
     boolean hasPhotoArtifact(String contentHash, boolean preview);
+
+    /**
+     * 缩略图根目录（{@code qtools.media.thumbsPath} 的 realpath），派生资源目录的父目录
+     *
+     * <p>V / S / PV2 / P / PV 这些派生目录由 {@link #resolveSprite} 等方法各自拼接；
+     * P5.15 的实时取帧缓存（{@code frames/}）要自己建目录、落文件，所以需要这个入口 ——
+     * 路径仍由文件服务统一校验（realpath），控制器依旧不碰路径拼接。</p>
+     *
+     * @return 缩略图根目录真实路径
+     * @throws com.qtools.media.exception.MediaException 500 未配置 / 不可访问
+     */
+    Path thumbsRoot();
 
     /** 按扩展名返回 Content-Type */
     String contentType(Path path);

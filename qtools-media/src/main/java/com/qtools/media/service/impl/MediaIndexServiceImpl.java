@@ -420,6 +420,13 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         node.put("w", video.getW());
         node.put("h", video.getH());
         node.put("vcodec", video.getVcodec());
+        // P5.16 帧率：前端用它把拖动落点吸到帧栅格（t = round(t*fps)/fps）并显示 hh:mm:ss:ff。
+        // 未探测（NULL）时整键不输出 —— 与 rating / persons 同一约定：老库索引体积不涨一个字节，
+        // 前端拿不到 fps 就退回「按秒拖动」，行为与 P5.15 完全一致。
+        if (video.getFps() != null)
+        {
+            node.put("fps", video.getFps());
+        }
         node.put("browserOk", isTrue(video.getBrowserOk()));
         node.put("tags", tags == null ? List.of() : tags);
         node.put("actors", actors == null ? List.of() : actors);

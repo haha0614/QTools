@@ -5,14 +5,25 @@
  *
  * 背景：scan-media.js 只按扩展名登记，dur/w/h/vcodec 留 NULL；网页端没有时长和分辨率
  * 就没法排序、没法判断能否转码。本脚本用 ffprobe 读出第一个视频流的宽高/编码与容器时长，
- * 回写 media_video 的 dur/w/h/vcodec 四列，别的列一概不动。
+ * 回写 media_video 的 dur/w/h/vcodec/fps 五列，别的列一概不动。
  *
  * 探测命令（不要改：改了要重新验解析）：
- *   ffprobe -v error -select_streams v:0 -show_entries stream=width,height,codec_name:format=duration -of json <文件>
- * 只取 streams[0] 的 width/height/codec_name 与 format.duration（秒，字符串）。
+ *   ffprobe -v error -select_streams v:0 -show_entries stream=width,height,codec_name,r_frame_rate,avg_frame_rate:format=duration -of json <文件>
+ * 只取 streams[0] 的 width/height/codec_name/r_frame_rate/avg_frame_rate 与 format.duration（秒，字符串）。
  * 时长四舍五入到 2 位小数（dur 是 decimal(10,2)）。
  *
- * 待补集合：dur / w / h / vcodec 四列里任一为 NULL。--force 则连已补齐的行一起重探。
+ * 帧率（P5.16 新增，列见 doc/media_fps.sql）：
+ *   r_frame_rate 优先（容器声明的帧栅格；CFR 素材就是 30000/1001 这种精确值），
+ *   缺失/为 0/0 时退 avg_frame_rate（帧数/时长，VFR 或 r 无效时的兜底）——见 parseProbe 注释；
+ *   两者都是「分子/分母」字符串（30000/1001），相除后四舍五入到 3 位小数写进 decimal(8,3)。
+ *   29.970 与真值 30000/1001 的残差 3.3e-8 秒/帧，2 小时片累计 ≈7ms，远小于半帧，
+ *   所以前端 snapToFrame 不会因此落到相邻帧。
+ *   两个有理数都不可用（极少数纯音频容器 / 坏文件）时 fps 写 NULL 并计入 WARN：行仍算补齐失败一栏，
+ *   下次跑会重新探测（与 dur 探测失败同一口径），不影响其它列。
+ *
+ * 待补集合：dur / w / h / vcodec / fps 五列里任一为 NULL。--force 则连已补齐的行一起重探。
+ * 没跑过 doc/media_fps.sql 的库（缺 fps 列）不会被本脚本打死：启动时查一次列是否存在，
+ * 缺列则只补四列并打一行 WARN 提示先执行迁移。
  * 幂等：补齐后的行自动退出待补集合，第二次跑不会再调 ffprobe，只会计入 skip。
  * 分页：按主键 id 顺序 keyset 分页（id > 上一页最后一条），每页 200 行，每 200 行打一行进度。
  * 单条失败（文件没了 / 不是视频 / ffprobe 报错）只计 FAIL 并继续，不中断整批。
@@ -81,16 +92,18 @@ const HELP = `
 
 探测命令：
   ffprobe -v error -select_streams v:0
-          -show_entries stream=width,height,codec_name:format=duration
+          -show_entries stream=width,height,codec_name,r_frame_rate,avg_frame_rate:format=duration
           -of json <文件绝对路径>
 
-待补集合：dur / w / h / vcodec 任一为 NULL；--force 则全部行重探。
+待补集合：dur / w / h / vcodec / fps 任一为 NULL；--force 则全部行重探。
+帧率写 media_video.fps（decimal(8,3)，先跑 doc/media_fps.sql；缺列时只补四列并 WARN）。
+帧率取 r_frame_rate（栅格），无效时退 avg_frame_rate（帧数/时长）。
 单条失败只记 FAIL 并继续；补齐后的行退出待补集合，重跑只计 skip。
 
 输出行（可被管理端解析，别随便改）：
   START total=<n> pending=<n> force=<0|1> dry=<0|1> root=<dir>
   PROGRESS <examined>/<budget>
-  DRY <rel_path> dur=.. w=.. h=.. vcodec=..    （仅 --dry-run）
+  DRY <rel_path> dur=.. w=.. h=.. vcodec=.. fps=..   （仅 --dry-run）
   FAIL <rel_path>: <原因>
   PENDING <n>
   enrich ok=<n> skip=<n> fail=<n> seconds=<n>
@@ -279,12 +292,29 @@ function queryRows(o, mysqlExe, password, sql) {
   return rows;
 }
 
-/** 待补集合：四列里任一为 NULL（dur 是最常见的，但 w/h/vcodec 缺了同样没法用） */
-const PENDING_SQL = '(dur IS NULL OR w IS NULL OR h IS NULL OR vcodec IS NULL)';
+/**
+ * 待补集合：五列里任一为 NULL（dur 是最常见的，但 w/h/vcodec/fps 缺了同样没法用）。
+ * fps 列要先跑 doc/media_fps.sql 才有 —— 没这列时由 hasFpsCol 关掉它（见 main）。
+ */
+const PENDING_SQL_BASE = '(dur IS NULL OR w IS NULL OR h IS NULL OR vcodec IS NULL)';
+const PENDING_SQL_FPS = '(dur IS NULL OR w IS NULL OR h IS NULL OR vcodec IS NULL OR fps IS NULL)';
 
-function readCounts(o, mysqlExe, password) {
+/** 本次运行使用的待补条件（按 fps 列是否存在决定） */
+function pendingSql(hasFps) {
+  return hasFps ? PENDING_SQL_FPS : PENDING_SQL_BASE;
+}
+
+/** media_video.fps 列是否存在（未迁移的老库 = false，脚本照旧只补四列） */
+function hasFpsCol(o, mysqlExe, password) {
   const rows = queryRows(o, mysqlExe, password,
-    'SELECT COUNT(*), SUM(' + PENDING_SQL + ') FROM media_video;');
+    "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE()" +
+    " AND table_name = 'media_video' AND column_name = 'fps';");
+  return !!(rows.length && Number(rows[0][0]) > 0);
+}
+
+function readCounts(o, mysqlExe, password, hasFps) {
+  const rows = queryRows(o, mysqlExe, password,
+    'SELECT COUNT(*), SUM(' + pendingSql(hasFps) + ') FROM media_video;');
   const cols = rows.length ? rows[0] : ['0', 'NULL'];
   const total = Number(cols[0]) || 0;
   // 空表时 SUM 返回 NULL
@@ -296,15 +326,15 @@ function readCounts(o, mysqlExe, password) {
  * keyset 分页取一页待办行。--force 时不加待补过滤（全部重探）。
  * 用 id > 游标 而不是 OFFSET：补齐的行会退出待补集合，OFFSET 会漏行。
  */
-function fetchPage(o, mysqlExe, password, cursor, size) {
+function fetchPage(o, mysqlExe, password, cursor, size, hasFps) {
   const where = [];
-  if (!o.force) where.push(PENDING_SQL);
+  if (!o.force) where.push(pendingSql(hasFps));
   if (cursor !== null) where.push('id > ' + sqlStr(cursor));
-  const sql = 'SELECT id,rel_path,dur,w,h,vcodec FROM media_video' +
+  const sql = 'SELECT id,rel_path,dur,w,h,vcodec' + (hasFps ? ',fps' : '') + ' FROM media_video' +
     (where.length ? ' WHERE ' + where.join(' AND ') : '') +
     ' ORDER BY id LIMIT ' + size + ';';
   return queryRows(o, mysqlExe, password, sql).map((c) => ({
-    id: c[0], rel: c[1], dur: c[2], w: c[3], h: c[4], vcodec: c[5],
+    id: c[0], rel: c[1], dur: c[2], w: c[3], h: c[4], vcodec: c[5], fps: hasFps ? c[6] : 'NULL',
   }));
 }
 
@@ -314,15 +344,34 @@ function isNullish(v) {
 }
 
 function isComplete(row) {
-  return !isNullish(row.dur) && !isNullish(row.w) && !isNullish(row.h) && !isNullish(row.vcodec);
+  return !isNullish(row.dur) && !isNullish(row.w) && !isNullish(row.h) &&
+    !isNullish(row.vcodec) && !isNullish(row.fps);
 }
 
 // ---------------------------------------------------------------- ffprobe
 
 function probeArgs(file) {
   return ['-v', 'error', '-select_streams', 'v:0',
-    '-show_entries', 'stream=width,height,codec_name:format=duration',
+    '-show_entries', 'stream=width,height,codec_name,r_frame_rate,avg_frame_rate:format=duration',
     '-of', 'json', file];
+}
+
+/** 帧率上限：更高的只有高速摄影素材，播放器不需要也不该按它做帧级 seek */
+const FPS_MAX = 240;
+
+/**
+ * "30000/1001" / "25/1" / "29.97" → 帧率数字（四舍五入到 3 位，与 decimal(8,3) 一致）。
+ * "0/0"（ffprobe 对 VFR / 坏流的常见输出）与越界值一律 null，由调用方退另一个字段。
+ */
+function parseFrameRate(raw) {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const m = s.match(/^(\d+)\s*\/\s*(\d+)$/);
+  const n = m ? Number(m[1]) / Number(m[2]) : Number(s);
+  if (!Number.isFinite(n) || n <= 0 || n > FPS_MAX) return null;
+  const rounded = Math.round(n * 1000) / 1000;
+  return rounded > 0 ? rounded : null;
 }
 
 function runProbe(ffprobe, file) {
@@ -365,7 +414,16 @@ function parseProbe(stdout) {
     return { ok: false, reason: '时长无效（format.duration=' + rawDur + '）' };
   }
   if (dur >= 1e8) return { ok: false, reason: '时长超出 decimal(10,2) 范围：' + dur };
-  return { ok: true, meta: { dur: Math.round(dur * 100) / 100, w: w, h: h, codec: codec.slice(0, 32) } };
+  // P5.16 帧率：**实帧率（r_frame_rate）优先** —— 它是容器声明的帧栅格
+  // （CFR 素材就是 30000/1001 = 29.970030 这种精确值）。
+  // 平均帧率（avg_frame_rate = 帧数/容器时长）只在 r 不可用时兜底：它不是栅格，
+  // 实测 2 小时那片 r=30000/1001、avg=1986093000/66271139=29.969163，用它当栅格
+  // 22 万帧会累计偏出 ≈0.24 秒（7 帧），帧级 seek 会落错帧。
+  const fps = parseFrameRate(stream.r_frame_rate) || parseFrameRate(stream.avg_frame_rate);
+  return {
+    ok: true,
+    meta: { dur: Math.round(dur * 100) / 100, w: w, h: h, codec: codec.slice(0, 32), fps: fps },
+  };
 }
 
 // ---------------------------------------------------------------- 媒体根
@@ -398,9 +456,11 @@ function srcPathOf(root, rel) {
 
 // ---------------------------------------------------------------- 单条
 
-function updateRow(o, mysqlExe, password, id, meta) {
+function updateRow(o, mysqlExe, password, id, meta, hasFps) {
+  // fps 只在列存在时写（未迁移老库照旧只补四列）；探测不到的帧率写 NULL，不写 0
+  const fpsSql = hasFps ? (', fps=' + (meta.fps == null ? 'NULL' : meta.fps.toFixed(3))) : '';
   const sql = 'UPDATE media_video SET dur=' + meta.dur.toFixed(2) +
-    ', w=' + meta.w + ', h=' + meta.h + ', vcodec=' + sqlStr(meta.codec) +
+    ', w=' + meta.w + ', h=' + meta.h + ', vcodec=' + sqlStr(meta.codec) + fpsSql +
     ' WHERE id=' + sqlStr(id) + ';';
   const r = runMysql(o, mysqlExe, password, sql);
   if (r.status !== 0) {
@@ -409,21 +469,26 @@ function updateRow(o, mysqlExe, password, id, meta) {
   }
 }
 
-function enrichOne(o, mysqlExe, password, ffprobe, root, row) {
+function enrichOne(o, mysqlExe, password, ffprobe, root, row, hasFps) {
   if (!o.force && isComplete(row)) return { ok: true, skip: true };
   const file = srcPathOf(root, row.rel);
   if (!fs.existsSync(file)) return { ok: false, reason: '源文件不存在：' + file };
   const p = runProbe(ffprobe, file);
   if (!p.ok) return { ok: false, reason: p.reason };
+  const fpsText = p.meta.fps == null ? 'NULL' : p.meta.fps.toFixed(3);
   if (o.dry) {
     log('DRY ' + row.rel + ' dur=' + p.meta.dur.toFixed(2) + ' w=' + p.meta.w +
-      ' h=' + p.meta.h + ' vcodec=' + p.meta.codec);
+      ' h=' + p.meta.h + ' vcodec=' + p.meta.codec + ' fps=' + fpsText);
     return { ok: true, skip: false };
   }
   try {
-    updateRow(o, mysqlExe, password, row.id, p.meta);
+    updateRow(o, mysqlExe, password, row.id, p.meta, hasFps);
   } catch (e) {
     return { ok: false, reason: e.message };
+  }
+  // 帧率探测不到：其它列已写好，但这一行仍留在待补集合里（下次重探同一口径与 dur 一致）
+  if (hasFps && p.meta.fps == null) {
+    return { ok: false, reason: '帧率不可用（avg_frame_rate / r_frame_rate 都无效）' };
   }
   return { ok: true, skip: false };
 }
@@ -444,11 +509,18 @@ function main() {
   const password = readPassword(o);
   const root = resolveRoot(o, mysqlExe, password);
 
-  const counts = readCounts(o, mysqlExe, password);
+  // fps 列是 P5.16 才加的（doc/media_fps.sql）：老库没这列时只补四列，不因缺列整批报错
+  const hasFps = hasFpsCol(o, mysqlExe, password);
+  if (!hasFps) {
+    warn('media_video 没有 fps 列：本次只补 dur/w/h/vcodec。' +
+      '需要帧级 seek 的帧率先执行 doc/media_fps.sql 再重跑本脚本');
+  }
+  const counts = readCounts(o, mysqlExe, password, hasFps);
   const startedAt = Date.now();
   const c = { ok: 0, skip: 0, fail: 0 };
   log('START total=' + counts.total + ' pending=' + counts.pending +
-    ' force=' + (o.force ? 1 : 0) + ' dry=' + (o.dry ? 1 : 0) + ' root=' + root);
+    ' force=' + (o.force ? 1 : 0) + ' dry=' + (o.dry ? 1 : 0) + ' fps=' + (hasFps ? 1 : 0) +
+    ' root=' + root);
 
   // 全库已补齐（非 --force）：没有待办行，不必扫全表；已补齐的行就是本次的 skip
   if (!o.force && counts.pending === 0) {
@@ -459,12 +531,12 @@ function main() {
     let examined = 0;
     let cursor = null;
     while (examined < budget) {
-      const rows = fetchPage(o, mysqlExe, password, cursor, Math.min(PAGE, budget - examined));
+      const rows = fetchPage(o, mysqlExe, password, cursor, Math.min(PAGE, budget - examined), hasFps);
       if (rows.length === 0) break;
       for (const row of rows) {
         cursor = row.id;
         examined += 1;
-        const res = enrichOne(o, mysqlExe, password, ffprobe, root, row);
+        const res = enrichOne(o, mysqlExe, password, ffprobe, root, row, hasFps);
         if (!res.ok) {
           c.fail += 1;
           log('FAIL ' + row.rel + ': ' + res.reason);
@@ -481,7 +553,7 @@ function main() {
   // 剩余待补：跑完再数一次，让调用方一眼看到「还有多少要补」
   if (!o.dry) {
     try {
-      log('PENDING ' + readCounts(o, mysqlExe, password).pending);
+      log('PENDING ' + readCounts(o, mysqlExe, password, hasFps).pending);
     } catch (e) {
       warn('回读剩余条数失败：' + e.message);
     }

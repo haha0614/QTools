@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS media_video (
   w           INT           NULL                               COMMENT '视频宽度像素',
   h           INT           NULL                               COMMENT '视频高度像素',
   vcodec      VARCHAR(32)   NULL                               COMMENT '视频编码（h264 / vp9 / av1 …）',
+  fps         DECIMAL(8,3)  NULL                               COMMENT '平均帧率（帧/秒，P5.16 帧级 seek 用；NULL = 未探测）',
   browser_ok  TINYINT(1)    NOT NULL DEFAULT 1                 COMMENT '浏览器可否直接播放：1 可以 / 0 需转码或下载',
   poster_path VARCHAR(500)  NULL                               COMMENT '封面路径（相对站根，thumbs/v/<id>.jpg）',
   doc_path    VARCHAR(700)  NULL                               COMMENT '同名说明文件路径（含【概要】结构化标签）',

@@ -31,7 +31,10 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import com.qtools.common.annotation.Anonymous;
+import com.qtools.media.exception.MediaException;
 import com.qtools.media.service.IMediaFileService;
+import com.qtools.media.service.IMediaFrameService;
+import com.qtools.media.support.MediaFrameCommand;
 
 /**
  * 媒体文件流 对外公开接口（用户端免登录）
@@ -43,6 +46,8 @@ import com.qtools.media.service.IMediaFileService;
  *   <li>/thumb 与 /preview：thumbs 目录下 jpg，长缓存；</li>
  *   <li>/sprite、/preview/{id}：视频精灵图与预览视频（build-thumbs.js 按内容寻址落盘，
  *       默认不生成，产物缺失即 404；预览视频复用 /file 的 Range 实现）。</li>
+ *   <li>/frame/{id}?t=：P5.15 实时取帧（hover 精确到 1 秒），按整秒落盘永久缓存，
+ *       命中缓存不启动 ffmpeg；ffmpeg 缺失 503、该秒没有帧 404、并发超限 429。</li>
  * </ul>
  *
  * @author qtools
@@ -97,6 +102,9 @@ public class MediaFileController
     @Autowired
     private IMediaFileService mediaFileService;
 
+    @Autowired
+    private IMediaFrameService mediaFrameService;
+
     /**
      * 字节级 Range 流（等价 Node 版 /media）
      *
@@ -137,6 +145,66 @@ public class MediaFileController
         boolean contentAddressed = isContentHash(path.getFileName().toString());
         streamFile(path, request, response, "preview=" + id, begin,
                 contentAddressed ? IMMUTABLE_CACHE : REVALIDATE_CACHE);
+    }
+
+    /**
+     * 视频实时取帧（P5.15）：{@code /media/frame/{id}?t=<秒>} → 该时刻的 480 宽 jpeg 一帧
+     *
+     * <p><b>为什么不预生成</b>：hover 要 &lt;1 秒精度，2 小时片就是 7200 格 —— 精灵图单图放不下，
+     * 多图方案磁盘 1-2GB、生成 10 小时。所以改成按需实时取帧 + 按整秒永久缓存。</p>
+     *
+     * <p><b>缓存语义</b>：URL 里带的就是秒，同一个 URL 的字节永不变化 → {@code immutable} 长缓存，
+     * 浏览器第二次根本不回源；服务端命中 {@code <thumbs>/frames/<hash>/<秒>.jpg} 时也不启动 ffmpeg。</p>
+     *
+     * <p><b>t 的越界选择：拒绝（400），不是夹取</b>。夹取会把 {@code t=999999} 这样的请求悄悄
+     * 写成片尾那一秒的缓存（占盘且对调用方撒谎），而越界本身就是调用方的 bug。
+     * 唯一例外是 {@code t == dur}：它夹到 {@code dur-1}（{@code -ss dur} 已越过最后一帧，ffmpeg 不出片）。</p>
+     *
+     * @param id 视频 id（{@code sha1(rel)[:12]}）
+     * @param t  目标时刻（秒，可带小数；同一秒内的小数命中同一份缓存）
+     */
+    @GetMapping("/frame/{id}")
+    public ResponseEntity<byte[]> frame(@PathVariable("id") String id,
+            @RequestParam(value = "t", required = false) String t)
+    {
+        double raw = parseSecond(t);
+        int dur = mediaFrameService.durationOf(id);
+        if (dur > 0 && raw > dur)
+        {
+            throw MediaException.badRequest("t 越界：应在 [0, " + dur + "] 秒内");
+        }
+        int sec = MediaFrameCommand.secondOf(raw, dur);
+        byte[] bytes = mediaFrameService.frame(id, sec);
+        return ResponseEntity.ok()
+                .contentType(MediaType.IMAGE_JPEG)
+                // 按秒寻址：内容永不变化，永久缓存
+                .header(HttpHeaders.CACHE_CONTROL, IMMUTABLE_CACHE)
+                .header("X-Content-Type-Options", "nosniff")
+                .contentLength(bytes.length)
+                .body(bytes);
+    }
+
+    /** 取帧参数 t：缺失 / 非数字 / 负数一律 400（越界判定留给 duration 已知时再做） */
+    private static double parseSecond(String t)
+    {
+        if (t == null || t.trim().isEmpty())
+        {
+            throw MediaException.badRequest("missing t");
+        }
+        double value;
+        try
+        {
+            value = Double.parseDouble(t.trim());
+        }
+        catch (NumberFormatException e)
+        {
+            throw MediaException.badRequest("bad t");
+        }
+        if (Double.isNaN(value) || Double.isInfinite(value) || value < 0)
+        {
+            throw MediaException.badRequest("bad t");
+        }
+        return value;
     }
 
     /**

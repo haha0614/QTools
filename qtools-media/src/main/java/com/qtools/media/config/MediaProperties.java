@@ -27,6 +27,8 @@ import org.springframework.stereotype.Component;
  *   <tr><td>mysqlClient</td><td>空</td><td>不注入 {@code MS_MYSQL}，脚本自己从 PATH 找 mysql</td>
  *       <td>QTOOLS_MEDIA_MYSQLCLIENT</td></tr>
  *   <tr><td>maxTranscode</td><td>2</td><td>按 1 计</td><td>QTOOLS_MEDIA_MAXTRANSCODE</td></tr>
+ *   <tr><td>maxFrame</td><td>4</td><td>按 1 计；超额排队 2s，仍拿不到名额回 429</td>
+ *       <td>QTOOLS_MEDIA_MAXFRAME</td></tr>
  *   <tr><td>transcode.encoder</td><td>auto</td><td>非法值记 WARN 并按 auto 处理；
  *       实际生效值见 {@code GET /api/media/admin/config} 的 {@code media.transcode.effective}</td>
  *       <td>QTOOLS_MEDIA_TRANSCODE_ENCODER</td></tr>
@@ -105,6 +107,15 @@ public class MediaProperties
 
     /** 实时转码并发上限 */
     private int maxTranscode = 2;
+
+    /**
+     * 实时取帧（P5.15 hover 精确帧）并发上限，默认 4
+     *
+     * <p>与 {@link #maxTranscode} 分开：取帧是 1 帧就退出的短任务（100-400ms），转码是长流。
+     * 上限存在的意义只有一个 —— 鼠标横扫进度条时绝不能让 ffmpeg 把 CPU 抢满：
+     * 超额请求排队 {@code 2s} 仍拿不到名额就回 429，前端静默继续用精灵图。</p>
+     */
+    private int maxFrame = 4;
 
     /**
      * 实时转码的硬件加速配置：{@code qtools.media.transcode.*}
@@ -292,6 +303,16 @@ public class MediaProperties
     public void setMaxTranscode(int maxTranscode)
     {
         this.maxTranscode = maxTranscode;
+    }
+
+    public int getMaxFrame()
+    {
+        return maxFrame;
+    }
+
+    public void setMaxFrame(int maxFrame)
+    {
+        this.maxFrame = maxFrame;
     }
 
     public Transcode getTranscode()

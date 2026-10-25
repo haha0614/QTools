@@ -43,6 +43,15 @@ public class MediaVideo
 
     private String vcodec;
 
+    /**
+     * 平均帧率（帧/秒）—— P5.16 帧级 seek 用；<b>null = 未探测</b>（老库 / ffprobe 失败）。
+     *
+     * <p>由 {@code doc/media-import/enrich-meta.js} 用 ffprobe 的 avg_frame_rate（缺失时退
+     * r_frame_rate）回填，列是 {@code media_video.fps DECIMAL(8,3)}（见 doc/media_fps.sql）。
+     * 前端拿到 null 时不吸帧、不显示帧号，行为退回 P5.15。</p>
+     */
+    private BigDecimal fps;
+
     /** 浏览器能否直接播放（1/0） */
     private Integer browserOk;
 
@@ -190,6 +199,16 @@ public class MediaVideo
     public void setVcodec(String vcodec)
     {
         this.vcodec = vcodec;
+    }
+
+    public BigDecimal getFps()
+    {
+        return fps;
+    }
+
+    public void setFps(BigDecimal fps)
+    {
+        this.fps = fps;
     }
 
     public Integer getBrowserOk()

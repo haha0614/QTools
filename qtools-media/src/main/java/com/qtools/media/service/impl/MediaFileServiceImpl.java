@@ -55,7 +55,7 @@ public class MediaFileServiceImpl implements IMediaFileService
 
     private static final String PREVIEW_PHOTO_DIR = "pv";
 
-    /** 视频精灵图目录（build-thumbs.js --sprite，10x10 网格） */
+    /** 视频精灵图目录（build-thumbs.js --sprite，20x20 网格 = 400 格，成品 3200x1800） */
     private static final String SPRITE_DIR = "s";
 
     /** 视频预览视频目录（build-thumbs.js --preview，静音缩时） */
@@ -468,6 +468,12 @@ public class MediaFileServiceImpl implements IMediaFileService
             }
         }
         throw MediaException.notFound();
+    }
+
+    @Override
+    public Path thumbsRoot()
+    {
+        return thumbsDir();
     }
 
     @Override
