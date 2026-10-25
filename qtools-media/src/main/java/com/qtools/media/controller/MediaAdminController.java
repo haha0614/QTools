@@ -1,10 +1,18 @@
 package com.qtools.media.controller;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -23,9 +31,11 @@ import com.qtools.common.core.page.TableDataInfo;
 import com.qtools.common.enums.BusinessType;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.domain.MediaVideoMarker;
+import com.qtools.media.domain.dto.MediaScanRequest;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.service.IMediaAdminService;
 import com.qtools.media.service.IMediaEditPolicyService;
+import com.qtools.media.service.IMediaMaintenanceService;
 import com.qtools.media.service.IMediaOrganizeService;
 import com.qtools.media.service.IMediaScanService;
 import static com.qtools.media.support.MediaBodyParser.booleanValue;
@@ -66,6 +76,10 @@ public class MediaAdminController extends BaseController
 
     @Autowired
     private IMediaOrganizeService mediaOrganizeService;
+
+    /** 日常维护：多库根 media_root + 便携包导出产物 */
+    @Autowired
+    private IMediaMaintenanceService mediaMaintenanceService;
 
     /** 站端编辑策略（off / local / full）：管理端「编辑策略」面板读它、改它 */
     @Autowired
@@ -264,22 +278,32 @@ public class MediaAdminController extends BaseController
     /**
      * 触发一次扫描 / 生成类任务（异步，同一时刻只允许 1 个）
      *
-     * <p>body 可选字段：{@code mode} / {@code confirm} / {@code limit}；{@code type} 是旧参数，
-     * mode 缺省时按 type 兜底（full → scan，thumb → thumb），既有调用行为不变。</p>
+     * <p>body 可选字段：{@code mode} / {@code confirm} / {@code limit} / {@code albumMode} / {@code exclude} /
+     * {@code noFresh} / {@code force}；{@code type} 是旧参数，mode 缺省时按 type 兜底
+     * （full → scan，thumb → thumb），既有调用行为不变。</p>
      *
      * <table border="1">
      *   <caption>mode → 子进程命令</caption>
      *   <tr><th>mode</th><th>命令</th></tr>
-     *   <tr><td>scan</td><td>{@code node scanScript --out=…} + scanArgs（= 旧 type=full）</td></tr>
-     *   <tr><td>thumb</td><td>{@code node thumbScript} + thumbArgs（= 旧 type=thumb）</td></tr>
+     *   <tr><td>scan</td><td>{@code node scanScript --out=…} + scanArgs
+     *       [+ {@code --album-mode=dir|prefix}] [+ {@code --exclude=a,b}]（= 旧 type=full）</td></tr>
+     *   <tr><td>thumb</td><td>{@code node thumbScript} + thumbArgs [+ {@code --no-fresh}] [+ {@code --force}]
+     *       （= 旧 type=thumb）</td></tr>
      *   <tr><td>sprite</td><td>thumb 命令 + {@code --sprite}</td></tr>
      *   <tr><td>preview</td><td>thumb 命令 + {@code --preview}</td></tr>
      *   <tr><td>sprite,preview</td><td>thumb 命令 + {@code --sprite --preview}（组合模式只接受逗号分隔）</td></tr>
      *   <tr><td>gc</td><td>thumb 命令 + {@code --gc --yes}；必须 {@code confirm=true}，否则 400</td></tr>
+     *   <tr><td>enrich</td><td>{@code node enrichScript} + enrichArgs [+ {@code --limit=n}]（ffprobe 走 MS_FFPROBE）</td></tr>
+     *   <tr><td>backfill-hash</td><td>{@code node scanScript --out=…} + scanArgs + {@code --backfill-hash}</td></tr>
+     *   <tr><td>fix-poster</td><td>{@code node scanScript --out=…} + scanArgs + {@code --fix-poster-path}</td></tr>
+     *   <tr><td>export</td><td>{@code node exportScript} + exportArgs + {@code --out=<exportPath>/<yyyyMMdd-HHmmss>}；
+     *       产物目录由后端生成，任务结束写 {@code EXPORT ok dir=… files=… bytes=…} 日志行</td></tr>
      * </table>
      *
-     * <p>生成 / 删除开关全部由后端按 mode 追加，前端<b>不能</b>传任意子进程参数；
-     * {@code limit} 只对逐条生成的 mode（thumb / sprite / preview）生效，scan 与 gc 传了直接 400。</p>
+     * <p>生成 / 删除 / 回填开关全部由后端按 mode 追加，前端<b>不能</b>传任意子进程参数：
+     * {@code albumMode} 只接受 dir|prefix 且只对 scan 生效，{@code exclude} 只允许目录名文本
+     * （带空格 / 引号 / 分号一律 400），{@code noFresh} 与 {@code force} 只对 thumb 系生效且互斥，
+     * {@code limit} 只对 thumb / sprite / preview / enrich 生效（其余传了直接 400）。</p>
      */
     @PreAuthorize("@ss.hasPermi('media:admin:scan')")
     @Log(title = "媒体库-重建索引", businessType = BusinessType.OTHER)
@@ -287,8 +311,14 @@ public class MediaAdminController extends BaseController
     public Map<String, Object> scan(@RequestBody(required = false) String rawBody)
     {
         Map<String, Object> body = parseObject(rawBody, false);
-        return mediaScanService.start(stringValue(body.get("type")), stringValue(body.get("mode")),
+        MediaScanRequest request = new MediaScanRequest(stringValue(body.get("type")), stringValue(body.get("mode")),
                 booleanValue(body.get("confirm")), integerValue(body.get("limit")));
+        // 下面四个可选参数由服务层校验取值并拼进子进程命令；前端传不进任意参数
+        request.setAlbumMode(stringValue(body.get("albumMode")));
+        request.setExclude(stringValue(body.get("exclude")));
+        request.setNoFresh(booleanValue(body.get("noFresh")));
+        request.setForce(booleanValue(body.get("force")));
+        return mediaScanService.start(request);
     }
 
     /** 最近一次扫描任务 */
@@ -313,6 +343,97 @@ public class MediaAdminController extends BaseController
     public Map<String, Object> scanJob(@PathVariable("jobId") Long jobId)
     {
         return mediaScanService.getJob(jobId);
+    }
+
+    // ------------------------------------------------------------------ 多库根（media_root）
+
+    /**
+     * 多库根清单
+     *
+     * <p>返回 {@code [{id,name,path,kind,note,exists,readable,videoCount,photoCount,isDefault}]}：
+     * 「配了几个根、哪个根现在没挂上、每个根里有多少媒体」的唯一可视入口。条数由一次
+     * {@code group by root_id} 得到，{@code root_id} 为 NULL 的存量行并入默认根
+     * （{@code kind='root'} 的第一行）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/roots")
+    public List<Map<String, Object>> roots()
+    {
+        return mediaMaintenanceService.listRoots();
+    }
+
+    /** 新增库根：body {@code {name, path, kind?, note?}}；path 必须存在且是目录、不能与已有根重复 */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-新增库根", businessType = BusinessType.INSERT)
+    @PostMapping("/roots")
+    public Map<String, Object> createRoot(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaMaintenanceService.createRoot(stringValue(body.get("name")), stringValue(body.get("path")),
+                stringValue(body.get("kind")), stringValue(body.get("note")));
+    }
+
+    /**
+     * 改库根：body {@code {name?, path?, note?}}
+     *
+     * <p>{@code note} 出现且为空串 = 清空备注；不出现 = 保持原值。改 {@code path} <b>不会</b>自动重扫，
+     * 返回体的 {@code pathChanged} / {@code hint} 会提示还要跑一次 {@code mode=scan}。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-修改库根", businessType = BusinessType.UPDATE)
+    @PutMapping("/roots/{id}")
+    public Map<String, Object> updateRoot(@PathVariable("id") Integer id,
+            @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        String note = null;
+        if (body.containsKey("note"))
+        {
+            String raw = stringValue(body.get("note"));
+            note = raw == null ? "" : raw;
+        }
+        return mediaMaintenanceService.updateRoot(id, stringValue(body.get("name")),
+                stringValue(body.get("path")), note);
+    }
+
+    /** 删除库根：{@code media_video} / {@code media_photo} 仍有引用时 400，message 里带引用数 */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-删除库根", businessType = BusinessType.DELETE)
+    @DeleteMapping("/roots/{id}")
+    public Map<String, Object> deleteRoot(@PathVariable("id") Integer id)
+    {
+        return mediaMaintenanceService.deleteRoot(id);
+    }
+
+    // ------------------------------------------------------------------ 导出产物
+
+    /** 最近 10 次导出目录 + 每目录文件清单与大小（每个文件带下载地址） */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/export/list")
+    public List<Map<String, Object>> exportList()
+    {
+        return mediaMaintenanceService.exportList();
+    }
+
+    /**
+     * 下载一个导出产物：{@code GET /api/media/admin/export/download?dir=yyyyMMdd-HHmmss&file=media.sql.gz}
+     *
+     * <p>安全边界：{@code dir} 只接受 {@code yyyyMMdd-HHmmss}，{@code file} 的扩展名只接受
+     * sql / gz / json / zip，解析（含 {@code toRealPath()} 复核）后必须仍在 {@code qtools.media.exportPath}
+     * 之下——越界一律 403，不存在 404，名字不合法 400。以流式附件返回，不整文件读入内存。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/export/download")
+    public ResponseEntity<Resource> exportDownload(@RequestParam("dir") String dir,
+            @RequestParam("file") String file)
+    {
+        Path target = mediaMaintenanceService.resolveExportFile(dir, file);
+        ContentDisposition disposition = ContentDisposition.attachment()
+                .filename(target.getFileName().toString(), StandardCharsets.UTF_8).build();
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
+                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .body(new FileSystemResource(target));
     }
 
     // ------------------------------------------------------------------ 组织能力（M3-A：标签 / 评分 / 标记）

@@ -1,15 +1,15 @@
 # ============================================================
 # 便携化：以下所有绝对路径都由 -Dqtools.home=<盘上根目录> 推导
-#   启动示例：java -Dqtools.home=E:/111 -jar qtools-admin.jar ...
-#   不带 -D 时回落缺省值 E:/111（本机现状，保证老启动命令完全等价）
+#   启动示例：java -Dqtools.home=E:/111/project/QTools -jar qtools-admin.jar ...
+#   不带 -D 时回落缺省值 E:/111/project/QTools（搬迁后的新根）
 #   路径一律用正斜杠 /（Windows 上 Java 与 Node 都接受），避免 YAML 反斜杠转义
-# 注意：不要写成 home: ${qtools.home:E:/111} 这种自引用，
+# 注意：不要写成 home: ${qtools.home:E:/111/project/QTools} 这种自引用，
 #      解析时会触发 Circular placeholder reference
 # ============================================================
 # 项目相关配置
 qtools:
   # 盘上根目录：由 -Dqtools.home 覆盖（系统属性优先级高于本文件），此处为缺省值
-  home: E:/111
+  home: E:/111/project/QTools
   # 名称
   name: QTools
   # 版本
@@ -17,7 +17,7 @@ qtools:
   # 版权年份
   copyrightYear: 2026
   # 文件路径 示例（ Windows配置D:/qtools/uploadPath，Linux配置 /home/qtools/uploadPath）
-  profile: '${qtools.home:E:/111}/project/QTools/uploadPath'
+  profile: '${qtools.home:E:/111/project/QTools}/uploadPath'
   # 获取ip地址开关
   addressEnabled: false
   # 验证码类型 math 数字计算 char 字符验证
@@ -33,40 +33,58 @@ qtools:
   # 媒体库配置（M1 只读接口 + M3 管理端；媒体根只读，软删只移动不真删）
   media:
     # 媒体根目录（只读）
-    rootPath: '${qtools.home:E:/111}/视频'
+    rootPath: 'E:/111/视频'
     # 缩略图根目录（含 v/p/pv 三个子目录）
-    thumbsPath: '${qtools.home:E:/111}/data/media/thumbs'
+    thumbsPath: '${qtools.home:E:/111/project/QTools}/data/media/thumbs'
     # ffmpeg 可执行文件（管理端触发缩略图任务时以 MS_FFMPEG 注入子进程）
-    ffmpeg: '${qtools.home:E:/111}/data/media/runtime/ffmpeg.exe'
+    ffmpeg: '${qtools.home:E:/111/project/QTools}/data/media/runtime/ffmpeg.exe'
     # mysql 客户端可执行文件（管理端触发扫描/缩略图任务时以 MS_MYSQL 注入子进程）
     # 留空 = applyMysqlEnv 直接 return，MS_MYSQL 根本不注入（不等于「有默认值」），脚本只能自己从 PATH 找 mysql；
     # 本机 mysql 不在 PATH（只在 tools/mysql/bin 下），留空则管理端按钮一读库就失败，所以这里显式配死
-    mysqlClient: '${qtools.home:E:/111}/tools/mysql/bin/mysql.exe'
+    mysqlClient: '${qtools.home:E:/111/project/QTools}/tools/mysql/bin/mysql.exe'
     # 实时转码并发上限（超出返回 429）
     maxTranscode: 2
     # 回收站根目录（软删只在此目录下落文件，恢复时移回原位）
-    trashPath: '${qtools.home:E:/111}/视频/_媒体站/trash'
+    trashPath: 'E:/111/视频/_媒体站/trash'
     # 重建索引：Node 可执行文件与脚本（doc/media-import/scan-media.js，仓库版通用扫描）
-    nodePath: '${qtools.home:E:/111}/tools/node/node.exe'
-    scanScript: '${qtools.home:E:/111}/project/QTools/QTools/doc/media-import/scan-media.js'
+    nodePath: '${qtools.home:E:/111/project/QTools}/tools/node/node.exe'
+    scanScript: '${qtools.home:E:/111/project/QTools}/QTools/doc/media-import/scan-media.js'
     # 扫描产物目录（report.md 等），不写回仓库；--out= 由 Java 自动追加，新脚本不认识它，只 WARN 忽略
-    scanOutPath: '${qtools.home:E:/111}/project/QTools/uploadPath/media-scan'
+    scanOutPath: '${qtools.home:E:/111/project/QTools}/uploadPath/media-scan'
     # 路径必须写在这一行里：Java 只传 nodePath + 脚本 + 本行参数，媒体根不由任何键推导
     #   --root=              媒体根（rel_path 相对它计算；漏了脚本直接报错退出）
     #   --port=              本库实例是 3307，脚本默认 3306（漏了连错库，media_* 读出来是全空）
     #   --album-mode=prefix  本库按文件名前缀分册（见 doc/媒体库可移植性方案.md 的「数据现实」）
     # 绝不可带 --truncate（会清 6 张 media_* 表）；旧脚本的 --dir-mode=raw --allow-dup-dir 已无意义，删掉
-    scanArgs: '--root=${qtools.home:E:/111}/视频 --port=3307 --album-mode=prefix --secret=${qtools.home:E:/111}/project/QTools/QTools/qtools-admin/src/main/resources/secret.yml'
+    scanArgs: '--root=E:/111/视频 --port=3307 --album-mode=prefix --secret=${qtools.home:E:/111/project/QTools}/QTools/qtools-admin/src/main/resources/secret.yml'
     scanTimeoutMinutes: 10
     # 缩略图增量扫描（type=thumb）：doc/media-import/build-thumbs.js（仓库版：读库取 content_hash 再落盘）
-    thumbScript: '${qtools.home:E:/111}/project/QTools/QTools/doc/media-import/build-thumbs.js'
+    thumbScript: '${qtools.home:E:/111/project/QTools}/QTools/doc/media-import/build-thumbs.js'
     # 同样必须自带路径：Java 不传 --root/--thumbs；--port 漏了会连 3306 读到空库、一张都不生成
     #   --root=  媒体根（找源文件）  --thumbs=  缩略图根（v/p/pv 三个子目录都写在它下面）
     # 绝不可带 --force，那会忽略 mtime 重建全部 1 万多张
     # 顺序提醒：先跑本项（build-thumbs）生成 <content_hash>.jpg，再让扫描带上 --fix-poster-path 刷新一列
     #   media_video.poster_path（旧的 <id>.jpg → <content_hash>.jpg）；反过来设置，poster_path 会先指向还不存在的文件
-    thumbArgs: '--root=${qtools.home:E:/111}/视频 --thumbs=${qtools.home:E:/111}/data/media/thumbs --port=3307 --secret=${qtools.home:E:/111}/project/QTools/QTools/qtools-admin/src/main/resources/secret.yml'
+    thumbArgs: '--root=E:/111/视频 --thumbs=${qtools.home:E:/111/project/QTools}/data/media/thumbs --port=3307 --secret=${qtools.home:E:/111/project/QTools}/QTools/qtools-admin/src/main/resources/secret.yml'
     thumbTimeoutMinutes: 30
+    # ---------------- 维护面板新增的四个按钮（P1-A）：enrich / backfill-hash / fix-poster / export
+    # 元数据补齐（mode=enrich）：enrich-meta.js 用 ffprobe 读 dur/w/h/vcodec 回写 media_video（幂等）
+    #   enrichScript 缺省就是 ${qtools.home:E:/111/project/QTools}/QTools/doc/media-import/enrich-meta.js，一般不用配
+    #   enrichArgs 与 scanArgs 同理必须自带 --root= / --port= / --secret=（Java 不传媒体根与口令）
+    enrichArgs: '--root=E:/111/视频 --port=3307 --secret=${qtools.home:E:/111/project/QTools}/QTools/qtools-admin/src/main/resources/secret.yml'
+    enrichTimeoutMinutes: 120
+    # ffprobe 可执行文件：非空才以 MS_FFPROBE 注入子进程（与 MS_MYSQL 同风格，留空 = 脚本自己从 PATH 找）
+    # 优先级：--ffprobe= > MS_FFPROBE > PATH；ffprobe 完全不可用时 enrich-meta.js 直接退出码 1
+    ffprobe: '${qtools.home:E:/111/project/QTools}/data/media/runtime/ffprobe.exe'
+    # 维护类（mode=backfill-hash / fix-poster）：同样跑 scan-media.js，但不是「一次扫盘」10 分钟的量级
+    maintainTimeoutMinutes: 120
+    # 便携包导出（mode=export）：export-bundle.js，产物落 exportPath/<yyyyMMdd-HHmmss>/
+    #   exportArgs 必须自带 --mysql=（export-bundle.js 不认 MS_MYSQL，只认 --mysql=）与 --root= / --port= / --secret=
+    #   --out= 一律由 Java 追加（写了会被过滤）；mysqldump 默认从 mysql 客户端同目录找
+    #   exportPath 同时是下载接口的根：GET /api/media/admin/export/download 只允许读它下面
+    exportArgs: '--mysql=${qtools.home:E:/111/project/QTools}/tools/mysql/bin/mysql.exe --root=E:/111/视频 --port=3307 --secret=${qtools.home:E:/111/project/QTools}/QTools/qtools-admin/src/main/resources/secret.yml'
+    exportPath: '${qtools.home:E:/111/project/QTools}/data/media/export'
+    exportTimeoutMinutes: 60
     # 允许的跨域来源，逗号分隔；* 仅用于本地开发
     allowOrigins: '*'
   # 用户端账号体系（M5：app_* 表 / 独立 JWT / AppJwtFilter / 接口前缀 /api/app/**）
@@ -100,9 +118,9 @@ qtools:
   # 静态托管（M4-A：8080 单端口同时提供用户端 SPA + 管理端 SPA + 已有 API）
   web:
     # 用户端 SPA 构建产物（QTools-C：npm run build）
-    userDist: '${qtools.home:E:/111}/project/QTools/QTools-C/dist'
+    userDist: '${qtools.home:E:/111/project/QTools}/QTools-C/dist'
     # 管理端 SPA 构建产物（QTools-M：npm run build:prod）
-    adminDist: '${qtools.home:E:/111}/project/QTools/QTools-M/dist'
+    adminDist: '${qtools.home:E:/111/project/QTools}/QTools-M/dist'
     # 管理端 SPA 挂载路径（可配，且不得占用 API 前缀）
     adminPath: /admin-ui
 

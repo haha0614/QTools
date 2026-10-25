@@ -35,4 +35,47 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         select id from media_root where kind = 'root' order by id asc limit 1
     </select>
 
+    <select id="selectRootByPath" parameterType="java.lang.String" resultMap="MediaRootResult">
+        <include refid="selectRootVo"/>
+        where path = #{path} limit 1
+    </select>
+
+    <!-- 写路径只在管理端「多库根」面板走，引用计数检查在服务层做 -->
+    <insert id="insertRoot" parameterType="com.qtools.media.domain.MediaRoot" useGeneratedKeys="true" keyProperty="id">
+        insert into media_root (name, path, kind, note, created_at)
+        values (#{name}, #{path}, #{kind}, #{note}, now())
+    </insert>
+
+    <update id="updateRoot" parameterType="com.qtools.media.domain.MediaRoot">
+        update media_root
+        <set>
+            <if test="name != null">name = #{name},</if>
+            <if test="path != null">path = #{path},</if>
+            <if test="kind != null">kind = #{kind},</if>
+            <if test="note != null">note = #{note},</if>
+        </set>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteRootById" parameterType="java.lang.Integer">
+        delete from media_root where id = #{id}
+    </delete>
+
+    <!-- 一次 group by 拿全部根的条数：root_id 为 NULL 的存量行自成一组，服务层并入默认根 -->
+    <select id="countVideosByRoot" resultType="java.util.Map">
+        select root_id as rootId, count(*) as cnt from media_video group by root_id
+    </select>
+
+    <select id="countPhotosByRoot" resultType="java.util.Map">
+        select root_id as rootId, count(*) as cnt from media_photo group by root_id
+    </select>
+
+    <select id="countVideoByRootId" parameterType="java.lang.Integer" resultType="int">
+        select count(*) from media_video where root_id = #{id}
+    </select>
+
+    <select id="countPhotoByRootId" parameterType="java.lang.Integer" resultType="int">
+        select count(*) from media_photo where root_id = #{id}
+    </select>
+
 </mapper>

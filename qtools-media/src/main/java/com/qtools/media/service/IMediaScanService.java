@@ -2,11 +2,13 @@ package com.qtools.media.service;
 
 import java.util.List;
 import java.util.Map;
+import com.qtools.media.domain.dto.MediaScanRequest;
 
 /**
- * 重建索引（扫描任务） 服务层
+ * 重建索引 / 维护类任务 服务层
  *
- * <p>异步执行、同一时刻只允许 1 个 running；子进程复用 {@code doc/media-import/import.js}。</p>
+ * <p>异步执行、同一时刻只允许 1 个 running；子进程按 mode 走
+ * {@code doc/media-import/} 下的 scan-media.js / build-thumbs.js / enrich-meta.js / export-bundle.js。</p>
  *
  * @author qtools
  */
@@ -22,16 +24,17 @@ public interface IMediaScanService
     Map<String, Object> start(String type);
 
     /**
-     * 触发一次扫描 / 生成类任务
+     * 触发一次扫描 / 维护类任务
      *
-     * @param type      旧参数：mode 为空时兜底（full → scan，thumb → thumb）
-     * @param mode      {@code scan | thumb | sprite | preview | gc | sprite,preview}，可为空
-     * @param gcConfirm mode=gc 时必须为 true，否则 400（真删派生文件）
-     * @param limit     只处理前 n 条（仅 thumb / sprite / preview 生效，0 或 null = 不限）
-     * @return 任务视图（含 jobId）
+     * <p>mode 取值：{@code scan | thumb | sprite | preview | sprite,preview | gc | enrich |
+     * backfill-hash | fix-poster | export}；可选参数 albumMode / exclude（仅 scan）、noFresh / force
+     * （仅 thumb 系）、limit（仅 thumb 系 / enrich）。所有子进程参数由服务层按白名单拼装。</p>
+     *
+     * @param request 请求参数（type 是旧参数：mode 为空时兜底 full → scan、thumb → thumb）
+     * @return 任务视图（含 jobId；mode=export 时另含 exportDir）
      * @throws com.qtools.media.exception.MediaException 400 参数非法 / 409 已有任务在运行
      */
-    Map<String, Object> start(String type, String mode, boolean gcConfirm, Integer limit);
+    Map<String, Object> start(MediaScanRequest request);
 
     /** 最近一次任务（无任务时返回 null 字段的空视图） */
     Map<String, Object> latest();

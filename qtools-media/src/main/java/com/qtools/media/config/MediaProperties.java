@@ -1,5 +1,6 @@
 package com.qtools.media.config;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
@@ -40,6 +41,19 @@ import org.springframework.stereotype.Component;
  *   <tr><td>thumbArgs</td><td>空（= 增量全量跑一遍）</td><td>-</td><td>QTOOLS_MEDIA_THUMBARGS</td></tr>
  *   <tr><td>thumbTimeoutMinutes</td><td>30</td><td>-</td><td>QTOOLS_MEDIA_THUMBTIMEOUTMINUTES</td></tr>
  *   <tr><td>deriveTimeoutMinutes</td><td>720</td><td>-</td><td>QTOOLS_MEDIA_DERIVETIMEOUTMINUTES</td></tr>
+ *   <tr><td>enrichScript</td><td>{@code <home>/QTools/doc/media-import/enrich-meta.js}</td>
+ *       <td>enrich 任务启动即报「enrichScript 未配置」</td><td>QTOOLS_MEDIA_ENRICHSCRIPT</td></tr>
+ *   <tr><td>enrichArgs</td><td>空（= 不带附加参数）</td><td>-</td><td>QTOOLS_MEDIA_ENRICHARGS</td></tr>
+ *   <tr><td>enrichTimeoutMinutes</td><td>120</td><td>-</td><td>QTOOLS_MEDIA_ENRICHTIMEOUTMINUTES</td></tr>
+ *   <tr><td>ffprobe</td><td>空</td><td>不注入 {@code MS_FFPROBE}，脚本自己从 PATH 找 ffprobe</td>
+ *       <td>QTOOLS_MEDIA_FFPROBE</td></tr>
+ *   <tr><td>exportScript</td><td>{@code <home>/QTools/doc/media-import/export-bundle.js}</td>
+ *       <td>export 任务启动即报「exportScript 未配置」</td><td>QTOOLS_MEDIA_EXPORTSCRIPT</td></tr>
+ *   <tr><td>exportArgs</td><td>空（= 不带附加参数）</td><td>-</td><td>QTOOLS_MEDIA_EXPORTARGS</td></tr>
+ *   <tr><td>exportPath</td><td>{@code <home>/data/media/export}</td><td>不落导出目录</td>
+ *       <td>QTOOLS_MEDIA_EXPORTPATH</td></tr>
+ *   <tr><td>exportTimeoutMinutes</td><td>60</td><td>-</td><td>QTOOLS_MEDIA_EXPORTTIMEOUTMINUTES</td></tr>
+ *   <tr><td>maintainTimeoutMinutes</td><td>120</td><td>-</td><td>QTOOLS_MEDIA_MAINTAINTIMEOUTMINUTES</td></tr>
  *   <tr><td>allowOrigins</td><td>*</td><td>-</td><td>QTOOLS_MEDIA_ALLOWORIGINS</td></tr>
  * </table>
  *
@@ -128,6 +142,60 @@ public class MediaProperties
      * GC 要扫 {@code v/ s/ pv2/} 三个目录，一并按这一档放宽。超时强杀子进程并置 failed。</p>
      */
     private int deriveTimeoutMinutes = 720;
+
+    // ------------------------------------------------------------------ 元数据补齐 / 便携包导出（P1-A）
+
+    /**
+     * 元数据补齐脚本（{@code mode=enrich} 执行它）
+     *
+     * <p>留空时回落到 {@code <qtools.home>/QTools/doc/media-import/enrich-meta.js}；脚本用 ffprobe
+     * 读出 dur / w / h / vcodec 四列回写 media_video，幂等（补齐后自动退出待补集合）。</p>
+     */
+    private String enrichScript = "";
+
+    /** 元数据补齐附加参数；空 = 不带附加参数（脚本的 --root= / --port= / --secret= 必须写在这里） */
+    private String enrichArgs = "";
+
+    /** 元数据补齐超时（分钟）：ffprobe 逐条探测比扫盘慢得多 */
+    private int enrichTimeoutMinutes = 120;
+
+    /**
+     * ffprobe 可执行文件路径；留空 = 不注入 {@code MS_FFPROBE}
+     *
+     * <p>与 {@link #mysqlClient} 同一套路：非空才注入子进程环境变量，脚本的优先级是
+     * {@code --ffprobe=} &gt; {@code MS_FFPROBE} &gt; {@code PATH}。enrich-meta.js 在 ffprobe
+     * 不可用时直接退出码 1（每条都会失败，没有继续的意义）。</p>
+     */
+    private String ffprobe = "";
+
+    /** 便携包导出脚本（{@code mode=export} 执行它）；留空回落到 {@code <home>/QTools/doc/media-import/export-bundle.js} */
+    private String exportScript = "";
+
+    /** 便携包导出附加参数；空 = 不带附加参数（--root= / --port= / --secret= 必须写在这里） */
+    private String exportArgs = "";
+
+    /**
+     * 便携包导出根目录；留空回落到 {@code <qtools.home>/data/media/export}
+     *
+     * <p>每次导出落 {@code <exportPath>/<yyyyMMdd-HHmmss>/}：目录名由后端生成（前端传不进任意子目录），
+     * 下载接口只允许读这个根之下的文件。</p>
+     */
+    private String exportPath = "";
+
+    /** 便携包导出超时（分钟）：千万级表的 dump 也就分钟级，60 分钟已足够宽裕 */
+    private int exportTimeoutMinutes = 60;
+
+    /**
+     * 维护类任务的超时（分钟），默认 120
+     *
+     * <p>{@code mode=backfill-hash} 要给全部行算 content_hash、{@code mode=fix-poster} 只刷一列；
+     * 两者都跑 scan-media.js，但都不是「一次扫盘」那 10 分钟的量级。</p>
+     */
+    private int maintainTimeoutMinutes = 120;
+
+    /** 盘上根目录 {@code qtools.home}：只用于推导 enrichScript / exportScript / exportPath 的缺省值 */
+    @Value("${qtools.home:}")
+    private String home;
 
     /**
      * 允许的跨域来源，逗号分隔；* 表示不限（本地开发）
@@ -296,5 +364,121 @@ public class MediaProperties
     public void setDeriveTimeoutMinutes(int deriveTimeoutMinutes)
     {
         this.deriveTimeoutMinutes = deriveTimeoutMinutes;
+    }
+
+    // ------------------------------------------------------------------ 元数据补齐 / 便携包导出（P1-A）
+
+    /** 元数据补齐脚本：未显式配置时回落到 {@code <qtools.home>/QTools/doc/media-import/enrich-meta.js} */
+    public String getEnrichScript()
+    {
+        return defaultUnderHome(enrichScript, "QTools/doc/media-import/enrich-meta.js");
+    }
+
+    public void setEnrichScript(String enrichScript)
+    {
+        this.enrichScript = enrichScript;
+    }
+
+    public String getEnrichArgs()
+    {
+        return enrichArgs;
+    }
+
+    public void setEnrichArgs(String enrichArgs)
+    {
+        this.enrichArgs = enrichArgs;
+    }
+
+    public int getEnrichTimeoutMinutes()
+    {
+        return enrichTimeoutMinutes;
+    }
+
+    public void setEnrichTimeoutMinutes(int enrichTimeoutMinutes)
+    {
+        this.enrichTimeoutMinutes = enrichTimeoutMinutes;
+    }
+
+    /** ffprobe 路径：留空 = 不注入 {@code MS_FFPROBE}（与 mysqlClient 同风格） */
+    public String getFfprobe()
+    {
+        return ffprobe;
+    }
+
+    public void setFfprobe(String ffprobe)
+    {
+        this.ffprobe = ffprobe;
+    }
+
+    /** 便携包导出脚本：未显式配置时回落到 {@code <qtools.home>/QTools/doc/media-import/export-bundle.js} */
+    public String getExportScript()
+    {
+        return defaultUnderHome(exportScript, "QTools/doc/media-import/export-bundle.js");
+    }
+
+    public void setExportScript(String exportScript)
+    {
+        this.exportScript = exportScript;
+    }
+
+    public String getExportArgs()
+    {
+        return exportArgs;
+    }
+
+    public void setExportArgs(String exportArgs)
+    {
+        this.exportArgs = exportArgs;
+    }
+
+    /** 导出根目录：未显式配置时回落到 {@code <qtools.home>/data/media/export} */
+    public String getExportPath()
+    {
+        return defaultUnderHome(exportPath, "data/media/export");
+    }
+
+    public void setExportPath(String exportPath)
+    {
+        this.exportPath = exportPath;
+    }
+
+    public int getExportTimeoutMinutes()
+    {
+        return exportTimeoutMinutes;
+    }
+
+    public void setExportTimeoutMinutes(int exportTimeoutMinutes)
+    {
+        this.exportTimeoutMinutes = exportTimeoutMinutes;
+    }
+
+    public int getMaintainTimeoutMinutes()
+    {
+        return maintainTimeoutMinutes;
+    }
+
+    public void setMaintainTimeoutMinutes(int maintainTimeoutMinutes)
+    {
+        this.maintainTimeoutMinutes = maintainTimeoutMinutes;
+    }
+
+    /**
+     * 缺省值推导：显式配置优先，否则拼到 {@code qtools.home} 之下
+     *
+     * <p>{@code qtools.home} 本身也没给时返回空串，让调用方报「未配置」而不是给出一个假的相对路径——
+     * 相对路径在子进程工作目录（{@code scanOutPath}）下解析，症状是「文件不存在」而不是「少配了一项」。</p>
+     */
+    private String defaultUnderHome(String value, String relative)
+    {
+        if (value != null && !value.trim().isEmpty())
+        {
+            return value.trim();
+        }
+        if (home == null || home.trim().isEmpty())
+        {
+            return "";
+        }
+        String base = home.trim().replace('\\', '/');
+        return base.endsWith("/") ? base + relative : base + "/" + relative;
     }
 }

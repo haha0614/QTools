@@ -247,8 +247,9 @@ ffprobe 报错）只打 `FAIL <rel_path>: <原因>` 并继续，**退出码仍�
     `--fix-poster-path`**（该模式只 UPDATE `poster_path` 一列、不扫盘、不需要 `--root`），
     存量行才会从旧的 `<id>.jpg` 改成 `<content_hash>.jpg` 并与磁盘文件对上；反序则指向还不存在的文件。
     旧的 `<id>.jpg` 文件不会被删除（派生资源 GC 仍待做）。
-  - 别名表只沉淀不消费（后端待实现读别名）；`enrich-meta.js` 还没接入管理端按钮（没有 `enrichScript`
-    配置项，也没有 `MS_FFPROBE` 注入）。
+  - 别名表只沉淀不消费（后端待实现读别名）。
+  - `enrich-meta.js` 已接入管理端按钮（`mode=enrich`，配置项 `enrichScript` / `enrichArgs`，并以
+    `MS_FFPROBE` 注入 ffprobe），见下面第 6 节的 mode 一览表。
 
 ---
 
@@ -280,9 +281,9 @@ qtools:
 - ffmpeg / mysql 路径由 Java 通过环境变量 `MS_FFMPEG` / `MS_MYSQL` 传给脚本（优先级：`--ffmpeg=` > `MS_FFMPEG` > `PATH`、`--mysql=` > `MS_MYSQL` > `PATH`）；配了 `qtools.media.mysqlClient` 才注入 `MS_MYSQL`，留空时脚本自己找 `PATH`。
 - 缩略图产物从 P4 起按 `v/<content_hash>.jpg` 落盘：老 `v/<id>.jpg` 不会被删，服务端先找 hash 再回退 id，
   所以「换脚本后老图还能显示」是设计如此，不是没生效——想确认的话看 `--thumbs` 下有没有新的 `v/<16位hex>.jpg`。
-- **`enrich-meta.js` 暂时没有对应的管理端配置项（待实现）**：`MediaProperties` 只有 `scanScript` /
-  `thumbScript` / `scanArgs` / `thumbArgs`，且 `MediaScanServiceImpl` 只注入 `MS_FFMPEG` / `MS_MYSQL`。
-  要用 ffprobe 补元数据，现阶段手工跑（见第 2 节第 3 步）。
+- **元数据补齐已接按钮**：`mode=enrich` 跑 `enrichScript`（默认就是本目录的 `enrich-meta.js`），
+  ffprobe 走配置项 `qtools.media.ffprobe` → 环境变量 `MS_FFPROBE`；参数写在 `enrichArgs` 里
+  （与 `scanArgs` 同理必须自带 `--root= --port= --secret=`）。逐字的参数清单见第 6 节。
 
 ### 5. 常见坑（本机实测）
 
@@ -298,6 +299,64 @@ qtools:
 - **工具不在 PATH**：`mysql` / `mysqldump` / `ffmpeg` / `ffprobe` 找不到时分别用
   `--mysql= --dump= --ffmpeg= --ffprobe=` 指定。`enrich-meta.js` 在 **ffprobe 不可用**时直接退出码 1
   （每一条都会失败，没有继续的意义），这一点和「单条失败只计数」不同。
+
+### 6. 维护面板对应的 mode 一览表
+
+管理端「维护 / 重建」面板只发一个接口：`POST /api/media/admin/scan`，body 里给 `mode` 和少量可选参数
+（`limit` / `albumMode` / `exclude` / `noFresh` / `force` / `confirm`）。**所有子进程参数都由后端按 mode
+从白名单拼装**（`MediaScanServiceImpl` 的 `buildCommand` 系列），前端传不进任意参数。
+
+| mode | 脚本 | 后端追加的关键参数 | 超时（配置项 / 默认） |
+| :--- | :--- | :--- | :--- |
+| `scan` | `scan-media.js` | `--out=<scanOutPath>` + `scanArgs`；可选 `albumMode=dir\|prefix` → `--album-mode=`（**替换** `scanArgs` 里的同名参数）、`exclude=...` → `--exclude=` | `scanTimeoutMinutes` / 10 分钟 |
+| `thumb` | `build-thumbs.js` | `thumbArgs`；可选 `noFresh=true` → `--no-fresh`、`force=true` → `--force`、`limit=N` → `--limit=N` | `thumbTimeoutMinutes` / 30 分钟 |
+| `sprite` / `preview` / `sprite,preview` | `build-thumbs.js` | `thumbArgs` + `--sprite` / `--preview`（可组合）+ 可选 `limit=N` | `deriveTimeoutMinutes` / 720 分钟 |
+| `gc` | `build-thumbs.js` | `thumbArgs` + `--gc --yes`；**必须** `confirm=true`，否则 400 | `deriveTimeoutMinutes` / 720 分钟 |
+| `enrich` | `enrich-meta.js` | `enrichArgs`；可选 `limit=N` → `--limit=N` | `enrichTimeoutMinutes` / 120 分钟 |
+| `backfill-hash` | `scan-media.js` | `--out=<scanOutPath>` + `scanArgs` + `--backfill-hash` | `maintainTimeoutMinutes` / 120 分钟 |
+| `fix-poster` | `scan-media.js` | `--out=<scanOutPath>` + `scanArgs` + `--fix-poster-path` | `maintainTimeoutMinutes` / 120 分钟 |
+| `export` | `export-bundle.js` | `exportArgs` + `--out=<exportPath>/<yyyyMMdd-HHmmss>`（目录由后端生成） | `exportTimeoutMinutes` / 60 分钟 |
+
+参数规则（不合法一律 400，不静默忽略）：
+
+- `albumMode` 只接受 `dir` / `prefix`，且只对 `scan` 生效；给了就整体替换 `scanArgs` 里的 `--album-mode=`
+  （同一个参数出现两次时脚本只认先到的那次）。
+- `exclude` 只允许目录名文本（字母数字 / CJK / `.` `_` `-` `,`），出现空格、引号、分号、`&`、`|`、`<`、`>`
+  等一律 400；只对 `scan` 生效。
+- `noFresh` / `force` 只对 `thumb` / `sprite` / `preview` 生效，且二者互斥（同时给 400）。
+- `limit` 只对 `thumb` / `sprite` / `preview` / `enrich` 生效；`scan` / `gc` / `backfill-hash` /
+  `fix-poster` / `export` 传了直接 400。
+- 受管开关（`--force` / `--no-fresh` / `--sprite` / `--preview` / `--gc` / `--yes` / `--backfill-hash` /
+  `--fix-poster-path` / `--out=` / `--limit=`）只能由后端追加：写进 `scanArgs` / `thumbArgs` /
+  `enrichArgs` / `exportArgs` 会被过滤掉；`--truncate` 永远被过滤。
+
+环境变量注入（配了才注入，留空 = 脚本自己从 `PATH` 找）：`MS_FFMPEG`（`qtools.media.ffmpeg`）、
+`MS_FFPROBE`（`qtools.media.ffprobe`，`enrich-meta.js` 用）、`MS_MYSQL`（`qtools.media.mysqlClient`）。
+注意 `export-bundle.js` 不认 `MS_MYSQL`，所以 `exportArgs` 里必须显式写 `--mysql=<mysql.exe>`
+（`mysqldump` 默认从 mysql 客户端同目录找）。
+
+### 7. 导出产物在哪、怎么下载
+
+- 目录：`<qtools.media.exportPath>/<yyyyMMdd-HHmmss>/`，默认 `exportPath` 是
+  `<qtools.home>/data/media/export`（见 `application.yml` 的 media 段）。目录名由后端生成，
+  前端只能触发、不能指定写到哪儿。
+- 一次导出的产物（与 `export-bundle.js` 一致）：`manifest.json`、`media.sql.gz`、`user-state.json`；
+  带 `--with-thumbs` 时还有 `thumbs/` 子目录。
+- 任务结束后 job 日志尾部有一行可解析的汇总（`GET /api/media/admin/scan/{jobId}` 的 `logTail` 里）：
+
+  ```text
+  EXPORT ok dir=E:/111/project/QTools/data/media/export/20261025-085445 files=3 bytes=231702 names=manifest.json,media.sql.gz,user-state.json
+  ```
+
+  失败时是 `EXPORT fail …`；此时 job 的 `total` / `done` 就是文件数。
+- 列表：`GET /api/media/admin/export/list`（权限 `media:admin:list`）回最近 10 次导出目录 + 每目录
+  文件清单与大小（子目录如 `thumbs/` 只给总字节）；每个文件带 `url` 字段可直接下载。
+- 下载：`GET /api/media/admin/export/download?dir=<yyyyMMdd-HHmmss>&file=<名字>`，流式附件返回
+  （`Content-Disposition: attachment`）。只允许 `dir` 匹配 `^[0-9]{8}-[0-9]{6}$`、`file` 匹配
+  `^[A-Za-z0-9._-]+\.(sql|gz|json|zip)$`，且解析（含 `toRealPath()` 复核）后必须仍在 `exportPath`
+  之内——越界 403、不存在 404、名字不合法 400。
+
+---
 
 ## 历史迁移：旧 Node 站 `index.json` → MySQL（`import.js`，保留）
 

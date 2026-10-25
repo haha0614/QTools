@@ -5,6 +5,8 @@ import java.io.File;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Date;
@@ -28,21 +30,30 @@ import com.qtools.common.utils.DateUtils;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.config.MediaProperties;
 import com.qtools.media.domain.MediaScanJob;
+import com.qtools.media.domain.dto.MediaScanRequest;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaScanJobMapper;
 import com.qtools.media.service.IMediaIndexService;
 import com.qtools.media.service.IMediaScanService;
 
 /**
- * 重建索引任务 服务实现
+ * 重建索引 / 维护类任务 服务实现
  *
- * <p>执行的是 {@code doc/media-import/import.js}（M1 已验收的迁移脚本），它是 upsert 语义：</p>
+ * <p>按 mode 选脚本，四种脚本各管一件事（命令行全部由本类按白名单拼装）：</p>
+ * <ul>
+ *   <li>{@code scan-media.js}：{@code mode=scan}（落库 type=full）、{@code backfill-hash}、{@code fix-poster}；</li>
+ *   <li>{@code build-thumbs.js}：{@code mode=thumb} / {@code sprite} / {@code preview} / {@code sprite,preview} / {@code gc}；</li>
+ *   <li>{@code enrich-meta.js}：{@code mode=enrich}（ffprobe 读 dur/w/h/vcodec 回写）；</li>
+ *   <li>{@code export-bundle.js}：{@code mode=export}（产物落 {@code <exportPath>/<yyyyMMdd-HHmmss>/}）。</li>
+ * </ul>
+ *
+ * <p>扫描脚本是 upsert 语义，因此：</p>
  * <ul>
  *   <li>绝不带 {@code --truncate}：带了对 media_* 先 DELETE，会清掉管理端的 hidden 状态，
  *       并且 media_favorite / media_recent 里的 target_id 会变成悬空引用；</li>
- *   <li>必须带 {@code --dir-mode=raw --allow-dup-dir}：默认 mark 模式会给共用同一物理目录的
- *       念念 144 本相册的 dir 追加 " #&lt;albumId&gt;"，等于每次扫描都改写 media_album.dir；</li>
- *   <li>{@code --out} 指到 uploadPath 下，脚本的 import.sql / report.md 不再写回仓库。</li>
+ *   <li>同一组开关（{@code --force} / {@code --gc} / {@code --backfill-hash} / {@code --out=} 等）
+ *       只能由本类按 mode 追加，写在配置里也会被过滤，避免「按钮点的是增量、实际跑的是全量重建」；</li>
+ *   <li>{@code --out} 指到 uploadPath 下，脚本产物不再写回仓库。</li>
  * </ul>
  *
  * <p>并发保护用「内存标记 + DB running 计数」双保险：内存标记挡住同 JVM 的并发请求，
@@ -86,20 +97,60 @@ public class MediaScanServiceImpl implements IMediaScanService
     private static final String DATE_PATTERN = "yyyy-MM-dd HH:mm:ss";
 
     /** 允许的 mode 原子值 */
-    private static final List<String> MODES = List.of("scan", "thumb", "sprite", "preview", "gc");
+    private static final List<String> MODES = List.of("scan", "thumb", "sprite", "preview", "gc",
+            "enrich", "backfill-hash", "fix-poster", "export");
 
     /** 只能单独使用的 mode（sprite / preview 允许组合成 sprite,preview） */
-    private static final List<String> SINGLE_MODES = List.of("scan", "thumb", "gc");
+    private static final List<String> SINGLE_MODES = List.of("scan", "thumb", "gc",
+            "enrich", "backfill-hash", "fix-poster", "export");
 
     /** limit 上限：176 个视频的真实规模下，超过这个数只可能是手滑 */
     private static final int MAX_LIMIT = 10000;
 
+    /** 脚本种类：决定用哪个 node 脚本、解析哪种输出行、注入哪些环境变量 */
+    private static final String SCRIPT_SCAN = "scan";
+
+    private static final String SCRIPT_THUMB = "thumb";
+
+    private static final String SCRIPT_ENRICH = "enrich";
+
+    private static final String SCRIPT_EXPORT = "export";
+
+    /** 落库 {media_scan_job.type} 的值：scan 沿用旧值 full，其余与 mode 同名 */
+    private static final String TYPE_SCAN = "full";
+
+    private static final String TYPE_THUMB = "thumb";
+
+    private static final String TYPE_GC = "gc";
+
+    private static final String TYPE_ENRICH = "enrich";
+
+    private static final String TYPE_BACKFILL = "backfill-hash";
+
+    private static final String TYPE_FIX_POSTER = "fix-poster";
+
+    private static final String TYPE_EXPORT = "export";
+
     /** 缩略图脚本的受管开关：一律由 buildThumbCommand 按 mode 追加，配置里写了也过滤 */
     private static final List<String> THUMB_MANAGED_ARGS =
-            List.of("--force", "--sprite", "--preview", "--gc", "--yes", "-y");
+            List.of("--force", "--no-fresh", "--sprite", "--preview", "--gc", "--yes", "-y");
 
     /** 扫描脚本的禁用参数：--truncate 会清掉 hidden 与收藏引用 */
     private static final List<String> SCAN_FORBIDDEN_ARGS = List.of("--truncate");
+
+    /** 扫描脚本的受管开关：由 mode 决定，配置里写了也过滤（否则 mode=scan 会被配置改成回填） */
+    private static final List<String> SCAN_MANAGED_ARGS = List.of("--backfill-hash", "--fix-poster-path");
+
+    /** 导出目录名（yyyyMMdd-HHmmss）：既是产物目录名，也是下载接口唯一接受的 dir 形状 */
+    private static final DateTimeFormatter EXPORT_DIR_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+
+    /** enrich-meta.js 收尾：enrich ok=12 skip=3 fail=0 seconds=8 */
+    private static final Pattern ENRICH_DONE = Pattern.compile("^enrich\\s+ok=(\\d+)\\s+skip=(\\d+)\\s+fail=(\\d+)");
+
+    /** exclude 的长度上限与禁用字符：只允许目录名文本，逗号分隔多个 */
+    private static final int MAX_EXCLUDE_CHARS = 200;
+
+    private static final String EXCLUDE_FORBIDDEN_CHARS = " \t\r\n\"'`;$&|<>()\\*?!~{}[]=";
 
     @Autowired
     private MediaScanJobMapper mediaScanJobMapper;
@@ -131,25 +182,37 @@ public class MediaScanServiceImpl implements IMediaScanService
     @Override
     public Map<String, Object> start(String type)
     {
-        return start(type, null, false, null);
+        return start(new MediaScanRequest(type, null, false, null));
     }
 
+    /**
+     * 触发一次扫描 / 维护任务（异步，同一时刻只允许 1 个）
+     *
+     * <p>mode 与可选参数先在这里全量校验（不合法一律 400），再按 mode 建 job：配置缺失 / 参数非法
+     * 都发生在写 {@code media_scan_job} 之前，不会留下一条 running 的假任务。</p>
+     */
     @Override
-    public Map<String, Object> start(String type, String mode, boolean gcConfirm, Integer limit)
+    public Map<String, Object> start(MediaScanRequest request)
     {
-        String jobType = normalizeMode(type, mode);
-        if ("gc".equals(jobType) && !gcConfirm)
+        MediaScanRequest req = request == null ? new MediaScanRequest(null, null, false, null) : request;
+        String jobType = normalizeMode(req.getType(), req.getMode());
+        if (TYPE_GC.equals(jobType) && !req.isConfirm())
         {
             // 派生文件 GC 是真删：不能只靠前端弹窗，后端没有 confirm=true 一律拒绝
             throw MediaException.badRequest("mode=gc 需要显式 confirm=true（会真删 v/ s/ pv2/ 下的孤儿派生文件）");
         }
-        int limited = normalizeLimit(jobType, limit);
+        normalizeModeOptions(jobType, req);
+        req.setLimit(normalizeLimit(jobType, req.getLimit()));
         // 配置缺失必须在建 job 之前就报可读错误：否则子进程只会给 CreateProcess error=2 / NPE
-        boolean thumb = isThumbScript(jobType);
+        String scriptKind = scriptKindOf(jobType);
         requireConfigured(mediaProperties.getNodePath(), "nodePath");
         requireConfigured(mediaProperties.getScanOutPath(), "scanOutPath");
-        requireConfigured(thumb ? mediaProperties.getThumbScript() : mediaProperties.getScanScript(),
-                thumb ? "thumbScript" : "scanScript");
+        requireConfigured(scriptOf(scriptKind), scriptKeyOf(scriptKind));
+        if (SCRIPT_EXPORT.equals(scriptKind))
+        {
+            // 导出目录由后端生成：前端只能触发，不能指定写到哪儿（下载接口也只认这个形状）
+            req.setExportDir(exportDirOf());
+        }
         synchronized (startLock)
         {
             if (runningJobId.get() != 0L || mediaScanJobMapper.countRunning() > 0)
@@ -161,10 +224,148 @@ public class MediaScanServiceImpl implements IMediaScanService
             job.setStatus(STATUS_RUNNING);
             mediaScanJobMapper.insertJob(job);
             runningJobId.set(job.getId());
-            log.info("管理端触发扫描任务 job={} mode={} limit={}", job.getId(), jobType, limited);
-            executor.submit(() -> runJob(job.getId(), limited));
-            return toView(mediaScanJobMapper.selectJobById(job.getId()));
+            MediaScanRequest snapshot = req.copy();
+            log.info("管理端触发扫描任务 job={} mode={} limit={} albumMode={} exclude={} noFresh={} force={} exportDir={}",
+                    job.getId(), jobType, snapshot.getLimit(), snapshot.getAlbumMode(), snapshot.getExclude(),
+                    snapshot.isNoFresh(), snapshot.isForce(), snapshot.getExportDir());
+            executor.submit(() -> runJob(job.getId(), snapshot));
+            Map<String, Object> view = toView(mediaScanJobMapper.selectJobById(job.getId()));
+            if (snapshot.getExportDir() != null)
+            {
+                // 导出目录在执行前就已确定：前端拿着 jobId 就能轮询文件是否落地
+                view.put("exportDir", snapshot.getExportDir());
+            }
+            return view;
         }
+    }
+
+    // ------------------------------------------------------------------ mode / 参数校验
+
+    /**
+     * mode 可选参数的取值范围校验，并把规范化后的值写回请求对象
+     *
+     * <p>可选参数只有四个（albumMode / exclude / noFresh / force），全部由后端按 mode 从白名单拼进命令：
+     * 前端无法传任意子进程参数。越界一律 400，不静默忽略——静默忽略会让「点了按钮但没生效」无从排查。</p>
+     */
+    private static void normalizeModeOptions(String jobType, MediaScanRequest req)
+    {
+        String albumMode = trimToNull(req.getAlbumMode());
+        if (albumMode != null)
+        {
+            if (!TYPE_SCAN.equals(jobType))
+            {
+                throw MediaException.badRequest("albumMode 只对 mode=scan 生效（当前 mode=" + displayModeOf(jobType) + "）");
+            }
+            String normalized = albumMode.toLowerCase(Locale.ROOT);
+            if (!"dir".equals(normalized) && !"prefix".equals(normalized))
+            {
+                throw MediaException.badRequest("albumMode 只接受 dir 或 prefix（收到：" + albumMode + "）");
+            }
+            req.setAlbumMode(normalized);
+        }
+        String exclude = trimToNull(req.getExclude());
+        if (exclude != null)
+        {
+            if (!TYPE_SCAN.equals(jobType))
+            {
+                throw MediaException.badRequest("exclude 只对 mode=scan 生效（当前 mode=" + displayModeOf(jobType) + "）");
+            }
+            validateExclude(exclude);
+            req.setExclude(exclude);
+        }
+        if ((req.isNoFresh() || req.isForce()) && !isGenerateMode(jobType))
+        {
+            throw MediaException.badRequest("noFresh / force 只对 mode=thumb / sprite / preview 生效（当前 mode="
+                    + displayModeOf(jobType) + "）");
+        }
+        if (req.isNoFresh() && req.isForce())
+        {
+            throw MediaException.badRequest("noFresh 与 force 互相矛盾：force 要重建全部，noFresh 是产物存在即跳过");
+        }
+    }
+
+    /** exclude 只接受目录名文本：出现空格 / 引号 / 分号等会破坏命令行的字符一律 400 */
+    private static void validateExclude(String exclude)
+    {
+        if (exclude.length() > MAX_EXCLUDE_CHARS)
+        {
+            throw MediaException.badRequest("exclude 过长（最多 " + MAX_EXCLUDE_CHARS + " 字符）");
+        }
+        for (int i = 0; i < exclude.length(); i++)
+        {
+            char c = exclude.charAt(i);
+            if (EXCLUDE_FORBIDDEN_CHARS.indexOf(c) >= 0)
+            {
+                throw MediaException.badRequest("exclude 含非法字符 '" + c + "'（只允许目录名文本，逗号分隔多个）");
+            }
+        }
+    }
+
+    /** 逐条生成类 mode：thumb / sprite / preview / sprite,preview（gc 也算缩略图脚本，但它不是逐条生成） */
+    private static boolean isGenerateMode(String jobType)
+    {
+        return SCRIPT_THUMB.equals(scriptKindOf(jobType)) && !TYPE_GC.equals(jobType);
+    }
+
+    /** 脚本种类 → 配置里的脚本路径（enrich 用 enrichScript，export 用 exportScript，其余按扫盘/缩略图分） */
+    private String scriptOf(String scriptKind)
+    {
+        switch (scriptKind)
+        {
+            case SCRIPT_ENRICH:
+                return mediaProperties.getEnrichScript();
+            case SCRIPT_EXPORT:
+                return mediaProperties.getExportScript();
+            case SCRIPT_THUMB:
+                return mediaProperties.getThumbScript();
+            default:
+                return mediaProperties.getScanScript();
+        }
+    }
+
+    /** 脚本种类 → 配置项名（错误信息里要写出到底缺哪一项） */
+    private static String scriptKeyOf(String scriptKind)
+    {
+        switch (scriptKind)
+        {
+            case SCRIPT_ENRICH:
+                return "enrichScript";
+            case SCRIPT_EXPORT:
+                return "exportScript";
+            case SCRIPT_THUMB:
+                return "thumbScript";
+            default:
+                return "scanScript";
+        }
+    }
+
+    /** 导出目录：{@code <exportPath>/<yyyyMMdd-HHmmss>}，目录名一律由后端生成 */
+    private String exportDirOf()
+    {
+        String base = mediaProperties.getExportPath();
+        requireConfigured(base, "exportPath");
+        String dir = base.replace('\\', '/');
+        while (dir.endsWith("/"))
+        {
+            dir = dir.substring(0, dir.length() - 1);
+        }
+        return dir + "/" + LocalDateTime.now().format(EXPORT_DIR_FORMAT);
+    }
+
+    /** 日志 / 错误信息里的 mode 名：落库值 full 对用户仍叫 scan */
+    private static String displayModeOf(String jobType)
+    {
+        return TYPE_SCAN.equals(jobType) ? "scan" : jobType;
+    }
+
+    private static String trimToNull(String value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        String text = value.trim();
+        return text.isEmpty() ? null : text;
     }
 
     @Override
@@ -198,33 +399,32 @@ public class MediaScanServiceImpl implements IMediaScanService
 
     // ------------------------------------------------------------------ 执行
 
-    private void runJob(Long jobId, int limit)
+    private void runJob(Long jobId, MediaScanRequest req)
     {
         MediaScanJob job = mediaScanJobMapper.selectJobById(jobId);
-        // type 落的就是 normalizeMode 的归一化结果：full 走 import.js，其余（thumb / sprite / preview /
-        // sprite,preview / gc）全部走 build-thumbs.js，只有子进程参数不同
-        String jobType = job == null || StringUtils.isEmpty(job.getType()) ? "full" : job.getType();
-        boolean thumb = isThumbScript(jobType);
+        // type 落的就是 normalizeMode 的归一化结果（scan → full）；脚本种类由 scriptKindOf 推导：
+        // full / backfill-hash / fix-poster 走 scan-media.js，thumb 系走 build-thumbs.js，
+        // enrich 走 enrich-meta.js，export 走 export-bundle.js
+        String jobType = job == null || StringUtils.isEmpty(job.getType()) ? TYPE_SCAN : job.getType();
+        String scriptKind = scriptKindOf(jobType);
         long begin = System.currentTimeMillis();
         Deque<String> tail = new ArrayDeque<>();
-        // counters[0]=total, counters[1]=done（full 取脚本回读条数；thumb 取 START/PROGRESS 行）
+        // counters[0]=total, counters[1]=done（full 取脚本回读条数；thumb / enrich 取 START/PROGRESS/收尾行）
         int[] counters = new int[2];
         int exit = -1;
         try
         {
-            ProcessBuilder builder = new ProcessBuilder(thumb ? buildThumbCommand(jobType, limit) : buildCommand());
-            // 子进程工作目录必须先存在（import.js 会把 import.sql / report.md 写进去）
+            ProcessBuilder builder = new ProcessBuilder(buildCommand(jobType, req));
+            // 子进程工作目录必须先存在（脚本会把 import.sql / report.md 之类写进去）
             String outPath = mediaProperties.getScanOutPath();
             requireConfigured(outPath, "scanOutPath");
             File outDir = new File(outPath);
             Files.createDirectories(outDir.toPath());
             builder.directory(outDir);
             builder.redirectErrorStream(true);
-            if (thumb)
-            {
-                applyThumbEnv(builder);
-            }
-            // 两种模式都可能读库（import.js / scan-media.js / build-thumbs.js），mysql 不在 PATH 时必须靠 MS_MYSQL
+            // MS_FFMPEG / MS_FFPROBE：配了才注入（留空 = 脚本自己从 PATH 找）
+            applyToolEnv(builder);
+            // 每个脚本都可能读库（scan / build-thumbs / enrich-meta / export-bundle），mysql 不在 PATH 时必须靠 MS_MYSQL
             applyMysqlEnv(builder);
             appendLine(tail, "== 开始执行 " + String.join(" ", builder.command()));
             Process process = builder.start();
@@ -237,18 +437,11 @@ public class MediaScanServiceImpl implements IMediaScanService
                 {
                     // PROGRESS 行的信息量已进 total/done 两列：1 万张缩略图会产生 400+ 行，
                     // 全存进日志尾部会把 START/TASK/DONE 挤出去（无法判断是否增量）
-                    if (!(thumb && line.startsWith("PROGRESS ")))
+                    if (!isProgressLine(scriptKind, line))
                     {
                         appendLine(tail, line);
                     }
-                    if (thumb)
-                    {
-                        parseThumbLine(line, counters);
-                    }
-                    else
-                    {
-                        parseFullLine(line, counters);
-                    }
+                    parseLine(scriptKind, line, counters);
                     if (++counter % 10 == 0)
                     {
                         mediaScanJobMapper.updateProgress(jobId, counters[0], counters[1]);
@@ -278,6 +471,17 @@ public class MediaScanServiceImpl implements IMediaScanService
             log.error("扫描任务异常 job={}", jobId, e);
             appendLine(tail, "== 执行异常：" + e);
             exit = -1;
+        }
+
+        if (SCRIPT_EXPORT.equals(scriptKind))
+        {
+            // 导出产物由脚本写进 exportDir：这里把目录 / 文件清单 / 总字节落进 job 日志，便于肉眼与机器都读
+            int[] exported = appendExportSummary(tail, req == null ? null : req.getExportDir(), exit == 0);
+            if (exit == 0)
+            {
+                counters[0] = exported[0];
+                counters[1] = exported[0];
+            }
         }
 
         String status = exit == 0 ? STATUS_DONE : STATUS_FAILED;
@@ -340,6 +544,52 @@ public class MediaScanServiceImpl implements IMediaScanService
         }
     }
 
+    /** PROGRESS 行只进 total/done 两列，不进日志尾部（1 万张缩略图会产生 400+ 行） */
+    private static boolean isProgressLine(String scriptKind, String line)
+    {
+        return line.startsWith("PROGRESS ")
+                && (SCRIPT_THUMB.equals(scriptKind) || SCRIPT_ENRICH.equals(scriptKind));
+    }
+
+    /** 按脚本种类选解析器：thumb 系认 START/PROGRESS/DONE，enrich 认 START 与 enrich ok= 收尾行，其余走扫盘回读行 */
+    private static void parseLine(String scriptKind, String line, int[] counters)
+    {
+        if (SCRIPT_THUMB.equals(scriptKind))
+        {
+            parseThumbLine(line, counters);
+        }
+        else if (SCRIPT_ENRICH.equals(scriptKind))
+        {
+            parseEnrichLine(line, counters);
+        }
+        else
+        {
+            parseFullLine(line, counters);
+        }
+    }
+
+    /** enrich：total 取 START 行（全部行数），done 取 {@code enrich ok= skip= fail=} 三者之和 */
+    private static void parseEnrichLine(String line, int[] counters)
+    {
+        Matcher start = THUMB_START.matcher(line);
+        if (start.find())
+        {
+            counters[0] = Integer.parseInt(start.group(1));
+            return;
+        }
+        Matcher done = ENRICH_DONE.matcher(line);
+        if (done.find())
+        {
+            int sum = Integer.parseInt(done.group(1)) + Integer.parseInt(done.group(2))
+                    + Integer.parseInt(done.group(3));
+            counters[1] = sum;
+            if (counters[0] == 0)
+            {
+                counters[0] = sum;
+            }
+        }
+    }
+
     /** node 可执行文件：未配置或不存在都给可读错误（子进程报的 CreateProcess error=2 定位不到配置项） */
     private String requireNode()
     {
@@ -379,32 +629,89 @@ public class MediaScanServiceImpl implements IMediaScanService
         return ("qtools.media." + key).replace('.', '_').toUpperCase();
     }
 
-    private String[] buildCommand()
+    // ------------------------------------------------------------------ 命令拼装（白名单）
+
+    /**
+     * 按 mode 拼出子进程命令行：{@code node <脚本> [配置里的附加参数] [后端按 mode / 请求追加的开关]}
+     *
+     * <p>任何来自配置或请求的附加参数都要过一层过滤：受管开关（{@code --force} / {@code --gc} /
+     * {@code --backfill-hash} 之类）只能由本类按 mode 追加，配置里写了也丢掉——否则「按钮点的是增量」
+     * 与「实际跑的是全量重建」会静默分叉。</p>
+     */
+    private String[] buildCommand(String jobType, MediaScanRequest req)
+    {
+        switch (scriptKindOf(jobType))
+        {
+            case SCRIPT_ENRICH:
+                return buildEnrichCommand(req);
+            case SCRIPT_EXPORT:
+                return buildExportCommand(req);
+            case SCRIPT_SCAN:
+                return buildScanCommand(jobType, req);
+            default:
+                return buildThumbCommand(jobType, req);
+        }
+    }
+
+    /**
+     * 扫描命令：{@code node scan-media.js --out=<scanOutPath> <scanArgs> [--backfill-hash | --fix-poster-path]
+     * [--album-mode=dir|prefix] [--exclude=<dir,dir>]}
+     *
+     * <p>{@code --out=} 由本方法追加；{@code --root=} / {@code --port=} / {@code --secret=} 属于部署环境，
+     * 只能写在 {@code scanArgs} 里（见 application.yml 注释）。</p>
+     */
+    private String[] buildScanCommand(String jobType, MediaScanRequest req)
     {
         List<String> command = new ArrayList<>();
         command.add(requireNode());
         command.add(requireScript(mediaProperties.getScanScript(), "scanScript"));
         command.add("--out=" + mediaProperties.getScanOutPath());
-        appendConfiguredArgs(command, mediaProperties.getScanArgs(), SCAN_FORBIDDEN_ARGS);
+        List<String> forbiddenPrefixes = new ArrayList<>();
+        if (req != null && req.getAlbumMode() != null)
+        {
+            // 指定了 albumMode 就整体替换配置里的取值：同一个参数出现两次，脚本只认先到的那次
+            forbiddenPrefixes.add("--album-mode=");
+        }
+        if (req != null && req.getExclude() != null)
+        {
+            forbiddenPrefixes.add("--exclude=");
+        }
+        appendConfiguredArgs(command, mediaProperties.getScanArgs(), SCAN_FORBIDDEN_ARGS, SCAN_MANAGED_ARGS,
+                forbiddenPrefixes);
+        if (TYPE_BACKFILL.equals(jobType))
+        {
+            command.add("--backfill-hash");
+        }
+        if (TYPE_FIX_POSTER.equals(jobType))
+        {
+            command.add("--fix-poster-path");
+        }
+        if (req != null && req.getAlbumMode() != null)
+        {
+            command.add("--album-mode=" + req.getAlbumMode());
+        }
+        if (req != null && req.getExclude() != null)
+        {
+            command.add("--exclude=" + req.getExclude());
+        }
         return command.toArray(new String[0]);
     }
 
     /**
-     * 缩略图 / 生成类命令：{@code node build-thumbs.js [配置参数] [--sprite] [--preview] [--gc --yes] [--limit=n]}
+     * 缩略图 / 生成类命令：{@code node build-thumbs.js <thumbArgs> [--no-fresh] [--force]
+     * [--sprite] [--preview] [--gc --yes] [--limit=n]}
      *
-     * <p>脚本自带增量判定（按源文件 mtime 跳过已存在的产物），默认参数就是增量模式。</p>
-     *
-     * <p>生成开关（{@code --sprite} / {@code --preview}）与删除开关（{@code --gc --yes}）
-     * <b>只在本方法内按 mode 追加</b>：配置里写了同类开关会被过滤（见 {@link #THUMB_MANAGED_ARGS}），
-     * 前端也传不进任意参数——mode 只有白名单里的 5 个原子值。</p>
+     * <p>脚本自带增量判定（按源文件 mtime 跳过已存在的产物），默认参数就是增量模式；
+     * {@code --no-fresh}（退回「存在即跳过」的旧语义）与 {@code --force}（全部重建）只能由请求
+     * 显式打开，且互斥。</p>
      */
-    private String[] buildThumbCommand(String jobType, int limit)
+    private String[] buildThumbCommand(String jobType, MediaScanRequest req)
     {
         String script = requireScript(mediaProperties.getThumbScript(), "thumbScript");
         List<String> command = new ArrayList<>();
         command.add(requireNode());
         command.add(script);
-        appendConfiguredArgs(command, mediaProperties.getThumbArgs(), THUMB_MANAGED_ARGS);
+        appendConfiguredArgs(command, mediaProperties.getThumbArgs(), THUMB_MANAGED_ARGS, List.of(), List.of());
         // jobType 是 normalizeMode 归一化后的逗号拼接值：sprite,preview 两个开关都会带上
         if (jobType.contains("sprite"))
         {
@@ -414,13 +721,22 @@ public class MediaScanServiceImpl implements IMediaScanService
         {
             command.add("--preview");
         }
-        if ("gc".equals(jobType))
+        if (TYPE_GC.equals(jobType))
         {
             // --yes 由后端追加：缺了它脚本只干跑统计，不会真删
             command.add("--gc");
             command.add("--yes");
         }
-        if (limit > 0)
+        if (req != null && req.isNoFresh())
+        {
+            command.add("--no-fresh");
+        }
+        if (req != null && req.isForce())
+        {
+            command.add("--force");
+        }
+        Integer limit = req == null ? null : req.getLimit();
+        if (limit != null && limit > 0)
         {
             command.add("--limit=" + limit);
         }
@@ -428,7 +744,76 @@ public class MediaScanServiceImpl implements IMediaScanService
     }
 
     /**
-     * mode 归一化：{@code scan | thumb | sprite | preview | gc | sprite,preview}
+     * 元数据补齐命令：{@code node enrich-meta.js <enrichArgs> [--limit=n]}
+     *
+     * <p>ffprobe 与 mysql 的路径走环境变量（{@code MS_FFPROBE} / {@code MS_MYSQL}），参数里不必写；
+     * 请求侧只开放 {@code --limit=}（调试用），{@code --dry-run} / {@code --force} 仍属于配置项的事。</p>
+     */
+    private String[] buildEnrichCommand(MediaScanRequest req)
+    {
+        List<String> command = new ArrayList<>();
+        command.add(requireNode());
+        command.add(requireScript(mediaProperties.getEnrichScript(), "enrichScript"));
+        Integer limit = req == null ? null : req.getLimit();
+        appendConfiguredArgs(command, mediaProperties.getEnrichArgs(), List.of(), List.of(),
+                limit != null && limit > 0 ? List.of("--limit=") : List.of());
+        if (limit != null && limit > 0)
+        {
+            command.add("--limit=" + limit);
+        }
+        return command.toArray(new String[0]);
+    }
+
+    /**
+     * 便携包导出命令：{@code node export-bundle.js <exportArgs> --out=<exportDir>}
+     *
+     * <p>{@code --out=} 由后端生成（{@code <exportPath>/<yyyyMMdd-HHmmss>}），配置里的同名参数被过滤：
+     * 导出目录是「下载接口唯一允许读的根」的前提，不能让别处指定。</p>
+     */
+    private String[] buildExportCommand(MediaScanRequest req)
+    {
+        List<String> command = new ArrayList<>();
+        command.add(requireNode());
+        command.add(requireScript(mediaProperties.getExportScript(), "exportScript"));
+        appendConfiguredArgs(command, mediaProperties.getExportArgs(), List.of(), List.of(), List.of("--out="));
+        String exportDir = req == null ? null : req.getExportDir();
+        requireConfigured(exportDir, "exportPath");
+        command.add("--out=" + exportDir);
+        return command.toArray(new String[0]);
+    }
+
+    /**
+     * 导出产物清单 → job 日志行：{@code EXPORT ok dir=<绝对路径> files=<n> bytes=<n> names=<a,b,c>}
+     *
+     * @return {@code [files]}：目录下的常规文件数（thumbs 子目录不计入，单独看清单即可）
+     */
+    private static int[] appendExportSummary(Deque<String> tail, String exportDir, boolean ok)
+    {
+        List<String> names = new ArrayList<>();
+        long bytes = 0L;
+        File dir = StringUtils.isEmpty(exportDir) ? null : new File(exportDir);
+        if (dir != null && dir.isDirectory())
+        {
+            File[] files = dir.listFiles(File::isFile);
+            if (files != null)
+            {
+                for (File file : files)
+                {
+                    names.add(file.getName());
+                    bytes += file.length();
+                }
+            }
+            names.sort(null);
+        }
+        String dirText = dir == null ? "(未设置导出目录)" : dir.getAbsolutePath().replace('\\', '/');
+        appendLine(tail, (ok ? "EXPORT ok" : "EXPORT fail") + " dir=" + dirText + " files=" + names.size()
+                + " bytes=" + bytes + (names.isEmpty() ? "" : " names=" + String.join(",", names)));
+        return new int[] { names.size() };
+    }
+
+    /**
+     * mode 归一化：{@code scan | thumb | sprite | preview | gc | sprite,preview | enrich | backfill-hash |
+     * fix-poster | export}
      *
      * <p>组合模式只接受<b>逗号分隔</b>这一种写法（{@code sprite,preview}），不额外接受
      * {@code spritepreview} 之类的缩写——一种写法便于文档、日志与运维检索；token 顺序无关，
@@ -473,17 +858,25 @@ public class MediaScanServiceImpl implements IMediaScanService
                 }
             }
         }
+        for (String single : List.of("enrich", "backfill-hash", "fix-poster", "export"))
+        {
+            if (tokens.contains(single))
+            {
+                // 维护类 mode 参数固定、跑一次就完：它们不在 SINGLE_MODES 之外还允许组合
+                return single;
+            }
+        }
         if (tokens.contains("scan"))
         {
-            return "full";
+            return TYPE_SCAN;
         }
         if (tokens.contains("thumb"))
         {
-            return "thumb";
+            return TYPE_THUMB;
         }
         if (tokens.contains("gc"))
         {
-            return "gc";
+            return TYPE_GC;
         }
         List<String> generate = new ArrayList<>();
         for (String name : List.of("sprite", "preview"))
@@ -502,13 +895,30 @@ public class MediaScanServiceImpl implements IMediaScanService
         return "thumb".equals(StringUtils.isEmpty(type) ? "" : type.trim()) ? "thumb" : "scan";
     }
 
-    /** full（import.js）之外的 mode 一律执行 thumbScript（build-thumbs.js） */
-    private static boolean isThumbScript(String jobType)
+    /** mode（落库值）→ 脚本种类：决定新进程用哪个脚本、解析哪种输出行、走哪档超时 */
+    private static String scriptKindOf(String jobType)
     {
-        return !"full".equals(jobType);
+        if (TYPE_ENRICH.equals(jobType))
+        {
+            return SCRIPT_ENRICH;
+        }
+        if (TYPE_EXPORT.equals(jobType))
+        {
+            return SCRIPT_EXPORT;
+        }
+        if (TYPE_SCAN.equals(jobType) || TYPE_BACKFILL.equals(jobType) || TYPE_FIX_POSTER.equals(jobType))
+        {
+            return SCRIPT_SCAN;
+        }
+        return SCRIPT_THUMB;
     }
 
-    /** limit 只对逐条生成的 mode 生效；scan / gc 传了直接 400，避免误以为已经「试跑过」 */
+    /**
+     * limit 只对逐条处理的 mode 生效（thumb / sprite / preview / enrich）
+     *
+     * <p>scan / gc / backfill-hash / fix-poster / export 传了直接 400：这些 mode 不支持「只跑前 n 条」，
+     * 静默忽略会让调用方误以为已经「试跑过」。</p>
+     */
     private static int normalizeLimit(String jobType, Integer limit)
     {
         if (limit == null)
@@ -519,29 +929,63 @@ public class MediaScanServiceImpl implements IMediaScanService
         {
             throw MediaException.badRequest("limit 必须是 0 ~ " + MAX_LIMIT + " 的整数（0 或留空 = 不限）");
         }
-        if (limit > 0 && ("full".equals(jobType) || "gc".equals(jobType)))
+        boolean limitedMode = isGenerateMode(jobType) || TYPE_ENRICH.equals(jobType);
+        if (limit > 0 && !limitedMode)
         {
-            throw MediaException.badRequest("mode=" + ("full".equals(jobType) ? "scan" : jobType) + " 不支持 limit");
+            throw MediaException.badRequest("mode=" + displayModeOf(jobType) + " 不支持 limit");
         }
         return limit;
     }
 
-    /** 超时预算：扫描 10 分钟、缩略图 30 分钟，精灵图/预览/GC 走 deriveTimeoutMinutes（默认 12 小时） */
+    /**
+     * 超时预算（分钟）
+     *
+     * <table border="1">
+     *   <caption>mode → 超时配置项</caption>
+     *   <tr><th>mode</th><th>配置项</th><th>默认</th></tr>
+     *   <tr><td>scan</td><td>scanTimeoutMinutes</td><td>10</td></tr>
+     *   <tr><td>thumb</td><td>thumbTimeoutMinutes</td><td>30</td></tr>
+     *   <tr><td>sprite / preview / sprite,preview / gc</td><td>deriveTimeoutMinutes</td><td>720</td></tr>
+     *   <tr><td>enrich</td><td>enrichTimeoutMinutes</td><td>120</td></tr>
+     *   <tr><td>backfill-hash / fix-poster</td><td>maintainTimeoutMinutes</td><td>120</td></tr>
+     *   <tr><td>export</td><td>exportTimeoutMinutes</td><td>60</td></tr>
+     * </table>
+     */
     private int timeoutMinutesOf(String jobType)
     {
-        if ("full".equals(jobType))
+        if (TYPE_SCAN.equals(jobType))
         {
             return mediaProperties.getScanTimeoutMinutes();
         }
-        if ("thumb".equals(jobType))
+        if (TYPE_THUMB.equals(jobType))
         {
             return mediaProperties.getThumbTimeoutMinutes();
+        }
+        if (TYPE_ENRICH.equals(jobType))
+        {
+            return mediaProperties.getEnrichTimeoutMinutes();
+        }
+        if (TYPE_EXPORT.equals(jobType))
+        {
+            return mediaProperties.getExportTimeoutMinutes();
+        }
+        if (TYPE_BACKFILL.equals(jobType) || TYPE_FIX_POSTER.equals(jobType))
+        {
+            return mediaProperties.getMaintainTimeoutMinutes();
         }
         return mediaProperties.getDeriveTimeoutMinutes();
     }
 
-    /** 追加配置里的附加参数：跳过空白与被禁用的受管开关 */
-    private static void appendConfiguredArgs(List<String> command, String extra, List<String> forbidden)
+    /**
+     * 追加配置里的附加参数：跳过空白、受管开关（精确匹配与 {@code --key=} 前缀匹配）
+     *
+     * <p>三层过滤的意图各不相同：{@code forbidden} 是永不接受的危险开关（{@code --truncate}）；
+     * {@code managed} 是「只能由 mode 决定」的开关（{@code --backfill-hash} / {@code --force}）；
+     * {@code forbiddenPrefixes} 是「请求已经给了值，配置里的同名参数要让位」的参数
+     * （{@code --album-mode=} / {@code --exclude=} / {@code --out=} / {@code --limit=}）。</p>
+     */
+    private static void appendConfiguredArgs(List<String> command, String extra, List<String> forbidden,
+            List<String> managed, List<String> forbiddenPrefixes)
     {
         if (StringUtils.isEmpty(extra))
         {
@@ -549,7 +993,11 @@ public class MediaScanServiceImpl implements IMediaScanService
         }
         for (String arg : extra.trim().split("\\s+"))
         {
-            if (arg.isEmpty() || forbidden.contains(arg))
+            if (arg.isEmpty() || forbidden.contains(arg) || managed.contains(arg))
+            {
+                continue;
+            }
+            if (startsWithAny(arg, forbiddenPrefixes))
             {
                 continue;
             }
@@ -557,13 +1005,36 @@ public class MediaScanServiceImpl implements IMediaScanService
         }
     }
 
-    /** build_thumbs.js 认 MS_FFMPEG；用它替代脚本内默认的 runtime/ffmpeg.exe */
-    private void applyThumbEnv(ProcessBuilder builder)
+    private static boolean startsWithAny(String arg, List<String> prefixes)
+    {
+        for (String prefix : prefixes)
+        {
+            if (arg.startsWith(prefix))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 工具路径注入（与 {@code MS_MYSQL} 同风格：非空才注入）
+     *
+     * <p>{@code MS_FFMPEG} 给 build-thumbs.js（替代脚本内默认的 runtime/ffmpeg.exe），
+     * {@code MS_FFPROBE} 给 enrich-meta.js（探测 dur / w / h / vcodec）。留空时什么都不做，
+     * 脚本按 {@code PATH} 自己找，不影响已有部署与环境里本已存在的同名变量。</p>
+     */
+    private void applyToolEnv(ProcessBuilder builder)
     {
         String ffmpeg = mediaProperties.getFfmpeg();
         if (StringUtils.isNotEmpty(ffmpeg))
         {
-            builder.environment().put("MS_FFMPEG", ffmpeg);
+            builder.environment().put("MS_FFMPEG", ffmpeg.trim());
+        }
+        String ffprobe = mediaProperties.getFfprobe();
+        if (StringUtils.isNotEmpty(ffprobe))
+        {
+            builder.environment().put("MS_FFPROBE", ffprobe.trim());
         }
     }
 
