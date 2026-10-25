@@ -10,6 +10,7 @@ import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.qtools.media.domain.MediaPerson;
@@ -86,6 +87,14 @@ public class MediaPersonServiceImpl implements IMediaPersonService
 
     /** 单个视频 / 相册一次最多绑定的人物数 */
     private static final int PERSON_IDS_MAX = 50;
+
+    /**
+     * 「素人」人物名（无演员视频的承载体，真实存在于 media_person）
+     *
+     * <p>语义：{@code 素人} 与任何真实演员互斥。见
+     * {@code doc/media_amateur_person.sql} 与 {@link #replaceVideoPersons(String, List, Map)}。</p>
+     */
+    private static final String AMATEUR_NAME = "素人";
 
     private static final int PAGE_SIZE_DEFAULT = 20;
 
@@ -263,7 +272,36 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         }
         List<Long> target = distinctIds(personIds);
         requirePersonsExist(target);
-        Map<Long, String> cleanRoles = checkRoles(target, roles);
+
+        // 「素人」占位规则（P5.3-A）：有真实演员就没有素人；空 / 全被剔除 → 落素人。
+        // 必须排在 checkRoles 之前：因规则被剔除的素人 id，其 roles 键也要一起丢掉，
+        // 否则「只提交 {主演素人: 群演}」这种 payload 会因为键不在 personIds 里而 400。
+        Set<Long> dropped = new LinkedHashSet<>();
+        Map<Long, String> submittedRoles = roles;
+        Long amateurId = resolveAmateurId();
+        if (amateurId != null)
+        {
+            if (target.isEmpty())
+            {
+                // 解绑全部 = 回到素人（而不是变成「一个演员都没有」）：站端「清理演员」的语义
+                // 就是「这是一部没有署名的片子」，用一个真实的素人行承载才不会在人物页里消失
+                target = new ArrayList<>();
+                target.add(amateurId);
+            }
+            else if (target.size() > 1 && target.contains(amateurId))
+            {
+                // 多人物出演：素人与真实演员互斥，真实演员优先
+                target = new ArrayList<>(target);
+                target.remove(amateurId);
+                dropped.add(amateurId);
+            }
+        }
+        if (!dropped.isEmpty() && submittedRoles != null)
+        {
+            submittedRoles = new LinkedHashMap<>(submittedRoles);
+            submittedRoles.keySet().removeAll(dropped);
+        }
+        Map<Long, String> cleanRoles = checkRoles(target, submittedRoles);
 
         // 旧绑定要在删除前记下来，否则 use_count 漏算「刚被换成别人」的那几个人
         Set<Long> touched = new LinkedHashSet<>(mediaPersonMapper.selectPersonIdsByVideoIds(List.of(videoId)));
@@ -278,7 +316,7 @@ public class MediaPersonServiceImpl implements IMediaPersonService
             mediaPersonMapper.recomputePersonUseCount(new ArrayList<>(touched));
         }
         invalidateIndex();
-        log.info("视频 {} 人物全量替换为 {} role={}", videoId, target, cleanRoles);
+        log.info("视频 {} 人物全量替换为 {} role={} 剔除素人={}", videoId, target, cleanRoles, dropped);
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("updated", target.size());
@@ -322,6 +360,55 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         out.put("updated", target.size());
         out.put("id", albumId);
         out.put("persons", mediaPersonMapper.selectAlbumPersons(albumId));
+        return out;
+    }
+
+    // ------------------------------------------------------------------ 站端（写）
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> ensurePerson(String name, String alias)
+    {
+        // 名字校验 / 写入与 createPerson 共用同一段（requireName + insertPerson），
+        // 只有「撞名怎么办」不一样：这里复用，那里 409
+        String cleanName = requireName(name);
+        MediaPerson person = mediaPersonMapper.selectPersonByName(cleanName);
+        boolean created = false;
+        if (person == null)
+        {
+            MediaPerson fresh = new MediaPerson();
+            fresh.setName(cleanName);
+            fresh.setAlias(limit(alias, ALIAS_MAX, "alias"));
+            try
+            {
+                mediaPersonMapper.insertPerson(fresh);
+            }
+            catch (DuplicateKeyException e)
+            {
+                // uk_person_name 兜住并发同名：两个请求同时到，一个插入成功、另一个回滚成复用
+                person = mediaPersonMapper.selectPersonByName(cleanName);
+                if (person == null)
+                {
+                    throw e;
+                }
+                log.info("站端新建人物并发撞名，复用既有 id={} name={}", person.getId(), cleanName);
+                return personCreatedNode(person, false);
+            }
+            person = mediaPersonMapper.selectPersonDetail(fresh.getId());
+            created = true;
+            invalidateIndex();
+            log.info("站端新建人物 id={} name={}", fresh.getId(), cleanName);
+        }
+        return personCreatedNode(person, created);
+    }
+
+    /** 站端新建人物的最小回包：{@code {id,name,created}}（不带整行，前端只要 id 去绑定） */
+    private static Map<String, Object> personCreatedNode(MediaPerson person, boolean created)
+    {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", person.getId());
+        out.put("name", person.getName());
+        out.put("created", created);
         return out;
     }
 
@@ -554,6 +641,22 @@ public class MediaPersonServiceImpl implements IMediaPersonService
             throw MediaException.notFound("人物不存在: " + id);
         }
         return person;
+    }
+
+    /**
+     * 素人 id（{@code media_person.name = '素人'} 那一行，由 {@code doc/media_amateur_person.sql} 保证存在）
+     *
+     * <p>返回 {@code null} 表示库里还没有素人（迁移没执行过 / 被人删了）：此时占位规则整体跳过，
+     * 写入行为退回 P3-A 的原始语义（空表 = 无人物）。这样「没跑迁移的老库」不会因为这个规则
+     * 突然多出一条 {@code person_id} 指向不存在 id 的绑定行。</p>
+     *
+     * <p>按名字查而不是硬编码 id：素人行的 id 由自增决定，不同实例各不相同；查询走
+     * {@code uk_person_name} 唯一索引，每次视频写入多一次主键查询，可忽略。</p>
+     */
+    private Long resolveAmateurId()
+    {
+        MediaPerson amateur = mediaPersonMapper.selectPersonByName(AMATEUR_NAME);
+        return amateur == null ? null : amateur.getId();
     }
 
     private void requirePersonsExist(List<Long> personIds)

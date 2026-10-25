@@ -1,5 +1,7 @@
 package com.qtools.media.controller;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -13,10 +15,14 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import com.qtools.common.annotation.Anonymous;
+import com.qtools.media.exception.MediaException;
 import com.qtools.media.service.IMediaEditPolicyService;
 import com.qtools.media.service.IMediaOrganizeService;
+import com.qtools.media.service.IMediaPersonService;
+import static com.qtools.media.support.MediaBodyParser.longsValue;
 import static com.qtools.media.support.MediaBodyParser.metaPatch;
 import static com.qtools.media.support.MediaBodyParser.parseObject;
+import static com.qtools.media.support.MediaBodyParser.rolesValue;
 import static com.qtools.media.support.MediaBodyParser.stringValue;
 
 /**
@@ -43,6 +49,17 @@ import static com.qtools.media.support.MediaBodyParser.stringValue;
  * <p>读接口（{@code GET /edit-policy}、{@code GET /tags}）不受策略影响：
  * 站端选择器在任何档位下都要能列出标签字典。</p>
  *
+ * <h2>写接口清单</h2>
+ * <ul>
+ *   <li>{@code POST /media/tags} 现场新建标签（同名复用）</li>
+ *   <li>{@code POST /media/persons} 现场新建演员（同名复用，P5.3-A）</li>
+ *   <li>{@code PUT /media/video/{id}/meta} 单条元数据补丁</li>
+ *   <li>{@code PUT /media/video/{id}/persons} 演员与角色全量替换（P5.3-A）</li>
+ *   <li>{@code POST /media/videos/batch-meta} 批量补丁</li>
+ * </ul>
+ * <p>人物只读四件套（清单 / 详情 / 名下视频 / 名下相册）仍在 {@link MediaPersonController}，
+ * 那里类级说明写着「只读」——所以人物<b>写</b>接口故意放在本类，与闸门同处一个文件。</p>
+ *
  * @author qtools
  */
 @Anonymous
@@ -57,6 +74,10 @@ public class MediaEditController
 
     @Autowired
     private IMediaOrganizeService mediaOrganizeService;
+
+    /** 站端演员（人物）绑定与现场建人：业务实现全部在 {@link IMediaPersonService}，本类只加闸门（P5.3-A） */
+    @Autowired
+    private IMediaPersonService mediaPersonService;
 
     // ------------------------------------------------------------------ 读
 
@@ -118,5 +139,87 @@ public class MediaEditController
     {
         mediaEditPolicyService.requireWritable();
         return mediaOrganizeService.batchMeta(metaPatch(parseObject(rawBody, true), true));
+    }
+
+    /**
+     * 站端现场新建演员：body {@code {name, alias?}}，返回 {@code {id,name,created}}
+     *
+     * <p>同名<b>复用</b>（{@code created=false}），不像管理端那样 409 —— 站端是「边编辑边造人」，
+     * 撞名再报错只会逼用户先去管理端查一遍。详见
+     * {@link IMediaPersonService#ensurePerson(String, String)}。</p>
+     *
+     * <p>为什么放在这个控制器而不是 {@link MediaPersonController}：那边是类级说明里写死的
+     * 「站端只读四件套」，写接口必须和 {@code POST /media/tags} 一样先过
+     * {@link IMediaEditPolicyService#requireWritable()}，把「哪些站端接口会写库」收在同一个类里
+     * 才不会漏掉闸门。</p>
+     */
+    @PostMapping("/persons")
+    public Map<String, Object> createPerson(@RequestBody(required = false) String rawBody)
+    {
+        mediaEditPolicyService.requireWritable();
+        Map<String, Object> body = parseObject(rawBody, true);
+        Map<String, Object> out = mediaPersonService.ensurePerson(stringValue(body.get("name")),
+                stringValue(body.get("alias")));
+        log.debug("站端新建演员 name={} created={}", body.get("name"), out.get("created"));
+        return out;
+    }
+
+    /**
+     * 站端替换某视频的演员与角色：body {@code {personIds:[], roles:{personId:role}}}
+     *
+     * <p>业务实现<b>完全复用</b>管理端 {@code PUT /api/media/admin/videos/{id}/persons} 的
+     * {@link IMediaPersonService#replaceVideoPersons(String, List, Map)}（同一段 SQL、同一套校验：
+     * 视频不存在 404、personIds 去重后上限 50、未知 personId 400、roles 键必须是 personIds 子集
+     * 且值 &lt;= 32 字符）；{@code personIds: []} = 解除全部绑定。历史 {@code person_id IS NULL}
+     * 的扫描行不受影响。写完服务层已经 {@code invalidateSnapshot()}，索引立刻能看到新演员。</p>
+     *
+     * <p>回包形状是站端的 {@code {id, persons:[{id,name,role}]}}（管理端那份是
+     * {@code {updated,id,persons:[{personId,...}]}}，前端已在用，不动它）；
+     * 这里只做字段改名，不复制任何业务逻辑。</p>
+     */
+    @PutMapping("/video/{id}/persons")
+    public Map<String, Object> replaceVideoPersons(@PathVariable("id") String id,
+            @RequestBody(required = false) String rawBody)
+    {
+        mediaEditPolicyService.requireWritable();
+        Map<String, Object> body = parseObject(rawBody, true);
+        List<Long> personIds = longsValue(body.get("personIds"), "personIds");
+        if (personIds == null)
+        {
+            throw MediaException.badRequest("personIds 必填（[] = 解除全部绑定）");
+        }
+        return personBindingNode(id, mediaPersonService.replaceVideoPersons(id, personIds,
+                rolesValue(body.get("roles"), "roles")));
+    }
+
+    /**
+     * 服务层 {@code replaceVideoPersons} 的回包 → 站端形状 {@code {id, persons:[{id,name,role}]}}
+     *
+     * <p>{@code role} 允许为 null（未指定角色）；{@code persons} 顺序沿用服务层
+     * （有角色的在前、按角色 / 名字排序），前端直接渲染即可。</p>
+     */
+    private static Map<String, Object> personBindingNode(String videoId, Map<String, Object> replaced)
+    {
+        List<Map<String, Object>> persons = new ArrayList<>();
+        Object raw = replaced == null ? null : replaced.get("persons");
+        if (raw instanceof List<?> rows)
+        {
+            for (Object row : rows)
+            {
+                if (!(row instanceof Map<?, ?> map))
+                {
+                    continue;
+                }
+                Map<String, Object> node = new LinkedHashMap<>();
+                node.put("id", map.get("personId"));
+                node.put("name", map.get("name"));
+                node.put("role", map.get("role"));
+                persons.add(node);
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", videoId);
+        out.put("persons", persons);
+        return out;
     }
 }

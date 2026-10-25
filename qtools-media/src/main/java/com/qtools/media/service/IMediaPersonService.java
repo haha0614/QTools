@@ -69,11 +69,27 @@ public interface IMediaPersonService
     Map<String, Object> updateAvatar(Long id, String path);
 
     /**
-     * 全量替换某视频的人物与角色（{@code PUT /api/media/admin/videos/{id}/persons}）
+     * 全量替换某视频的人物与角色
+     * （管理端 {@code PUT /api/media/admin/videos/{id}/persons}、站端 {@code PUT /api/media/video/{id}/persons}）
      *
-     * @param personIds 目标人物集合（去重前上限 50；未知 id 一律 400）；空表 = 解除全部绑定
-     * @param roles     {@code personId -> 角色}（可空；键必须在该人的 personIds 里，值 <= 32 字符）
-     * @return {@code {updated,id,persons:[{personId,name,role}]}}
+     * <p><b>多人出演</b>（P5.3-A）：一次可以绑任意多个（上限 50）人物，每人一个角色；
+     * 库侧唯一键是 {@code uk_actor_video_person(video_id, person_id)}，只约束「同一视频同一人只一行」，
+     * 不限制人数。返回的 {@code persons} 就是落库后的全部绑定，前端照原样渲染即可。</p>
+     *
+     * <p><b>素人占位规则</b>（P5.3-A）：{@code media_person} 里 name='素人' 的那一行承载
+     * 「没有演员」的视频（见 {@code doc/media_amateur_person.sql}）。规则：</p>
+     * <ul>
+     *   <li>提交里出现<b>素人以外的任何人物</b> → 素人被自动剔除（真实演员优先，绝不与素人共存）</li>
+     *   <li>提交为空表（解绑全部）→ <b>落库是素人</b>，不是「一个都没有」：
+     *       站端「清空演员」的语义是「这部片子没有署名」，用素人承载才不会让人物页漏掉它</li>
+     *   <li>提交里只有素人 → 原样落库</li>
+     *   <li>库里没有素人行（迁移未执行）→ 整条规则跳过，退回「空表 = 无人物」的原始语义</li>
+     * </ul>
+     *
+     * @param personIds 目标人物集合（去重前上限 50；未知 id 一律 400）；空表 = 解除全部绑定（→ 素人）
+     * @param roles     {@code personId -> 角色}（可空；键必须在该人的 personIds 里，值 <= 32 字符；
+     *                  被规则剔除的素人键会被静默丢弃，不算 400）
+     * @return {@code {updated,id,persons:[{personId,name,alias,role}]}}
      */
     Map<String, Object> replaceVideoPersons(String videoId, List<Long> personIds, Map<Long, String> roles);
 
@@ -86,6 +102,26 @@ public interface IMediaPersonService
      * @return {@code {updated,id,persons:[{id,name}]}}
      */
     Map<String, Object> replaceAlbumPersons(String albumId, List<Long> personIds);
+
+    // ------------------------------------------------------------------ 站端（写）
+
+    /**
+     * 站端「现场新建演员」：{@code POST /api/media/persons}（P5.3-A）
+     *
+     * <p>与 {@link #createPerson(MediaPersonPatch)} 的<b>唯一语义差异</b>：同名<b>复用</b>而不 409，
+     * 返回里带 {@code created} 供前端区分「新建成功」与「已存在」。理由：站端编辑视频时的
+     * 「现场新建演员」是输入即提交（用户打一个名字，回车就要拿到 id 去绑定），
+     * 撞名报错会让用户被迫先去管理端查一遍；而两个真实同名演员在自托管场景里几乎不存在，
+     * 复用比阻塞更符合使用场景。管理端保持 409 不变（那里是「建字典」，需要绝对唯一）。</p>
+     *
+     * <p>复用时<b>不覆盖</b>既有 alias：站端一次输入只表达「我要这个人的 id」，
+     * 不该顺带改掉管理端维护的别名。{@code created=false} 时 alias 参数被忽略。</p>
+     *
+     * @param name  去首尾空格后 1-64 字符（超长 / 空 400）
+     * @param alias 可空，{@code created=true} 时才写，<= 128 字符
+     * @return {@code {id,name,created}}
+     */
+    Map<String, Object> ensurePerson(String name, String alias);
 
     // ------------------------------------------------------------------ 站端（只读）
 

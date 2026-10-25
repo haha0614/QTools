@@ -928,7 +928,9 @@ public class MediaAdminController extends BaseController
      * 全量替换某视频的人物与角色：{@code PUT /api/media/admin/videos/{id}/persons}
      *
      * <p>body {@code {personIds:[1,2], roles:{1:主演}}}：{@code personIds} 出现即整体替换
-     * （{@code []} = 解除全部绑定），{@code roles} 可缺省（键必须属于本次 personIds，值 &lt;= 32 字符）。
+     * （{@code []} = 解除全部绑定，P5.3-A 起会落成「素人」而不是空 —— 见
+     * {@link com.qtools.media.service.IMediaPersonService#replaceVideoPersons(String, java.util.List, java.util.Map)}），
+     * {@code roles} 可缺省（键必须属于本次 personIds，值 &lt;= 32 字符）。
      * 只清 {@code person_id IS NOT NULL} 的绑定行，扫描脚本写的 name-only 历史行不受影响。</p>
      */
     @PreAuthorize("@ss.hasPermi('media:admin:edit')")
