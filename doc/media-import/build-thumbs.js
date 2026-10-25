@@ -12,7 +12,8 @@
  *              content_hash 为 NULL 时回退 <thumbs>/pv/<albumId>/<%04d>.jpg
  *   精灵图     <thumbs>/s/<content_hash>.jpg                  10x10 网格，每格 160x90
  *              （fps=tile 一次成型，间隔由时长决定，目标 ≤100 帧，图片恒为 1600 宽）
- *   预览视频   <thumbs>/pv2/<content_hash>.mp4（或 .webm）       静音 320x180 4fps 5-8 秒
+ *   预览视频   <thumbs>/pv2/<content_hash>.mp4（或 .webm）       静音 320x180 5~8 秒
+ *              （帧数 = 影片时长/sampleSec，夹在 32~300 帧；帧率由此反推，见 pvPlan）
  *              （按 ffmpeg 里的编码器择一：libx264 > libvpx-vp9 > libvpx > mpeg4）
  *   s/ 与 pv2/ 同样按内容寻址，content_hash 为 NULL 时回退 <videoId>。
  *   两者默认**不**生成：要 --sprite / --preview 显式开启，管理端现有命令行为不变。
@@ -82,8 +83,22 @@ const DEFAULTS = {
 
 // 精灵图：10 列 x 10 行、每格 160x90 -> 成品恒为 1600x900，最多 100 帧
 const SPRITE = { cols: 10, rows: 10, w: 160, h: 90 };
-// 预览视频：静音、低码率、4fps，时长夹在 5~8 秒（需求是 5-10 秒）
-const PV = { fps: 4, minSec: 5, maxSec: 8, w: 320, h: 180 };
+// 预览视频：静音、低码率，时长夹在 5~8 秒（需求是 5-10 秒）。
+// 帧数（= 悬停定位精度）由**影片时长**决定，见 pvPlan：旧实现固定 4fps×8s = 32 帧，
+// 把 464 秒的片子压成 32 个采样点（每帧覆盖 14.5 秒），悬停到 50% 时显示的是第 15 帧
+// （影片 217 秒处，比指针位置早 14.5 秒）——「预览图和实际位置不一样」的根因。
+const PV = {
+  crf: 30,         // 帧数从 32 涨到 300+ 后同画质需要略降 CRF（实测 32 会掉 ~0.05 SSIM）
+  fps: 4,          // 帧数下限对应的帧率（短片 / 时长未知时就是它）
+  maxFps: 40,      // 帧率上限（= 8 秒成片里最多 320 帧）
+  minSec: 5,
+  maxSec: 8,
+  w: 320,
+  h: 180,
+  sampleSec: 1,    // 目标采样间隔：影片每 1 秒一个采样帧
+  maxFrames: 300,  // 采样帧数上限（再长就按上限均摊）
+  minFrames: 32,
+};
 
 const HELP = `
 用法：node build-thumbs.js --thumbs=<缩略图根> [--root=<媒体根>] [选项]
@@ -99,8 +114,11 @@ const HELP = `
   --force             无条件重建全部产物（忽略 mtime 与存在性）
   --no-fresh          关闭新鲜度检查：产物存在即跳过（等价改动前的旧语义）
   --limit=<n>         只处理前 n 条（调试用）
+  --only=<task[,task]> 只跑这一档产物：videos|sprites|pvclips|photos|previews
+                      （配 --force 可只重生成预览片段：--preview --only=pvclips --force）
+  --video=<id[,id]>   只处理这些 videoId（排查 / 单条重生成用）
   --sprite            顺手生成视频精灵图 s/<hash>.jpg（10x10 网格，每格 160x90；默认关）
-  --preview           顺手生成预览视频 pv2/<hash>.mp4|webm（静音 5-8 秒；默认关）
+  --preview           顺手生成预览视频 pv2/<hash>.mp4|webm（静音 5~8 秒，帧数按影片时长取；默认关）
   --gc                扫 v/ s/ pv2/ p/ pv/ 删孤儿派生文件（默认只打印，配 --yes 才真删）
   --yes, -y           确认 --gc 的删除动作（不给就只是干跑统计）
   --secret=<file>     密码来源②：从 secret.yml 取 spring.datasource.druid.master.password
@@ -125,7 +143,8 @@ const HELP = `
   pv2/<content_hash>.mp4    预览视频（--preview；编码器只有 VP9/VP8 时是 .webm）
 
 精灵图 / 预览视频的取帧间隔都由 media_video.dur 决定：精灵图目标是铺满
-10x10=100 格（fps=100/时长），预览视频固定 4fps * 5~8 秒。两者同时开启时
+10x10=100 格（fps=100/时长），预览视频是「成片 5~8 秒、帧数 = 时长/1 秒（32~300）」——
+帧数就是悬停定位精度，一个采样帧代表时长/帧数 秒的影片。两者同时开启时
 **一次 ffmpeg 解码同时出两张产物**（-filter_complex 分两路），不做二次解码。
 一张图/一段视频失败只计一次 fail，不中断整批。
 
@@ -167,6 +186,14 @@ function parseArgs(argv) {
     else if (a.startsWith('--host=')) o.host = a.slice('--host='.length);
     else if (a.startsWith('--port=')) o.port = a.slice('--port='.length);
     else if (a.startsWith('--limit=')) o.limit = Number(a.slice('--limit='.length));
+    // 只跑某一档产物（pvclips 用来「全库重生成预览片段」而不动 1 万张图片缩略图）
+    else if (a.startsWith('--only=')) {
+      o.only = a.slice('--only='.length).split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    // 只处理指定 videoId（排查 / 重生成个别片子的派生资源，不动全库）
+    else if (a.startsWith('--video=')) {
+      o.video = a.slice('--video='.length).split(',').map((s) => s.trim()).filter(Boolean);
+    }
     else o.ignored.push(a); // 管理端可能传旧脚本参数（--only/--album/--concurrency）：忽略而不是报错
   }
   if (!Number.isFinite(o.limit) || o.limit < 0) throw new Error('--limit 必须是 >= 0 的整数');
@@ -478,25 +505,56 @@ function spriteFilter(item) {
 }
 
 /**
- * 预览视频取帧方案：输出 4fps、时长夹在 5~8 秒；
- * step 是把这些帧均摊到整段视频上的时间间隔（时长未知时按 1 秒一帧）。
- * select 只抓等间隔的帧，setpts 把它们重排成 0.25 秒一格的连续时间轴，
- * 所以成片是「整段视频的等间隔缩时」，不是「开头 8 秒」。
+ * 预览视频取帧方案。成片固定 5~8 秒，**帧数按影片时长取**（每 sampleSec 秒一帧，夹在
+ * minFrames~maxFrames），帧率由此反推：fps = 帧数 / 成片秒数。
+ *
+ * 为什么不写死 4fps：片段从不播放，只在悬停时被 seek 到某一帧，唯一的指标是
+ * 「一个采样帧代表影片多长」= dur / frames。写死 4fps×8s 就只有 32 帧，
+ * 464 秒的片子每帧代表 14.5 秒，悬停显示的画面能差出半分钟；
+ * 帧数按 dur/sampleSec 取，464 秒 → 304 帧（每帧 1.53 秒），98 秒 → 104 帧（0.94 秒）。
+ *
+ * 取帧按 step = dur/frames 切成绝对时间格栅（每格取第一帧，见 pvFilter），
+ * setpts 再把它们重排成 1/fps 一格的连续时间轴，所以成片是「整段视频的等间隔缩时」
+ * 而不是「开头 8 秒」，且第 k 帧严格对应影片 k*dur/frames，
+ * 前端 clipSeek = ratio × 成片时长 的换算因此成立。
  */
 function pvPlan(item) {
   const dur = durOf(item);
   const seconds = dur > 0 ? Math.min(PV.maxSec, Math.max(PV.minSec, dur)) : PV.maxSec;
-  const frames = Math.max(1, Math.round(seconds * PV.fps));
+  const want = dur > 0
+    ? Math.min(PV.maxFrames, Math.max(PV.minFrames, Math.round(dur / PV.sampleSec)))
+    : PV.minFrames;
+  const fps = Math.min(PV.maxFps, Math.max(PV.fps, Math.ceil(want / seconds)));
+  const frames = Math.max(1, Math.round(seconds * fps));
   const step = dur > 0 ? Math.max(0.05, dur / frames) : 1;
-  return { seconds, frames, step };
+  return { seconds, frames, fps, step };
 }
 
 function pvFilter(item) {
   const p = pvPlan(item);
-  return "select='isnan(prev_selected_t)+gte(t-prev_selected_t," + round6(p.step) + ")'," +
-    'setpts=N/(' + PV.fps + '*TB),scale=' + PV.w + ':' + PV.h +
+  // 取帧：把整片切成 frames 个等宽的**绝对时间格栅**（第 k 格 = [k*step, (k+1)*step)），
+  // 每格取第一帧 —— 「当前帧与上一采样帧不在同一格」即选中。
+  //
+  // 为什么不用旧的 select='...gte(t-prev_selected_t,step)'：那是「距上一采样帧够 step 就取」，
+  // 每次都要补到下一个源帧上（最多补一个源帧间隔），误差随帧号累积：304 帧时中段漂 +2.5 秒、
+  // 末尾 +5 秒，片段内时间就不再线性对应影片进度（悬停位置随之系统性偏早）。
+  // 格栅按绝对时间算，误差恒为一个源帧内（30fps 源 ≤33ms），不累积。
+  //
+  // 也不用 fps=N/时长 滤镜：它会把输出帧率元数据改成 0.65fps、每帧时长 1.5 秒，
+  // 后面 -r 38 只能靠复制帧补齐（实测 304 帧里只有个位数内容不同），整片会「一帧到底」。
+  return "select='isnan(prev_selected_t)+gt(floor(t/" + round6(p.step) + "),floor(prev_selected_t/" +
+    round6(p.step) + "))',setpts=N/(" + p.fps + '*TB),scale=' + PV.w + ':' + PV.h +
     // 素材本身不满 5 秒时补最后一帧，保证成片仍落在 5~8 秒（不做二次编码、不引入音频）
     ',tpad=stop_mode=clone:stop_duration=' + round6(p.seconds);
+}
+
+/**
+ * 预览视频的输出参数：帧率 / 时长 / 关键帧间隔。
+ * 每 1 秒一个关键帧：悬停 seek 只需解码 ≤1 秒的画面，拖动时不会因为
+ * 「从唯一的关键帧解到第 300 帧」而卡顿（片段 8 秒、1080p 源，代价可以忽略）。
+ */
+function pvOutArgs(p) {
+  return ['-g', String(Math.max(1, Math.round(p.fps))), '-r', String(p.fps), '-t', String(p.seconds)];
 }
 
 /** 预览视频编码参数（不含输入 / 输出路径，-vf 由调用方拼） */
@@ -509,7 +567,7 @@ function pvEncodeArgs(o) {
 function pvclipArgs(item, src, o) {
   const p = pvPlan(item);
   return ['-i', src, '-vf', pvFilter(item), '-an'].concat(pvEncodeArgs(o))
-    .concat(['-r', String(PV.fps), '-t', String(p.seconds), item.out]);
+    .concat(pvOutArgs(p)).concat([item.out]);
 }
 
 /** 精灵图 + 预览视频一次解码同时出两张产物 */
@@ -519,7 +577,7 @@ function bothArgs(spriteItem, pvItem, src, o) {
     '-filter_complex', '[0:v]' + spriteFilter(spriteItem) + '[s];[0:v]' + pvFilter(pvItem) + '[p]',
     '-map', '[s]', '-frames:v', '1', '-q:v', '4', spriteItem.out,
   ].concat(['-map', '[p]', '-an']).concat(pvEncodeArgs(o))
-    .concat(['-r', String(PV.fps), '-t', String(p.seconds), pvItem.out]);
+    .concat(pvOutArgs(p)).concat([pvItem.out]);
 }
 
 /**
@@ -560,7 +618,7 @@ function detectPreviewEncoder(ffmpeg) {
   if (has('libx264')) {
     return {
       ext: 'mp4', name: 'libx264',
-      args: ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '32', '-pix_fmt', 'yuv420p', '-movflags', '+faststart'],
+      args: ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(PV.crf), '-pix_fmt', 'yuv420p', '-movflags', '+faststart'],
     };
   }
   if (has('libvpx-vp9')) {
@@ -715,7 +773,12 @@ function main() {
     hash: c[4] === undefined || c[4] === 'NULL' ? null : c[4],
   }));
 
-  const tasks = planTasks(videos, photos, o);
+  const videosSel = o.video && o.video.length
+    ? videos.filter((v) => o.video.indexOf(v.id) >= 0)
+    : videos;
+  const planned = planTasks(videosSel, photos, o);
+  // --only：按档过滤（未知档名静默忽略，与「管理端可能传旧参数」的一致处理）
+  const tasks = o.only && o.only.length ? planned.filter((t) => o.only.indexOf(t.task) >= 0) : planned;
   const total = tasks.length;
   const startedAt = Date.now();
   const counts = { ok: 0, skip: 0, fail: 0 };
