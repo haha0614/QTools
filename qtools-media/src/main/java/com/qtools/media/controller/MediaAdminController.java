@@ -34,6 +34,7 @@ import com.qtools.media.domain.MediaVideoMarker;
 import com.qtools.media.domain.dto.MediaScanRequest;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.service.IMediaAdminService;
+import com.qtools.media.service.IMediaDeriveStatusService;
 import com.qtools.media.service.IMediaEditPolicyService;
 import com.qtools.media.service.IMediaMaintenanceService;
 import com.qtools.media.service.IMediaOrganizeService;
@@ -111,6 +112,10 @@ public class MediaAdminController extends BaseController
     /** 播放列表（站端写、管理端只读清单 + 清理，P5-B） */
     @Autowired
     private IMediaPlaylistService mediaPlaylistService;
+
+    /** 派生资源状态（P5.10-A）：列表里的「是否已经生成 / 生成了哪些东西」 */
+    @Autowired
+    private IMediaDeriveStatusService mediaDeriveStatusService;
 
     /**
      * 文件监听（自动扫描）：<b>常驻 Bean</b>（不再由 {@code qtools.media.watch.enabled} 决定是否注册）
@@ -248,6 +253,29 @@ public class MediaAdminController extends BaseController
     public Map<String, Object> stats()
     {
         return mediaAdminService.stats();
+    }
+
+    /**
+     * 派生资源状态分页（P5.10-A）：列表里直接显示「封面 / 精灵图 / 预览片段」生成没生成
+     *
+     * <p>查询参数：{@code page}（从 1 开始）、{@code size}（默认 50，最大 200）、{@code ids}
+     * （逗号分隔的 videoId，≤200，配合「只勾选这几条」）、{@code q}（标题 / 路径模糊）、
+     * {@code kind}（all | thumb | sprite | preview；后三者只回「该档缺失或过期」的行）。</p>
+     *
+     * <p>返回 {@code {rows:[{videoId,title,dur,thumb:{exists,stale},sprite:{exists,stale},
+     * preview:{exists,stale,frames},bytes}], total, page, size, kind}}。判定口径与
+     * build-thumbs.js 的增量判定一致（产物存在非空 = exists；源 mtime &gt; 产物 mtime = stale），
+     * 目录<b>一次扫描</b>后逐行查表，预览帧数恒为 null（不逐行 ffprobe，见服务实现注释）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/derive-status")
+    public Map<String, Object> deriveStatus(@RequestParam(value = "page", required = false, defaultValue = "1") int page,
+            @RequestParam(value = "size", required = false, defaultValue = "50") int size,
+            @RequestParam(value = "ids", required = false) String ids,
+            @RequestParam(value = "q", required = false) String q,
+            @RequestParam(value = "kind", required = false) String kind)
+    {
+        return mediaDeriveStatusService.deriveStatus(ids, q, kind, page, size);
     }
 
     /**
@@ -392,9 +420,10 @@ public class MediaAdminController extends BaseController
      *       [+ {@code --album-mode=dir|prefix}] [+ {@code --exclude=a,b}]（= 旧 type=full）</td></tr>
      *   <tr><td>thumb</td><td>{@code node thumbScript} + thumbArgs [+ {@code --no-fresh}] [+ {@code --force}]
      *       （= 旧 type=thumb）</td></tr>
-     *   <tr><td>sprite</td><td>thumb 命令 + {@code --sprite}</td></tr>
-     *   <tr><td>preview</td><td>thumb 命令 + {@code --preview}</td></tr>
-     *   <tr><td>sprite,preview</td><td>thumb 命令 + {@code --sprite --preview}（组合模式只接受逗号分隔）</td></tr>
+     *   <tr><td>sprite</td><td>thumb 命令 + {@code --sprite} [+ {@code --force}]</td></tr>
+     *   <tr><td>preview</td><td>thumb 命令 + {@code --preview} [+ {@code --force}]</td></tr>
+     *   <tr><td>sprite,preview</td><td>thumb 命令 + {@code --sprite --preview} [+ {@code --force}]
+     *       （组合模式只接受逗号分隔）</td></tr>
      *   <tr><td>gc</td><td>thumb 命令 + {@code --gc --yes}；必须 {@code confirm=true}，否则 400</td></tr>
      *   <tr><td>enrich</td><td>{@code node enrichScript} + enrichArgs [+ {@code --limit=n}]（ffprobe 走 MS_FFPROBE）</td></tr>
      *   <tr><td>backfill-hash</td><td>{@code node scanScript --out=…} + scanArgs + {@code --backfill-hash}</td></tr>
@@ -405,7 +434,9 @@ public class MediaAdminController extends BaseController
      *
      * <p>生成 / 删除 / 回填开关全部由后端按 mode 追加，前端<b>不能</b>传任意子进程参数：
      * {@code albumMode} 只接受 dir|prefix 且只对 scan 生效，{@code exclude} 只允许目录名文本
-     * （带空格 / 引号 / 分号一律 400），{@code noFresh} 与 {@code force} 只对 thumb 系生效且互斥，
+     * （带空格 / 引号 / 分号一律 400），{@code noFresh} 与 {@code force} 只对 thumb / sprite / preview
+     * 生效（gc / scan / enrich / backfill-hash / fix-poster / export 传了直接 400）且互斥，
+     * {@code force=true} 时三档都会追加 {@code --force} 越过 mtime 新鲜度判定、全部重建；
      * {@code limit} 只对 thumb / sprite / preview / enrich 生效（其余传了直接 400）。</p>
      */
     @PreAuthorize("@ss.hasPermi('media:admin:scan')")

@@ -28,7 +28,12 @@ public interface IMediaScanService
      *
      * <p>mode 取值：{@code scan | thumb | sprite | preview | sprite,preview | gc | enrich |
      * backfill-hash | fix-poster | export}；可选参数 albumMode / exclude（仅 scan）、noFresh / force
-     * （仅 thumb 系）、limit（仅 thumb 系 / enrich）。所有子进程参数由服务层按白名单拼装。</p>
+     * （仅 thumb / sprite / preview，其余 mode 传了 400）、limit（仅 thumb / sprite / preview / enrich）、
+     * videoIds（≤200，仅 thumb / sprite / preview，拼成 {@code --video=a,b}；库里查不到的 id 不算错，
+     * 脚本 WARN 后计入 skipped）。所有子进程参数由服务层按白名单拼装。</p>
+     *
+     * <p>缩略图系任务结束后，job 日志会多一行 {@code RESULT ok= skip= fail= ids= [failIds=] [skipIds=]}，
+     * {@link #getJob(long)} / {@link #latest()} 的视图里对应 {@code derive} 字段（见 {@code MediaScanServiceImpl}）。</p>
      *
      * @param request 请求参数（type 是旧参数：mode 为空时兜底 full → scan、thumb → thumb）
      * @return 任务视图（含 jobId；mode=export 时另含 exportDir）

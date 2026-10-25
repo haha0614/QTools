@@ -664,6 +664,39 @@ mysql -uroot -P3307 --default-character-set=utf8mb4 qtools -e "source doc/media_
 范围校验：身高 100-250、体重 30-200、年份 1900-2100 且 `career_end >= career_start`；站端
 `GET /api/media/person/{id}` 返回已填写字段（空值不输出）。导入脚本不填这些字段（恒为空）。
 
+### 16. 只生成「勾选的这几条」+ 逐条结果（P5.10-A）
+
+管理端勾选若干视频后重生成派生资源，走的是同一支脚本，靠两个新参数收窄范围：
+
+```bash
+# ① 逗号分隔（--video 可重复传，多次叠加、去重）
+node build-thumbs.js --thumbs=<缩略图根> --root=<媒体根> --sprite --preview \
+  --video=id1,id2
+
+# ② 从文件读（每行一个 id，空行与 # 注释忽略）：上千条时命令行会超长，用它绕开
+node build-thumbs.js ... --ids-file=ids.txt
+
+# ③ 只重建某几条的预览片段（配 --force 越过 mtime 判定）
+node build-thumbs.js ... --preview --only=pvclips --force --video=id1,id2
+```
+
+- 给了 `--video` / `--ids-file` 就**只查这几行**（`WHERE id IN (...)`），并且**图片缩略图 / 大图一律不碰**；
+- 库里查不到的 id 不算错：stderr 打 `WARN 视频不存在 <id>`，stdout 打一行 `ITEM ... result=skip reason=video-not-found`，并计入 `DONE skip=`；
+- **逐条结果行**（机器可解析，管理端按它汇总）：
+
+```
+ITEM video=<videoId> task=<video|sprite|pvclip> result=<ok|skip|fail> out=<相对路径> seconds=<n> [reason=...]
+```
+
+  `out` 相对 `--thumbs`、正斜杠；失败行多一个 `reason=`（空白替换成 `_`）。图片任务不打这一行
+  （它们的 id 是 albumId/seq，不在契约里）。
+- `DONE` 行保持兼容，并在末尾多了已处理的 id 清单：`DONE ok=6 skip=7 fail=0 seconds=1 ids=id1,id2,id3,id4`
+  （超过 200 个截断并追加 `truncated=1`；一个都没有时是 `ids=-`）。
+
+管理端据此把「哪几条跑完了」写进任务日志的一行 `RESULT ok= skip= fail= ids= [failIds=]`，
+`GET /api/media/admin/scan/{jobId}` 的视图里对应 `derive` 字段。接口契约见
+`doc/媒体库派生资源状态.md`。
+
 ---
 
 ## 历史迁移：旧 Node 站 `index.json` → MySQL（`import.js`，保留）

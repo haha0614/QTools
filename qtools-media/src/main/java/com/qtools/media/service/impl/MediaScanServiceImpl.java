@@ -12,9 +12,11 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.Deque;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -93,8 +95,26 @@ public class MediaScanServiceImpl implements IMediaScanService
     /** build_thumbs.js 进度：PROGRESS 25/10359 eta=12 */
     private static final Pattern THUMB_PROGRESS = Pattern.compile("^PROGRESS\\s+(\\d+)/(\\d+)");
 
-    /** build_thumbs.js 收尾：DONE ok=12 skip=10347 fail=0 seconds=3 */
+    /** build_thumbs.js 收尾：DONE ok=12 skip=10347 fail=0 seconds=3 ids=id1,id2 */
     private static final Pattern THUMB_DONE = Pattern.compile("^DONE\\b.*\\bok=(\\d+)\\s+skip=(\\d+)\\s+fail=(\\d+)");
+
+    /**
+     * build_thumbs.js 逐条结果行：{@code ITEM video=<id> task=<video|sprite|pvclip> result=<ok|skip|fail> out=<相对路径> seconds=<n>}
+     *
+     * <p>只解析「结果」这一段：out 之后的 reason= 可有可无，所以整行用 find() 而不是 matches()。</p>
+     */
+    private static final Pattern THUMB_ITEM = Pattern.compile(
+            "^ITEM\\s+video=(\\S+)\\s+task=(\\S+)\\s+result=(\\S+)\\s+out=(\\S+)");
+
+    /** 任务结束的回写行：RESULT ok=3 skip=1 fail=0 ids=id1,id2 [failIds=id3] */
+    private static final Pattern THUMB_RESULT = Pattern.compile(
+            "^RESULT\\s+ok=(\\d+)\\s+skip=(\\d+)\\s+fail=(\\d+)\\s+ids=(\\S+)");
+
+    /** videoIds 上限：与脚本 --video= 的命令行长度上限对齐（管理端列表一页最大 200 条） */
+    private static final int MAX_VIDEO_IDS = 200;
+
+    /** videoId 形状（库里是 varchar(16)）：只收字母数字与 _-，绝不让任意文本进命令行 */
+    private static final Pattern VIDEO_ID = Pattern.compile("[A-Za-z0-9_-]{1,32}");
 
     private static final String DATE_PATTERN = "yyyy-MM-dd HH:mm:ss";
 
@@ -231,9 +251,10 @@ public class MediaScanServiceImpl implements IMediaScanService
             mediaScanJobMapper.insertJob(job);
             runningJobId.set(job.getId());
             MediaScanRequest snapshot = req.copy();
-            log.info("管理端触发扫描任务 job={} mode={} limit={} albumMode={} exclude={} noFresh={} force={} exportDir={}",
+            log.info("管理端触发扫描任务 job={} mode={} limit={} albumMode={} exclude={} noFresh={} force={} videoIds={} exportDir={}",
                     job.getId(), jobType, snapshot.getLimit(), snapshot.getAlbumMode(), snapshot.getExclude(),
-                    snapshot.isNoFresh(), snapshot.isForce(), snapshot.getExportDir());
+                    snapshot.isNoFresh(), snapshot.isForce(), snapshot.getVideoIds() == null ? 0 : snapshot.getVideoIds().size(),
+                    snapshot.getExportDir());
             executor.submit(() -> runJob(job.getId(), snapshot));
             Map<String, Object> view = toView(mediaScanJobMapper.selectJobById(job.getId()));
             if (snapshot.getExportDir() != null)
@@ -279,15 +300,63 @@ public class MediaScanServiceImpl implements IMediaScanService
             validateExclude(exclude);
             req.setExclude(exclude);
         }
-        if ((req.isNoFresh() || req.isForce()) && !isGenerateMode(jobType))
+        if (req.isForce() && !isGenerateMode(jobType))
         {
-            throw MediaException.badRequest("noFresh / force 只对 mode=thumb / sprite / preview 生效（当前 mode="
+            // force 是「忽略新鲜度、全部重建」：只有逐条产出派生文件的三种 mode 才有意义，
+            // 其余 mode 没有可重建的产物，静默忽略会让「点了按钮但没生效」无从排查，一律 400
+            throw MediaException.badRequest("force 只对 mode=thumb / sprite / preview 生效（当前 mode="
+                    + displayModeOf(jobType) + "，该 mode 没有可重建的派生产物，请去掉 force）");
+        }
+        if (req.isNoFresh() && !isGenerateMode(jobType))
+        {
+            throw MediaException.badRequest("noFresh 只对 mode=thumb / sprite / preview 生效（当前 mode="
                     + displayModeOf(jobType) + "）");
         }
         if (req.isNoFresh() && req.isForce())
         {
             throw MediaException.badRequest("noFresh 与 force 互相矛盾：force 要重建全部，noFresh 是产物存在即跳过");
         }
+        req.setVideoIds(normalizeVideoIds(jobType, req.getVideoIds()));
+    }
+
+    /**
+     * videoIds 规范化：去空白 / 去重（保序）/ 校验形状与数量
+     *
+     * <p>ids 最终拼进 {@code --video=a,b}，所以要挡住能破坏命令行的字符；<b>不</b>校验 id 是否真的存在
+     * ——脚本对查不到的 id 只 WARN 并计入 skipped，这样前端拿一页过期的列表点「生成」也不会整个 400。</p>
+     *
+     * @return 规范化后的 id 列表；null / 空表返回空表（= 不筛选，整库跑）
+     */
+    private static List<String> normalizeVideoIds(String jobType, List<String> raw)
+    {
+        if (raw == null || raw.isEmpty())
+        {
+            return List.of();
+        }
+        if (!isGenerateMode(jobType))
+        {
+            throw MediaException.badRequest("videoIds 只对 mode=thumb / sprite / preview 生效（当前 mode="
+                    + displayModeOf(jobType) + "）");
+        }
+        List<String> ids = new ArrayList<>();
+        for (String item : raw)
+        {
+            String id = item == null ? "" : item.trim();
+            if (id.isEmpty() || ids.contains(id))
+            {
+                continue;
+            }
+            if (!VIDEO_ID.matcher(id).matches())
+            {
+                throw MediaException.badRequest("videoIds 含非法 id：" + id + "（只允许字母数字与 _-，最长 32 字符）");
+            }
+            ids.add(id);
+        }
+        if (ids.size() > MAX_VIDEO_IDS)
+        {
+            throw MediaException.badRequest("videoIds 最多 " + MAX_VIDEO_IDS + " 个（收到 " + ids.size() + "）");
+        }
+        return ids;
     }
 
     /** exclude 只接受目录名文本：出现空格 / 引号 / 分号等会破坏命令行的字符一律 400 */
@@ -423,6 +492,7 @@ public class MediaScanServiceImpl implements IMediaScanService
         }
         // counters[0]=total, counters[1]=done（full 取脚本回读条数；thumb / enrich 取 START/PROGRESS/收尾行）
         int[] counters = new int[2];
+        DeriveTally tally = new DeriveTally();
         int exit = -1;
         try
         {
@@ -449,11 +519,17 @@ public class MediaScanServiceImpl implements IMediaScanService
                 {
                     // PROGRESS 行的信息量已进 total/done 两列：1 万张缩略图会产生 400+ 行，
                     // 全存进日志尾部会把 START/TASK/DONE 挤出去（无法判断是否增量）
-                    if (!isProgressLine(scriptKind, line))
+                    if (!isProgressLine(scriptKind, line) && !isItemLine(scriptKind, line))
                     {
                         appendLine(tail, line);
                     }
                     parseLine(scriptKind, line, counters);
+                    if (SCRIPT_THUMB.equals(scriptKind))
+                    {
+                        // ITEM 行逐条累积，收尾时折成一行 RESULT 回写：200 条选片会有 600 行 ITEM，
+                        // 全塞进 200 行的日志尾部会把 START/TASK/DONE 挤出去
+                        tally.accept(line);
+                    }
                     if (++counter % 10 == 0)
                     {
                         mediaScanJobMapper.updateProgress(jobId, counters[0], counters[1]);
@@ -483,6 +559,12 @@ public class MediaScanServiceImpl implements IMediaScanService
             log.error("扫描任务异常 job={}", jobId, e);
             appendLine(tail, "== 执行异常：" + e);
             exit = -1;
+        }
+
+        if (SCRIPT_THUMB.equals(scriptKind) && tally.seen())
+        {
+            // 逐条结果的汇总行：前端从 job.logTail / view.derive 读「哪几条生成了、哪几条失败」
+            appendLine(tail, tally.resultLine());
         }
 
         if (SCRIPT_EXPORT.equals(scriptKind))
@@ -570,6 +652,107 @@ public class MediaScanServiceImpl implements IMediaScanService
     {
         return line.startsWith("PROGRESS ")
                 && (SCRIPT_THUMB.equals(scriptKind) || SCRIPT_ENRICH.equals(scriptKind));
+    }
+
+    /**
+     * ITEM 行不进日志尾部：一次勾选 200 条视频就是 600 行，会把 START / TASK / FAIL 全挤出去。
+     * 它们的信息在收尾时折成一行 {@code RESULT ok= skip= fail= ids=}（见 DeriveTally）。
+     */
+    private static boolean isItemLine(String scriptKind, String line)
+    {
+        return SCRIPT_THUMB.equals(scriptKind) && line.startsWith("ITEM ");
+    }
+
+    /**
+     * 逐条 ITEM 行的汇总（「哪几条生成了」的直接来源）
+     *
+     * <p>计数按<b>产物项</b>算（一条视频的 video / sprite / pvclip 各算一项），与脚本 DONE 行同口径；
+     * ids / failIds / skipIds 按<b>视频</b>去重，前端拿它就能标出「已生成 / 失败 / 跳过」的片子。</p>
+     */
+    private static final class DeriveTally
+    {
+        private final Set<String> ids = new LinkedHashSet<>();
+
+        private final Set<String> failIds = new LinkedHashSet<>();
+
+        private final Set<String> skipIds = new LinkedHashSet<>();
+
+        private int ok;
+
+        private int skip;
+
+        private int fail;
+
+        private void accept(String line)
+        {
+            Matcher matcher = THUMB_ITEM.matcher(line);
+            if (!matcher.find())
+            {
+                return;
+            }
+            String videoId = matcher.group(1);
+            String result = matcher.group(3);
+            ids.add(videoId);
+            if ("ok".equals(result))
+            {
+                ok += 1;
+            }
+            else if ("skip".equals(result))
+            {
+                skip += 1;
+                skipIds.add(videoId);
+            }
+            else
+            {
+                fail += 1;
+                failIds.add(videoId);
+            }
+        }
+
+        private boolean seen()
+        {
+            return !ids.isEmpty();
+        }
+
+        private String resultLine()
+        {
+            StringBuilder sb = new StringBuilder("RESULT ok=").append(ok).append(" skip=").append(skip)
+                    .append(" fail=").append(fail).append(" ids=").append(joinCapped(ids));
+            if (!failIds.isEmpty())
+            {
+                sb.append(" failIds=").append(joinCapped(failIds));
+            }
+            if (!skipIds.isEmpty())
+            {
+                sb.append(" skipIds=").append(joinCapped(skipIds));
+            }
+            if (ids.size() > MAX_VIDEO_IDS)
+            {
+                sb.append(" truncated=1");
+            }
+            return sb.toString();
+        }
+    }
+
+    /** 逗号拼接并截断到 MAX_VIDEO_IDS 个（超出部分丢掉，由调用方标 truncated=1） */
+    private static String joinCapped(Set<String> ids)
+    {
+        StringBuilder sb = new StringBuilder();
+        int count = 0;
+        for (String id : ids)
+        {
+            if (count >= MAX_VIDEO_IDS)
+            {
+                break;
+            }
+            if (count > 0)
+            {
+                sb.append(',');
+            }
+            sb.append(id);
+            count += 1;
+        }
+        return sb.length() == 0 ? "-" : sb.toString();
     }
 
     /** 按脚本种类选解析器：thumb 系认 START/PROGRESS/DONE，enrich 认 START 与 enrich ok= 收尾行，其余走扫盘回读行 */
@@ -725,6 +908,10 @@ public class MediaScanServiceImpl implements IMediaScanService
      * <p>脚本自带增量判定（按源文件 mtime 跳过已存在的产物），默认参数就是增量模式；
      * {@code --no-fresh}（退回「存在即跳过」的旧语义）与 {@code --force}（全部重建）只能由请求
      * 显式打开，且互斥。</p>
+     *
+     * <p>{@code --force} 对 thumb / sprite / preview 三档同时生效（组合 mode {@code sprite,preview}
+     * 也是同一个开关）：换过取帧算法后要重生成旧片段，只能靠它越过 mtime 判定。{@code --limit=n}
+     * 同样三档通用，按脚本 planTasks 的顺序（每条视频先 videos 再 sprites / pvclips）取前 n 条。</p>
      */
     private String[] buildThumbCommand(String jobType, MediaScanRequest req)
     {
@@ -732,7 +919,9 @@ public class MediaScanServiceImpl implements IMediaScanService
         List<String> command = new ArrayList<>();
         command.add(requireNode());
         command.add(script);
-        appendConfiguredArgs(command, mediaProperties.getThumbArgs(), THUMB_MANAGED_ARGS, List.of(), List.of());
+        // --video= / --ids-file= 属于「本次请求勾选了哪几条」：配置里写了也丢掉，避免按钮与配置静默分叉
+        appendConfiguredArgs(command, mediaProperties.getThumbArgs(), THUMB_MANAGED_ARGS, List.of(),
+                List.of("--video=", "--ids-file="));
         // jobType 是 normalizeMode 归一化后的逗号拼接值：sprite,preview 两个开关都会带上
         if (jobType.contains("sprite"))
         {
@@ -752,14 +941,22 @@ public class MediaScanServiceImpl implements IMediaScanService
         {
             command.add("--no-fresh");
         }
-        if (req != null && req.isForce())
+        if (req != null && req.isForce() && isGenerateMode(jobType))
         {
+            // 三档共用一个开关：thumb / sprite / preview（含 sprite,preview 组合）都按请求追加
+            // --force，否则脚本的新鲜度判定（产物 mtime >= 源 mtime）会把换过取帧算法的旧片段
+            // 判成「已是最新」全部跳过；gc 没有产物可重建，校验层已先 400，这里再兜一层
             command.add("--force");
         }
         Integer limit = req == null ? null : req.getLimit();
         if (limit != null && limit > 0)
         {
             command.add("--limit=" + limit);
+        }
+        if (req != null && req.getVideoIds() != null && !req.getVideoIds().isEmpty())
+        {
+            // 勾选生成：脚本只处理这些 videoId 的三档派生产物，图片缩略图一概不碰
+            command.add("--video=" + String.join(",", req.getVideoIds()));
         }
         return command.toArray(new String[0]);
     }
@@ -1139,7 +1336,81 @@ public class MediaScanServiceImpl implements IMediaScanService
             view.put("costMs", job.getFinishedAt().getTime() - job.getStartedAt().getTime());
         }
         view.put("logTail", tailLines(job.getLog()));
+        // 逐条结果（「哪几条生成了」）：有 RESULT 行才给，前端可直接按 id 打标
+        Map<String, Object> derive = deriveResultOf(job.getLog());
+        if (derive != null)
+        {
+            view.put("derive", derive);
+        }
         return view;
+    }
+
+    /**
+     * 从 job 日志的 {@code RESULT ok= skip= fail= ids= [failIds=] [skipIds=] [truncated=1]} 行解析结构化结果
+     *
+     * <p>取<b>最后</b>一行（任务被重跑 / 日志里出现多次也只看最终那次）；没有就返回 null，
+     * 保证旧任务的接口形状不变。</p>
+     */
+    private static Map<String, Object> deriveResultOf(String logText)
+    {
+        if (StringUtils.isEmpty(logText))
+        {
+            return null;
+        }
+        String found = null;
+        for (String line : logText.split("\n"))
+        {
+            if (line.startsWith("RESULT ") && THUMB_RESULT.matcher(line).find())
+            {
+                found = line;
+            }
+        }
+        if (found == null)
+        {
+            return null;
+        }
+        Matcher matcher = THUMB_RESULT.matcher(found);
+        matcher.find();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", Integer.parseInt(matcher.group(1)));
+        out.put("skip", Integer.parseInt(matcher.group(2)));
+        out.put("fail", Integer.parseInt(matcher.group(3)));
+        out.put("ids", splitIds(matcher.group(4)));
+        out.put("failIds", splitIds(fieldOf(found, "failIds=")));
+        out.put("skipIds", splitIds(fieldOf(found, "skipIds=")));
+        out.put("truncated", found.contains("truncated=1"));
+        return out;
+    }
+
+    /** 取 {@code <name><值>} 这种空格分隔字段的值；没有返回空串 */
+    private static String fieldOf(String line, String name)
+    {
+        int at = line.indexOf(' ' + name);
+        if (at < 0)
+        {
+            return "";
+        }
+        String rest = line.substring(at + 1 + name.length());
+        int end = rest.indexOf(' ');
+        return end < 0 ? rest : rest.substring(0, end);
+    }
+
+    /** 逗号分隔 id 串 → 列表（"-" 与空串都当空表） */
+    private static List<String> splitIds(String csv)
+    {
+        List<String> ids = new ArrayList<>();
+        if (csv == null || csv.isEmpty() || "-".equals(csv))
+        {
+            return ids;
+        }
+        for (String part : csv.split(","))
+        {
+            if (!part.isEmpty())
+            {
+                ids.add(part);
+            }
+        }
+        return ids;
     }
 
     private static List<String> tailLines(String logText)

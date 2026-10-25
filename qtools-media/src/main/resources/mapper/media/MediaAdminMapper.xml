@@ -296,6 +296,38 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </select>
 
     <!--
+        派生资源状态（P5.10-A）：按 ids / 关键字取视频行，content_hash 一并带出
+        （产物名 = content_hash 优先、为空回退 videoId，与 build-thumbs.js 的 thumbName() 同一规则）。
+        分页由调用方给（PageHelper），kind 过滤在内存里做，所以这里不带任何派生条件。
+    -->
+    <resultMap type="com.qtools.media.domain.MediaVideo" id="MediaAdminDeriveResult">
+        <id     property="id"          column="id"           />
+        <result property="rootId"      column="root_id"      />
+        <result property="relPath"     column="rel_path"     />
+        <result property="title"       column="title"        />
+        <result property="dur"         column="dur"          />
+        <result property="contentHash" column="content_hash" />
+        <result property="missing"     column="missing"      />
+    </resultMap>
+
+    <select id="selectDeriveVideos" resultMap="MediaAdminDeriveResult">
+        select v.id, v.root_id, v.rel_path, v.title, v.dur, v.content_hash, v.missing
+        from media_video v
+        <where>
+            <if test="ids != null and ids.size() > 0">
+                and v.id in
+                <foreach collection="ids" item="item" open="(" separator="," close=")">
+                    #{item}
+                </foreach>
+            </if>
+            <if test="keyword != null and keyword != ''">
+                and (v.title like concat('%', #{keyword}, '%') or v.rel_path like concat('%', #{keyword}, '%'))
+            </if>
+        </where>
+        order by v.id asc
+    </select>
+
+    <!--
         真删缺失行（唯一会 DELETE media_photo / media_video 的地方）：
         ids 为空 = 该类型全部缺失行（调用方只在 body 明确 all:true 时传空）。
         where missing = 1 是安全闸：扫描又把文件找回来（missing=0）的行永远删不掉。

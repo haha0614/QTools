@@ -33,6 +33,9 @@
  * 默认干跑只打印，--gc --yes 才真删
  * （与 scan-media.js 的 --truncate/--yes 同一套确认语义）。
  *
+ * 指定范围：--video=<id[,id]>（可重复）/ --ids-file=<每行一个> 只处理这几条视频的三档产物，
+ *           图片缩略图一概不碰；库里没有的 id 只 WARN 并计入 skipped（管理端「勾选生成」用它）。
+ *
  * 增量：产物存在、非空，且产物 mtime >= 源文件 mtime -> skip（源被替换 / 重编码后自动重建）；
  *       --force 强制重建；--no-fresh 关掉 mtime 判断，退回「存在即跳过」的旧语义。
  * 幂等：只写缩略图根目录，不碰源媒体目录。
@@ -50,7 +53,9 @@
  *   GC scan dirs=v,s,pv2 files=<n> orphans=<n> bytes=<n>
  *   GC TOP <v|s|pv2>/<name> size=<n>   最多 10 行（按体积从大到小）
  *   GC dry-run ... / GC remove dirs=v,s,pv2 removed=<n> failed=<n> bytes=<n>
- *   DONE ok=<n> skip=<n> fail=<n> seconds=<n>[ GC removed=<n> kept=<n>]
+ *   ITEM video=<id> task=<video|sprite|pvclip> result=<ok|skip|fail> out=<相对路径> seconds=<n> [reason=...]
+ *        逐条结果行（每完成一项一行）：后端按它汇总「哪几条生成了」，见 MediaScanServiceImpl 的 RESULT 行
+ *   DONE ok=<n> skip=<n> fail=<n> seconds=<n>[ GC removed=<n> kept=<n>] ids=<逗号分隔的已处理 videoId>
  * 有失败条目时退出码仍为 0（与原作者 build_thumbs.js 一致），只有 ffmpeg 缺失 / 数据库读不到
  * 等致命错误才非 0。
  *
@@ -79,6 +84,9 @@ const DEFAULTS = {
   preview: false,
   gc: false,
   gcYes: false,
+  // --video / --ids-file：只处理指定 videoId（可重复传、可逗号分隔、可从文件读）
+  video: null,
+  idsFile: null,
 };
 
 // 精灵图：10 列 x 10 行、每格 160x90 -> 成品恒为 1600x900，最多 100 帧
@@ -116,7 +124,9 @@ const HELP = `
   --limit=<n>         只处理前 n 条（调试用）
   --only=<task[,task]> 只跑这一档产物：videos|sprites|pvclips|photos|previews
                       （配 --force 可只重生成预览片段：--preview --only=pvclips --force）
-  --video=<id[,id]>   只处理这些 videoId（排查 / 单条重生成用）
+  --video=<id[,id]>   只处理这些 videoId（排查 / 单条重生成用）：可重复传、可逗号分隔，
+                      给了它就只处理这些视频的 v/ s/ pv2/ 产物，不再碰任何图片缩略图
+  --ids-file=<path>   从文件读 videoId（每行一个，空行与 # 注释忽略）：与 --video 叠加
   --sprite            顺手生成视频精灵图 s/<hash>.jpg（10x10 网格，每格 160x90；默认关）
   --preview           顺手生成预览视频 pv2/<hash>.mp4|webm（静音 5~8 秒，帧数按影片时长取；默认关）
   --gc                扫 v/ s/ pv2/ p/ pv/ 删孤儿派生文件（默认只打印，配 --yes 才真删）
@@ -158,7 +168,12 @@ media_video.content_hash 里、也不在 media_video.id 里」的文件，以及
 源文件被替换 / 重编码后 mtime 变新，下一次运行自动重建该条产物。
 
 输出行（管理端解析，不要改）：
-  START total=<n> ... / PROGRESS <done>/<total> / DONE ok=<n> skip=<n> fail=<n>
+  START total=<n> ... / PROGRESS <done>/<total> / DONE ok=<n> skip=<n> fail=<n> ids=<...>
+  ITEM video=<id> task=<video|sprite|pvclip> result=<ok|skip|fail> out=<相对路径> seconds=<n> [reason=...]
+      逐条结果行：每完成一项打一行（task 只有视频的三档；图片任务不打）。
+      out 相对 --thumbs，正斜杠；skip / fail 也打一行，fail 另有 reason=（空白换成 _）。
+      指定了 --video 但库里没有的 id：打 WARN 视频不存在 <id>，并打一行
+      ITEM video=<id> task=video result=skip out=- reason=video-not-found。
   DISTINCT photos|previews rows=<n> files=<n> missing=<n>
       内容寻址去重：rows 是库里的行数、files 是应有的 <content_hash>.jpg 个数、
       missing 才是真缺文件（skip 多不代表该建未建）
@@ -191,9 +206,13 @@ function parseArgs(argv) {
       o.only = a.slice('--only='.length).split(',').map((s) => s.trim()).filter(Boolean);
     }
     // 只处理指定 videoId（排查 / 重生成个别片子的派生资源，不动全库）
+    // 可重复传（--video=a --video=b）也可逗号分隔（--video=a,b）：两种写法叠加，最后按出现顺序去重
     else if (a.startsWith('--video=')) {
-      o.video = a.slice('--video='.length).split(',').map((s) => s.trim()).filter(Boolean);
+      const ids = a.slice('--video='.length).split(',').map((s) => s.trim()).filter(Boolean);
+      o.video = (o.video || []).concat(ids);
     }
+    // 从文件读 id（每行一个，空行与 # 注释忽略）：上千条时命令行会超长，用它绕开
+    else if (a.startsWith('--ids-file=')) o.idsFile = a.slice('--ids-file='.length);
     else o.ignored.push(a); // 管理端可能传旧脚本参数（--only/--album/--concurrency）：忽略而不是报错
   }
   if (!Number.isFinite(o.limit) || o.limit < 0) throw new Error('--limit 必须是 >= 0 的整数');
@@ -332,6 +351,60 @@ function query(mysqlExe, o, password, sql) {
   return text.split('\n').map((line) => line.split('\t'));
 }
 
+/**
+ * 读 --ids-file：每行一个 id，忽略空行与 # 注释（上千条 id 靠命令行会超长，用它绕开）
+ */
+function readIdsFile(file) {
+  const abs = path.resolve(file);
+  let raw;
+  try {
+    raw = fs.readFileSync(abs, 'utf8');
+  } catch (e) {
+    throw new Error('--ids-file 指定的文件读不到：' + abs + '（' + (e.code || e.message) + '）');
+  }
+  const ids = [];
+  for (const line of raw.replace(/^\uFEFF/, '').split(/\r?\n/)) {
+    const text = line.trim();
+    if (text === '' || text.startsWith('#')) continue;
+    ids.push(text);
+  }
+  return ids;
+}
+
+// videoId 在库里是 varchar(16)（sha1(rel_path)[:12] 或手工 id）：只收字母数字与 _-，
+// 避免把任意文本拼进 SQL 的 IN (...) 与命令行
+const VIDEO_ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
+
+/** --video 与 --ids-file 合并去重（保序）：返回要处理的 videoId 列表，空表 = 不筛 */
+function selectedVideoIds(o) {
+  const raw = (o.video || []).slice();
+  if (o.idsFile) raw.push(...readIdsFile(o.idsFile));
+  const out = [];
+  for (const item of raw) {
+    const id = String(item).trim();
+    if (id === '' || out.indexOf(id) >= 0) continue;
+    if (!VIDEO_ID_RE.test(id)) {
+      throw new Error('videoId 形状不对（只允许字母数字与 _-，最长 32 字符）：' + id);
+    }
+    out.push(id);
+  }
+  return out;
+}
+
+/** 只查选中的 id：--video 时不再把全库视频拉进内存 */
+function queryVideosByIds(mysqlExe, o, password, ids) {
+  const list = ids.map((id) => "'" + id.replace(/'/g, "''") + "'").join(',');
+  return query(mysqlExe, o, password,
+    'SELECT id,rel_path,content_hash,dur FROM media_video WHERE id IN (' + list + ') ORDER BY id;');
+}
+
+/** mysql 行 -> 视频对象（NULL 还原成 null，免得拿字面量 "NULL" 当哈希拼文件名） */
+function mapVideoRows(rows) {
+  return rows.map((c) => ({
+    id: c[0], rel: c[1], hash: c[2] === 'NULL' ? null : c[2], dur: c[3] === 'NULL' ? null : c[3],
+  }));
+}
+
 // ---------------------------------------------------------------- 任务清单
 
 /** 视频封面文件名：content_hash 优先（内容寻址），为空回退 videoId（老命名） */
@@ -363,17 +436,21 @@ function planTasks(videos, photos, o) {
   const t = [];
   for (const v of videos) {
     // 内容寻址：同一份内容改名 / 移动后 content_hash 不变，仍复用同一张封面
-    t.push({ task: 'videos', src: v.rel, out: path.join(o.thumbs, 'v', thumbName(v) + '.jpg'), kind: 'video' });
+    // videoId 只用于 ITEM 行（后端按它汇总「哪几条生成了」），不参与落盘路径
+    t.push({
+      task: 'videos', videoId: v.id, src: v.rel, kind: 'video',
+      out: path.join(o.thumbs, 'v', thumbName(v) + '.jpg'),
+    });
     // 精灵图 / 预览视频紧跟同一条视频：两者都要重建时主流程会把它们合并成一次 ffmpeg
     if (o.sprite) {
       t.push({
-        task: 'sprites', src: v.rel, kind: 'sprite', dur: v.dur,
+        task: 'sprites', videoId: v.id, src: v.rel, kind: 'sprite', dur: v.dur,
         out: path.join(o.thumbs, 's', thumbName(v) + '.jpg'),
       });
     }
     if (o.preview) {
       t.push({
-        task: 'pvclips', src: v.rel, kind: 'pvclip', dur: v.dur,
+        task: 'pvclips', videoId: v.id, src: v.rel, kind: 'pvclip', dur: v.dur,
         out: path.join(o.thumbs, 'pv2', thumbName(v) + '.' + (o.previewEncoder || {}).ext),
       });
     }
@@ -444,6 +521,33 @@ function distinctStats(tasks, taskName) {
     if (!alreadyDone(out)) missing += 1;
   }
   return { rows, files: outs.size, missing };
+}
+
+// ---------------------------------------------------------------- ITEM / 汇总行
+
+/** 任务档 → ITEM 行的 task 取值（图片档不在契约里，故意不列） */
+const ITEM_TASK_OF = { videos: 'video', sprites: 'sprite', pvclips: 'pvclip' };
+
+/** DONE ids= 最多列多少个 videoId（超了截断并注明 truncated，避免一行把日志撑爆） */
+const MAX_ITEM_IDS = 200;
+
+/** 产物路径 → 相对 --thumbs 的正斜杠路径（跨平台，前端 / 后端都直接可用作 URL 尾巴） */
+function outRel(thumbs, out) {
+  const rel = path.relative(thumbs, out).split(path.sep).join('/');
+  return rel === '' ? '-' : rel;
+}
+
+/** 失败原因压成单行单词（ITEM 行按空白切字段，reason 里不能有空格） */
+function oneLine(reason) {
+  const text = String(reason == null ? '' : reason).replace(/\s+/g, '_').slice(0, 200);
+  return text === '' ? '-' : text;
+}
+
+/** DONE ids= 的取值：逗号分隔的已处理 videoId，超过 200 个截断并注明 truncated=1 */
+function doneIdsText(ids) {
+  if (!ids || ids.length === 0) return '-';
+  if (ids.length <= MAX_ITEM_IDS) return ids.join(',');
+  return ids.slice(0, MAX_ITEM_IDS).join(',') + ' truncated=1';
 }
 
 function runFfmpeg(ffmpeg, args) {
@@ -760,26 +864,29 @@ function main() {
     warn('预览视频编码器：' + o.previewEncoder.name + ' -> pv2/<hash>.' + o.previewEncoder.ext);
   }
 
-  const videoRows = query(mysqlExe, o, password,
-    'SELECT id,rel_path,content_hash,dur FROM media_video ORDER BY id;');
-  const photoRows = query(mysqlExe, o, password,
+  // 指定了 videoId 就只查这几行（IN (...)），不再把全库视频拉进来
+  const wanted = selectedVideoIds(o);
+  const videos = wanted.length
+    ? mapVideoRows(queryVideosByIds(mysqlExe, o, password, wanted))
+    : mapVideoRows(query(mysqlExe, o, password,
+      'SELECT id,rel_path,content_hash,dur FROM media_video ORDER BY id;'));
+  // 指定 videoId 时图片缩略图 / 大图一律不碰：调用方要的是「这几条视频的派生产物」
+  const photoRows = wanted.length ? [] : query(mysqlExe, o, password,
     'SELECT album_id,seq,rel_path,is_big,content_hash FROM media_photo ORDER BY album_id,seq;');
-  // mysql --batch 把 NULL 打成字面量 "NULL"，这里还原成 null，免得拿 "NULL" 当哈希拼文件名
-  const videos = videoRows.map((c) => ({
-    id: c[0], rel: c[1], hash: c[2] === 'NULL' ? null : c[2], dur: c[3] === 'NULL' ? null : c[3],
-  }));
   const photos = photoRows.map((c) => ({
     albumId: c[0], seq: Number(c[1]), rel: c[2], isBig: c[3],
     hash: c[4] === undefined || c[4] === 'NULL' ? null : c[4],
   }));
+  // 请求了但库里没有的 id：不算错，WARN + 计入 skipped（调用方的 ids 可能已被删/改名）
+  const found = {};
+  for (const v of videos) found[v.id] = true;
+  const missingIds = wanted.filter((id) => !found[id]);
 
-  const videosSel = o.video && o.video.length
-    ? videos.filter((v) => o.video.indexOf(v.id) >= 0)
-    : videos;
-  const planned = planTasks(videosSel, photos, o);
+  const planned = planTasks(videos, photos, o);
   // --only：按档过滤（未知档名静默忽略，与「管理端可能传旧参数」的一致处理）
   const tasks = o.only && o.only.length ? planned.filter((t) => o.only.indexOf(t.task) >= 0) : planned;
-  const total = tasks.length;
+  // 库里有不存在的 id 时它们也各占一条（打 ITEM skip + PROGRESS），total 因此按 tasks + missing 算
+  const total = tasks.length + missingIds.length;
   const startedAt = Date.now();
   const counts = { ok: 0, skip: 0, fail: 0 };
   const taskNames = ['videos', 'photos', 'previews'];
@@ -806,9 +913,20 @@ function main() {
 
   let done = 0;
   const perTask = {};
+  // 出过 ITEM 行的 videoId（去重保序）：DONE ids= 用它，后端据此知道「跑了哪几条」
+  const processedIds = [];
+  // 指定了 id 但库里没有：WARN 一行（stderr）+ ITEM skip 一行（stdout，机器可解析），计入 skipped
+  for (const id of missingIds) {
+    warn('视频不存在 ' + id);
+    counts.skip += 1;
+    log('ITEM video=' + id + ' task=video result=skip out=- seconds=0 reason=video-not-found');
+    done += 1;
+    log('PROGRESS ' + done + '/' + total);
+  }
   for (const t of tasks) {
     if (!perTask[t.task]) perTask[t.task] = { total: 0, ok: 0, skip: 0, fail: 0 };
     perTask[t.task].total += 1;
+    const itemStart = Date.now();
     let result;
     if (doneByMate.has(t)) {
       result = doneByMate.get(t);
@@ -838,6 +956,16 @@ function main() {
       counts.ok += 1;
       perTask[t.task].ok += 1;
     }
+    // 逐条结果行（机器可解析，后端 MediaScanServiceImpl 按它汇总 RESULT）：
+    // 视频的三档各打一行，图片任务不打（它们的 id 是 albumId/seq，不在本行的契约里）
+    const itemToken = ITEM_TASK_OF[t.task];
+    if (itemToken) {
+      const label = result.ok ? (result.skip ? 'skip' : 'ok') : 'fail';
+      if (processedIds.indexOf(t.videoId) < 0) processedIds.push(t.videoId);
+      log('ITEM video=' + t.videoId + ' task=' + itemToken + ' result=' + label +
+        ' out=' + outRel(o.thumbs, t.out) + ' seconds=' + Math.round((Date.now() - itemStart) / 1000) +
+        (result.ok ? '' : ' reason=' + oneLine(result.reason)));
+    }
     done += 1;
     log('PROGRESS ' + done + '/' + total);
   }
@@ -862,7 +990,7 @@ function main() {
   }
 
   log('DONE ok=' + counts.ok + ' skip=' + counts.skip + ' fail=' + counts.fail +
-    ' seconds=' + Math.round((Date.now() - startedAt) / 1000) + gcTail);
+    ' seconds=' + Math.round((Date.now() - startedAt) / 1000) + gcTail + ' ids=' + doneIdsText(processedIds));
   return 0; // 单条失败不改变退出码（与原作者 build_thumbs.js 一致）
 }
 

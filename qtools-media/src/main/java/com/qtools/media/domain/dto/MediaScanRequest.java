@@ -1,5 +1,7 @@
 package com.qtools.media.domain.dto;
 
+import java.util.List;
+
 /**
  * 一次扫描 / 维护任务的请求参数（{@code POST /api/media/admin/scan} 的 body）
  *
@@ -33,6 +35,14 @@ public class MediaScanRequest
 
     /** mode=thumb / sprite / preview 专用：忽略增量、全部重建（追加 --force） */
     private boolean force;
+
+    /**
+     * mode=thumb / sprite / preview 专用：只处理这些 videoId（≤200，追加 {@code --video=a,b}）
+     *
+     * <p>「勾选想生成的视频」的入口：脚本对库里查不到的 id 只 WARN 并跳过，不报错——
+     * 前端拿到的是管理端列表里的 id，列表本身就可能滞后于一次删除 / 改名。</p>
+     */
+    private List<String> videoIds;
 
     /** mode=export 专用：后端生成的产物目录（{@code <exportPath>/<yyyyMMdd-HHmmss>}），不接受前端传值 */
     private String exportDir;
@@ -68,6 +78,7 @@ public class MediaScanRequest
         copy.exclude = exclude;
         copy.noFresh = noFresh;
         copy.force = force;
+        copy.videoIds = videoIds == null ? null : List.copyOf(videoIds);
         copy.exportDir = exportDir;
         copy.origin = origin;
         copy.triggerNote = triggerNote;
@@ -152,6 +163,16 @@ public class MediaScanRequest
     public void setForce(boolean force)
     {
         this.force = force;
+    }
+
+    public List<String> getVideoIds()
+    {
+        return videoIds;
+    }
+
+    public void setVideoIds(List<String> videoIds)
+    {
+        this.videoIds = videoIds;
     }
 
     public String getExportDir()

@@ -51,6 +51,17 @@ public interface MediaAdminMapper
     List<MediaVideo> selectMissingVideoPage();
 
     /**
+     * 派生资源状态用：按 ids / 关键字取视频行（含 content_hash，用于内容寻址的产物名）
+     *
+     * <p>分页由调用方决定（{@code PageHelper.startPage}）：kind 过滤只能在内存里做，
+     * 那时需要一次把整批行取回来。</p>
+     *
+     * @param ids     videoId 列表；null / 空表 = 不按 id 过滤
+     * @param keyword 标题 / 相对路径模糊匹配；空 = 不过滤
+     */
+    List<MediaVideo> selectDeriveVideos(@Param("ids") List<String> ids, @Param("keyword") String keyword);
+
+    /**
      * 真删缺失图片行
      *
      * @param ids 要删的 photo id；为空 = 全部 missing = 1 的行（调用方负责 all:true 的语义）
