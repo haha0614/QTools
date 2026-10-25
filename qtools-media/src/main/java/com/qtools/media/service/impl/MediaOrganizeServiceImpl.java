@@ -67,6 +67,9 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
     /** 单次补丁里标签 id 上限 */
     private static final int TAG_IDS_MAX = 100;
 
+    /** 标签层级最深 20 层（写入校验 + 路径计算的双保险上限） */
+    private static final int TAG_DEPTH_MAX = 20;
+
     /** 批量 markerDelta.add 单次上限（每条会广播到全部 ids，避免 N×M 爆炸） */
     private static final int MARKER_ADD_MAX = 20;
 
@@ -91,10 +94,58 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
     @Override
     public List<Map<String, Object>> tagList()
     {
-        List<Map<String, Object>> out = new ArrayList<>();
-        for (MediaTag tag : mediaOrganizeMapper.selectTagList())
+        List<MediaTag> tags = mediaOrganizeMapper.selectTagList();
+        Map<Long, MediaTag> index = tagIndex(tags);
+        List<Map<String, Object>> out = new ArrayList<>(tags.size());
+        for (MediaTag tag : tags)
         {
-            out.add(tagNode(tag));
+            out.add(tagNode(tag, buildPath(tag, index)));
+        }
+        return out;
+    }
+
+    @Override
+    public List<Long> descendantTagIds(Long id)
+    {
+        if (id == null)
+        {
+            throw MediaException.badRequest("missing id");
+        }
+        // 自顶向下 BFS：children 关系由全量字典现算，几十行量级，比递归 SQL 更容易讲清语义
+        Map<Long, List<Long>> children = new LinkedHashMap<>();
+        List<MediaTag> tags = mediaOrganizeMapper.selectTagList();
+        boolean exists = false;
+        for (MediaTag tag : tags)
+        {
+            if (tag.getId().equals(id))
+            {
+                exists = true;
+            }
+            if (tag.getParentId() != null)
+            {
+                children.computeIfAbsent(tag.getParentId(), k -> new ArrayList<>()).add(tag.getId());
+            }
+        }
+        if (!exists)
+        {
+            throw MediaException.notFound("标签不存在: " + id);
+        }
+        List<Long> out = new ArrayList<>();
+        Set<Long> seen = new LinkedHashSet<>();
+        List<Long> queue = new ArrayList<>();
+        queue.add(id);
+        seen.add(id);
+        for (int head = 0; head < queue.size(); head++)
+        {
+            Long current = queue.get(head);
+            out.add(current);
+            for (Long child : children.getOrDefault(current, List.of()))
+            {
+                if (seen.add(child))
+                {
+                    queue.add(child);
+                }
+            }
         }
         return out;
     }
@@ -132,7 +183,7 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
             log.info("新建媒体标签 id={} name={}", fresh.getId(), cleanName);
         }
 
-        Map<String, Object> out = tagNode(tag);
+        Map<String, Object> out = tagNode(tag, pathOf(tag));
         out.put("created", created);
         return out;
     }
@@ -162,7 +213,8 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public Map<String, Object> updateTag(Long id, String name, String color, boolean colorPresent)
+    public Map<String, Object> updateTag(Long id, String name, String color, boolean colorPresent, Long parentId,
+            boolean parentPresent)
     {
         if (id == null)
         {
@@ -183,9 +235,9 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
         {
             throw MediaException.badRequest("颜色值最长 " + COLOR_MAX + " 个字符（建议 #RRGGBB）");
         }
-        if (cleanName == null && !colorPresent)
+        if (cleanName == null && !colorPresent && !parentPresent)
         {
-            throw MediaException.badRequest("body 里没有任何可改字段（name / color）");
+            throw MediaException.badRequest("body 里没有任何可改字段（name / color / parentId）");
         }
 
         // 重名校验：改名撞上别的字典项直接 409（新建走的「重名复用」在改名场景会把两行合成一行，不能照搬）
@@ -205,8 +257,15 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
         {
             mediaOrganizeMapper.updateTagColor(id, cleanColor);
         }
+        if (parentPresent)
+        {
+            checkParent(id, parentId);
+            mediaOrganizeMapper.updateTagParent(id, parentId);
+            log.info("媒体标签置父 id={} parentId={}（null = 置顶）", id, parentId);
+        }
         invalidateIndex();
-        return tagNode(mediaOrganizeMapper.selectTagById(id));
+        MediaTag after = mediaOrganizeMapper.selectTagById(id);
+        return tagNode(after, pathOf(after));
     }
 
     // ------------------------------------------------------------------ 单条元数据
@@ -647,14 +706,145 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
         return out;
     }
 
-    private static Map<String, Object> tagNode(MediaTag tag)
+    private static Map<String, Object> tagNode(MediaTag tag, String path)
     {
         Map<String, Object> node = new LinkedHashMap<>();
         node.put("id", tag.getId());
         node.put("name", tag.getName());
+        node.put("parentId", tag.getParentId());
         node.put("color", tag.getColor());
         node.put("useCount", tag.getUseCount() == null ? 0 : tag.getUseCount());
+        node.put("path", path);
         return node;
+    }
+
+    /** id → 标签，供路径计算与父链校验用（字典只有几十行，一次全量取回即可） */
+    private static Map<Long, MediaTag> tagIndex(List<MediaTag> tags)
+    {
+        Map<Long, MediaTag> index = new LinkedHashMap<>();
+        for (MediaTag tag : tags)
+        {
+            index.put(tag.getId(), tag);
+        }
+        return index;
+    }
+
+    /**
+     * 从顶层到自身的名字链（{@code 演员/日本/XX}）
+     *
+     * <p>最多上溯 {@link #TAG_DEPTH_MAX} 层，遇到环立刻截断成 {@code ...} 前缀——
+     * 库里理论上不会出现环（写入时校验），但读路径不能因为一行脏数据就死循环。</p>
+     */
+    private static String buildPath(MediaTag tag, Map<Long, MediaTag> index)
+    {
+        List<String> names = new ArrayList<>();
+        MediaTag current = tag;
+        boolean truncated = false;
+        for (int depth = 0; current != null; depth++)
+        {
+            if (depth >= TAG_DEPTH_MAX)
+            {
+                truncated = true;
+                break;
+            }
+            names.add(current.getName());
+            Long parentId = current.getParentId();
+            if (parentId == null)
+            {
+                break;
+            }
+            MediaTag parent = index.get(parentId);
+            if (parent == null)
+            {
+                break;
+            }
+            if (parent.getId().equals(tag.getId()))
+            {
+                truncated = true;
+                break;
+            }
+            current = parent;
+        }
+        java.util.Collections.reverse(names);
+        String path = String.join("/", names);
+        return truncated ? "..." + path : path;
+    }
+
+    /** 单条返回时现查父链（新建 / 改完之后回显用；避开一次全量字典） */
+    private String pathOf(MediaTag tag)
+    {
+        if (tag == null)
+        {
+            return null;
+        }
+        Map<Long, MediaTag> index = new LinkedHashMap<>();
+        index.put(tag.getId(), tag);
+        Long parentId = tag.getParentId();
+        int depth = 0;
+        while (parentId != null && depth < TAG_DEPTH_MAX)
+        {
+            MediaTag parent = index.get(parentId);
+            if (parent == null)
+            {
+                parent = mediaOrganizeMapper.selectTagById(parentId);
+                if (parent == null)
+                {
+                    break;
+                }
+                index.put(parent.getId(), parent);
+            }
+            parentId = parent.getParentId();
+            depth++;
+        }
+        return buildPath(tag, index);
+    }
+
+    /**
+     * 置父校验：不许自引用、不许成环、深度不超过 {@link #TAG_DEPTH_MAX} 层
+     *
+     * <p>MySQL 8 的 CHECK 不能跨行查表，所以这条约束只能落在服务层；
+     * 环检测沿 parent 链上溯，最多走 20 层就够（同一层上限）。
+     */
+    private void checkParent(Long id, Long parentId)
+    {
+        if (parentId == null)
+        {
+            return;
+        }
+        if (parentId.equals(id))
+        {
+            throw MediaException.badRequest("不能把标签挂到自己下面: " + id);
+        }
+        Map<Long, MediaTag> index = tagIndex(mediaOrganizeMapper.selectTagList());
+        MediaTag parent = index.get(parentId);
+        if (parent == null)
+        {
+            throw MediaException.badRequest("父标签不存在: " + parentId);
+        }
+        int depth = 1;
+        MediaTag cursor = parent;
+        Set<Long> visited = new LinkedHashSet<>();
+        while (cursor != null)
+        {
+            if (!visited.add(cursor.getId()))
+            {
+                throw MediaException.badRequest("标签层级已成环，不能再挂: " + parentId);
+            }
+            if (cursor.getId().equals(id))
+            {
+                throw MediaException.badRequest("不能把标签挂到自己的后代下面（会成环）: " + id + " -> " + parentId);
+            }
+            if (cursor.getParentId() == null)
+            {
+                break;
+            }
+            cursor = index.get(cursor.getParentId());
+            depth++;
+            if (depth > TAG_DEPTH_MAX)
+            {
+                throw MediaException.badRequest("标签层级最深 " + TAG_DEPTH_MAX + " 层");
+            }
+        }
     }
 
     private void recomputeUseCount(Set<Long> tagIds)

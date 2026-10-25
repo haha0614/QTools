@@ -37,6 +37,7 @@ import com.qtools.media.service.IMediaAdminService;
 import com.qtools.media.service.IMediaEditPolicyService;
 import com.qtools.media.service.IMediaMaintenanceService;
 import com.qtools.media.service.IMediaOrganizeService;
+import com.qtools.media.service.IMediaPersonService;
 import com.qtools.media.service.IMediaSavedFilterService;
 import com.qtools.media.service.IMediaScanService;
 import com.qtools.media.service.IMediaWatchService;
@@ -46,7 +47,10 @@ import static com.qtools.media.support.MediaBodyParser.decimalValue;
 import static com.qtools.media.support.MediaBodyParser.intValue;
 import static com.qtools.media.support.MediaBodyParser.integerValue;
 import static com.qtools.media.support.MediaBodyParser.longValue;
+import static com.qtools.media.support.MediaBodyParser.longsValue;
 import static com.qtools.media.support.MediaBodyParser.metaPatch;
+import static com.qtools.media.support.MediaBodyParser.personPatch;
+import static com.qtools.media.support.MediaBodyParser.rolesValue;
 import static com.qtools.media.support.MediaBodyParser.parseObject;
 import static com.qtools.media.support.MediaBodyParser.stringValue;
 import static com.qtools.media.support.MediaBodyParser.stringsValue;
@@ -80,6 +84,10 @@ public class MediaAdminController extends BaseController
     @Autowired
     private IMediaOrganizeService mediaOrganizeService;
 
+    /** 人物 / 演员体系（P3-A）：字典 CRUD + 视频/相册人物绑定 */
+    @Autowired
+    private IMediaPersonService mediaPersonService;
+
     /** 日常维护：多库根 media_root + 便携包导出产物 */
     @Autowired
     private IMediaMaintenanceService mediaMaintenanceService;
@@ -103,7 +111,14 @@ public class MediaAdminController extends BaseController
 
     // ------------------------------------------------------------------ 列表
 
-    /** 视频分页列表 */
+    /**
+     * 视频分页列表
+     *
+     * <p>{@code tagId} 是<b>层级筛选</b>：服务端先把该标签按 parent 链展开成「自身 + 全部后代」，
+     * 再按 {@code media_video_tag.tag_id} 过滤 —— 选父标签能命中挂在子标签下的视频。
+     * 站端筛选在前端做（索引接口无服务端筛选参数），前端可用 {@code GET /api/media/tags}
+     * 里的 {@code parentId} 自行展开，语义与此处一致。</p>
+     */
     @PreAuthorize("@ss.hasPermi('media:admin:list')")
     @GetMapping("/videos")
     public TableDataInfo videos(@RequestParam(value = "keyword", required = false) String keyword,
@@ -111,10 +126,11 @@ public class MediaAdminController extends BaseController
             @RequestParam(value = "person", required = false) String person,
             @RequestParam(value = "vcodec", required = false) String vcodec,
             @RequestParam(value = "hidden", required = false) String hidden,
-            @RequestParam(value = "sort", required = false) String sort)
+            @RequestParam(value = "sort", required = false) String sort,
+            @RequestParam(value = "tagId", required = false) Long tagId)
     {
         startPage();
-        return mediaAdminService.selectVideoPage(keyword, folder, person, vcodec, hidden, sort);
+        return mediaAdminService.selectVideoPage(keyword, folder, person, vcodec, hidden, sort, tagId);
     }
 
     /** 相册分页列表 */
@@ -605,9 +621,10 @@ public class MediaAdminController extends BaseController
     // ------------------------------------------------------------------ 组织能力（M3-A：标签 / 评分 / 标记）
 
     /**
-     * 标签字典（含引用次数），按 useCount 降序
+     * 标签字典（含引用次数与层级），按 useCount 降序
      *
-     * <p>返回 {@code [{id,name,color,useCount}]}；前端据此渲染标签选择器，
+     * <p>返回 {@code [{id,name,parentId,color,useCount,path}]}：{@code parentId} 为 null = 顶层标签，
+     * {@code path} 是顶层到自身的名字链（如 {@code 演员/日本/XX}）。前端据此渲染标签树 / 选择器，
      * 打标签时把 {@code id} 交给 {@code PUT /video/{id}/meta} 或批量接口。</p>
      */
     @PreAuthorize("@ss.hasPermi('media:admin:list')")
@@ -735,9 +752,32 @@ public class MediaAdminController extends BaseController
     public Map<String, Object> updateTag(@PathVariable("id") Long id,
             @RequestBody(required = false) String rawBody)
     {
+        return applyTagPatch(id, rawBody);
+    }
+
+    /**
+     * 标签层级 / 改名 / 改色（{@code PUT /api/media/admin/tags/{id}}，body {@code {parentId?, name?, color?}}）
+     *
+     * <p>{@code parentId} 出现即改父标签：{@code null} = <b>置顶</b>；自引用、成环、
+     * 深度超过 20 层一律 400。与 {@code PATCH /tags/{id}} 共用同一段实现
+     * （PATCH 是老调用方，PUT 是按 REST 语义给「改层级」留的入口）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-修改标签层级", businessType = BusinessType.UPDATE)
+    @PutMapping("/tags/{id}")
+    public Map<String, Object> updateTagTree(@PathVariable("id") Long id,
+            @RequestBody(required = false) String rawBody)
+    {
+        return applyTagPatch(id, rawBody);
+    }
+
+    /** PATCH / PUT 共用的字段解析：{@code containsKey} 即「出现」，null = 清空 / 置顶 */
+    private Map<String, Object> applyTagPatch(Long id, String rawBody)
+    {
         Map<String, Object> body = parseObject(rawBody, true);
         return mediaOrganizeService.updateTag(id, stringValue(body.get("name")),
-                stringValue(body.get("color")), body.containsKey("color"));
+                stringValue(body.get("color")), body.containsKey("color"),
+                longValue(body.get("parentId")), body.containsKey("parentId"));
     }
 
     /**
@@ -759,4 +799,129 @@ public class MediaAdminController extends BaseController
         marker.setColor(stringValue(body.get("color")));
         return mediaOrganizeService.addMarker(id, marker);
     }
+
+    // ------------------------------------------------------------------ 人物（P3-A）
+
+    /**
+     * 人物分页：{@code GET /api/media/admin/persons?q=&page=&size=}
+     *
+     * <p>{@code q} 对 name / alias 模糊匹配；返回
+     * {@code {rows:[{id,name,alias,note,avatarPath,gender,birthday,useCount,videoCount,albumCount}],total,page,size}}。
+     * 与其它列表接口不同，这里用显式 {@code page/size} 而不是 PageHelper：
+     * 站端人物页（{@code GET /api/media/person/{id}/videos}）要同一套分页语义。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/persons")
+    public Map<String, Object> persons(@RequestParam(value = "q", required = false) String q,
+            @RequestParam(value = "page", required = false, defaultValue = "1") int page,
+            @RequestParam(value = "size", required = false, defaultValue = "20") int size)
+    {
+        return mediaPersonService.personPage(q, page, size);
+    }
+
+    /**
+     * 新建人物：{@code POST /api/media/admin/persons}，body {@code {name, alias?, note?, gender?, birthday?}}
+     *
+     * <p>name 去首尾空格后 1-64 字符；<b>重名 409</b>（不像标签那样静默复用 —— 两个同名人物
+     * 会把绑定关系挂到另一个人身上）。birthday 只接受 {@code yyyy-MM-dd}。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-新建人物", businessType = BusinessType.INSERT)
+    @PostMapping("/persons")
+    public Map<String, Object> createPerson(@RequestBody(required = false) String rawBody)
+    {
+        return mediaPersonService.createPerson(personPatch(parseObject(rawBody, true)));
+    }
+
+    /**
+     * 改人物：{@code PUT /api/media/admin/persons/{id}}，body 任选
+     * {@code {name?, alias?, note?, gender?, birthday?, avatarPath?}}
+     *
+     * <p>字段出现即覆盖，显式 {@code null} = 清空该列；改名撞别人 409。返回改完的整行。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-修改人物", businessType = BusinessType.UPDATE)
+    @PutMapping("/persons/{id}")
+    public Map<String, Object> updatePerson(@PathVariable("id") Long id,
+            @RequestBody(required = false) String rawBody)
+    {
+        return mediaPersonService.updatePerson(id, personPatch(parseObject(rawBody, true)));
+    }
+
+    /**
+     * 删人物：{@code DELETE /api/media/admin/persons/{id}}
+     *
+     * <p>仍被视频 / 相册引用时 <b>400</b>，message 里带 {@code videoCount / albumCount}；
+     * 先解绑（{@code PUT /videos/{id}/persons} / {@code PUT /albums/{id}/persons}）再删。
+     * 不做级联删除：一次误删会静默抹掉几百条绑定。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-删除人物", businessType = BusinessType.DELETE)
+    @DeleteMapping("/persons/{id}")
+    public Map<String, Object> deletePerson(@PathVariable("id") Long id)
+    {
+        return mediaPersonService.deletePerson(id);
+    }
+
+    /**
+     * 设人物头像：{@code POST /api/media/admin/persons/{id}/avatar}，body {@code {path}}
+     *
+     * <p>只存路径，不落二进制：上传<b>沿用项目既有的 {@code POST /common/upload}</b>
+     * （若依通用上传，需登录），把返回的 {@code url} 原样作为 {@code path} 回传即可；
+     * {@code path} 只接受 http(s) URL 或站内绝对路径（以 {@code /} 开头），
+     * 空串 / {@code null} = 清空头像。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-人物头像", businessType = BusinessType.UPDATE)
+    @PostMapping("/persons/{id}/avatar")
+    public Map<String, Object> updatePersonAvatar(@PathVariable("id") Long id,
+            @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaPersonService.updateAvatar(id, stringValue(body.get("path")));
+    }
+
+    /**
+     * 全量替换某视频的人物与角色：{@code PUT /api/media/admin/videos/{id}/persons}
+     *
+     * <p>body {@code {personIds:[1,2], roles:{1:主演}}}：{@code personIds} 出现即整体替换
+     * （{@code []} = 解除全部绑定），{@code roles} 可缺省（键必须属于本次 personIds，值 &lt;= 32 字符）。
+     * 只清 {@code person_id IS NOT NULL} 的绑定行，扫描脚本写的 name-only 历史行不受影响。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-视频人物", businessType = BusinessType.UPDATE)
+    @PutMapping("/videos/{id}/persons")
+    public Map<String, Object> replaceVideoPersons(@PathVariable("id") String id,
+            @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        List<Long> personIds = longsValue(body.get("personIds"), "personIds");
+        if (personIds == null)
+        {
+            throw MediaException.badRequest("personIds 必填（[] = 解除全部绑定）");
+        }
+        return mediaPersonService.replaceVideoPersons(id, personIds, rolesValue(body.get("roles"), "roles"));
+    }
+
+    /**
+     * 全量替换某相册的人物：{@code PUT /api/media/admin/albums/{id}/persons}
+     *
+     * <p>body {@code {personIds:[1,2]}}：{@code []} = 未归类。写入 {@code media_album_person}
+     * 同时把 {@code media_album.person_id}（单选镜像列）同步成第一个人物。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-相册人物", businessType = BusinessType.UPDATE)
+    @PutMapping("/albums/{id}/persons")
+    public Map<String, Object> replaceAlbumPersons(@PathVariable("id") String id,
+            @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        List<Long> personIds = longsValue(body.get("personIds"), "personIds");
+        if (personIds == null)
+        {
+            throw MediaException.badRequest("personIds 必填（[] = 未归类）");
+        }
+        return mediaPersonService.replaceAlbumPersons(id, personIds);
+    }
 }
+

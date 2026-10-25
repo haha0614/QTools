@@ -1,13 +1,18 @@
 package com.qtools.media.support;
 
 import java.math.BigDecimal;
+import java.text.ParsePosition;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.domain.MediaVideoMarker;
 import com.qtools.media.domain.dto.MediaMetaPatch;
+import com.qtools.media.domain.dto.MediaPersonPatch;
 import com.qtools.media.exception.MediaException;
 
 /**
@@ -215,6 +220,100 @@ public final class MediaBodyParser
             patch.setMarkerRemoveIds(longsValue(deltaMap.get("remove"), "markerDelta.remove"));
         }
         return patch;
+    }
+
+    /**
+     * body → {@link MediaPersonPatch}（P3-A：人物新建 / 改名 / 改字段）
+     *
+     * <p>与 {@link #metaPatch} 同一套规则：{@code containsKey} 即「字段出现」，
+     * JSON 里显式给 {@code null} 是<b>有值且为 null</b>（清空该列）。
+     * 取值范围（名字 1-64、别名 128、备注 512 …）全部在服务层校验。</p>
+     */
+    public static MediaPersonPatch personPatch(Map<String, Object> body)
+    {
+        MediaPersonPatch patch = new MediaPersonPatch();
+        if (body.containsKey("name"))
+        {
+            patch.setNamePresent(true);
+            patch.setName(stringValue(body.get("name")));
+        }
+        if (body.containsKey("alias"))
+        {
+            patch.setAliasPresent(true);
+            patch.setAlias(stringValue(body.get("alias")));
+        }
+        if (body.containsKey("note"))
+        {
+            patch.setNotePresent(true);
+            patch.setNote(stringValue(body.get("note")));
+        }
+        if (body.containsKey("gender"))
+        {
+            patch.setGenderPresent(true);
+            patch.setGender(stringValue(body.get("gender")));
+        }
+        if (body.containsKey("birthday"))
+        {
+            patch.setBirthdayPresent(true);
+            patch.setBirthday(dateValue(body.get("birthday"), "birthday"));
+        }
+        if (body.containsKey("avatarPath"))
+        {
+            patch.setAvatarPresent(true);
+            patch.setAvatarPath(stringValue(body.get("avatarPath")));
+        }
+        return patch;
+    }
+
+    /**
+     * 日期：只接受 {@code yyyy-MM-dd}（严格模式，2026-02-30 也 400）；空串 / null = 清空
+     */
+    public static Date dateValue(Object value, String field)
+    {
+        String text = stringValue(value);
+        if (text == null)
+        {
+            return null;
+        }
+        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd");
+        format.setLenient(false);
+        ParsePosition position = new ParsePosition(0);
+        Date parsed = format.parse(text, position);
+        if (parsed == null || position.getIndex() != text.length())
+        {
+            throw MediaException.badRequest(field + " 必须是 yyyy-MM-dd 格式的日期: " + text);
+        }
+        return parsed;
+    }
+
+    /**
+     * 角色表 {@code {personId: role}}：键接受数字或数字字符串，值去空格后仍为字符串
+     *
+     * <p>缺省返回 {@code null}（= 不改角色）；空对象返回空表。键 / 值的合法性
+     * （键必须属于本次提交的 personIds、角色 <= 32 字符）由服务层校验。</p>
+     */
+    public static Map<Long, String> rolesValue(Object value, String field)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (!(value instanceof Map))
+        {
+            throw MediaException.badRequest(field + " 必须是对象 {personId: role}");
+        }
+        Map<?, ?> raw = (Map<?, ?>) value;
+        Map<Long, String> out = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : raw.entrySet())
+        {
+            Long personId = longValue(entry.getKey());
+            if (personId == null)
+            {
+                throw MediaException.badRequest(field + " 里含空 personId");
+            }
+            out.put(personId, stringValue(entry.getValue()));
+        }
+        return out;
     }
 
     /** rating：接受整数或整数字符串；null 原样返回（= 清空）；小数 / 非数字一律 400 */

@@ -515,6 +515,58 @@ mysql -uroot --default-character-set=utf8mb4 -P3307 qtools -e "source doc/media_
 | `DELETE /api/media/filters/{id}` | 匿名 + 编辑策略 | 只删自己名下的（否则 404） |
 | `GET` / `DELETE /api/media/admin/filters[/{id}]` | `media:admin:list` / `edit` | 全量清单 / 清理任一条 |
 
+### 9. 人物与角色（P3-A）
+
+扫盘脚本只写 `media_video_actor.name`（纯文本演员名）与 `media_album.person_id`（单选），
+**不会**写人物字典。人物（`media_person`）与「视频 ↔ 人物 + 角色」「相册 ↔ 人物」的关联由
+管理端手工维护，本节是把它跑起来需要的两条命令与端点。
+
+```bash
+# 幂等；必须在启动新后端之前跑（索引接口会查 media_album_person）
+mysql -uroot -P3307 --default-character-set=utf8mb4 qtools -e "source doc/media_person_tags.sql"
+```
+
+| 表 / 列 | 说明 |
+| :--- | :--- |
+| `media_person.alias / note / avatar_path / gender / birthday` | 别名 / 备注 / 头像路径 / 性别 / 生日（都可空） |
+| `media_person.use_count` | 冗余计数 = 引用它的 `media_video_actor` 行数，写入时重算 |
+| `media_video_actor.person_id` | 人物 id；**NULL = 扫盘脚本写的 name-only 历史行**（永不被全量替换清掉） |
+| `media_video_actor.role` | 角色（主演 / 配角…），NULL = 未指定 |
+| `uk_actor_video_person (video_id, person_id)` | 同一视频同一个人物只有一行 |
+| `media_album_person (album_id, person_id)` | 相册 ↔ 人物多对多；`media_album.person_id` 退化为「第一个人物」镜像列 |
+
+| 端点 | 说明 |
+| :--- | :--- |
+| `GET /api/media/admin/persons?q=&page=&size=` | 人物分页（带 videoCount / albumCount） |
+| `POST /api/media/admin/persons` | 新建；name 1-64，重名 409 |
+| `PUT /api/media/admin/persons/{id}` | 改名 / 改别名 / 备注 / 性别 / 生日 / 头像路径 |
+| `DELETE /api/media/admin/persons/{id}` | 有引用时 400（带 videoCount / albumCount），先解绑再删 |
+| `POST /api/media/admin/persons/{id}/avatar` `{path}` | 只存路径；上传走既有的 `POST /common/upload` |
+| `PUT /api/media/admin/videos/{id}/persons` `{personIds, roles}` | 全量替换视频人物与角色 |
+| `PUT /api/media/admin/albums/{id}/persons` `{personIds}` | 全量替换相册人物 |
+| `GET /api/media/persons` · `GET /api/media/person/{id}` · `…/videos` · `…/albums` | 站端匿名只读（人物页 / 筛选器 / 详情分页） |
+
+索引：`/api/media/index` 的 `videos[].persons:[{id,name,role}]` 与 `albums[].persons:[name]`
+非空才输出。**扫盘不会自动把 name 里的人物对到字典**：需要一次性回填时手工跑一次
+
+```sql
+-- 可选：把「名字恰好等于人物名」的扫盘历史行绑定到字典（幂等）
+UPDATE media_video_actor a JOIN media_person p ON p.name = a.name
+   SET a.person_id = p.id
+ WHERE a.person_id IS NULL;
+```
+
+### 10. 标签层级（父子）
+
+`media_tag` 增加 `parent_id`（NULL = 顶层）+ 索引 `idx_tag_parent`，与人物共用一个迁移脚本（见上一节命令）。
+
+- `GET /api/media/admin/tags` / `GET /api/media/tags` 每项带 `parentId` 与 `path`（如 `演员/日本/XX`）。
+- `PUT /api/media/admin/tags/{id}` `{parentId}`：`null` = 置顶；`PATCH /tags/{id}` 仍管改名 / 改色（也认 `parentId`）。
+- 自引用、成环、沿 parent 链超过 20 层 → 400（服务层校验，MySQL 8 的 CHECK 不能跨行查表）。
+- **筛选语义**：站端索引接口没有服务端筛选（只有 `includeMissing`），筛选在前端做 —— 前端拿
+  `parentId` 自建子树，选中父标签时把「自身 + 全部后代」的标签名一起匹配，等于命中所有后代标签的媒体；
+  管理端 `GET /api/media/admin/videos?tagId=` 由服务端做同样的展开，是这条语义的权威实现。
+
 ---
 ## 历史迁移：旧 Node 站 `index.json` → MySQL（`import.js`，保留）
 

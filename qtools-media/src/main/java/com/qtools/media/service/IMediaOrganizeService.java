@@ -16,8 +16,23 @@ import com.qtools.media.domain.dto.MediaMetaPatch;
  */
 public interface IMediaOrganizeService
 {
-    /** 标签字典全量（含 use_count） */
+    /**
+     * 标签字典全量（含 use_count、层级）
+     *
+     * <p>每个节点 {@code {id,name,parentId,color,useCount,path}}：{@code parentId} 为 null = 顶层标签，
+     * {@code path} 是从顶层到自身的名字链（如 {@code 演员/日本/XX}），由本方法沿 parent 链现算。</p>
+     */
     List<Map<String, Object>> tagList();
+
+    /**
+     * 某个标签的全部后代 id（<b>含自身</b>），供「选父标签 = 命中其所有后代」使用
+     *
+     * <p>站端筛选在前端做（索引接口没有服务端筛选参数），因此这个集合主要给管理端
+     * {@code GET /admin/videos?tagId=} 用；前端也可以拿 {@link #tagList()} 的 parentId 自行展开。</p>
+     *
+     * @param id 标签 id；不存在抛 404
+     */
+    List<Long> descendantTagIds(Long id);
 
     /** 新建标签；重名直接复用（颜色不改），返回 {@code {id,name,color,useCount,created}} */
     Map<String, Object> createTag(String name, String color);
@@ -32,9 +47,13 @@ public interface IMediaOrganizeService
      * {@code colorPresent=true} 且 color 为 null = <b>清空颜色</b>。改名会同步刷新
      * {@code media_video_tag.name} 那一列冗余名，否则用户端索引里还是旧名字。</p>
      *
-     * @return 改完的 {@code {id,name,color,useCount}}
+     * <p>{@code parentPresent=true} 时改父标签：{@code parentId == null} = <b>置顶</b>。
+     * 自引用、成环、深度超过 20 层一律 400（MySQL 8 的 CHECK 不能跨行查表，因此约束在服务层）。</p>
+     *
+     * @return 改完的 {@code {id,name,parentId,color,useCount,path}}
      */
-    Map<String, Object> updateTag(Long id, String name, String color, boolean colorPresent);
+    Map<String, Object> updateTag(Long id, String name, String color, boolean colorPresent, Long parentId,
+            boolean parentPresent);
 
     /** 单条元数据 {@code {rating,tags:[{id,name,color}],markers:[{id,pos,label,color}]}} */
     Map<String, Object> videoMeta(String videoId);

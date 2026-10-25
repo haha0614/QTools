@@ -90,6 +90,11 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="person != null and person != ''">
                 and exists (select 1 from media_video_actor a where a.video_id = v.id and a.name = #{person})
             </if>
+            <!-- 层级筛选：tagIds 是调用方按 parent 链展开后的集合（含选中标签自身） -->
+            <if test="tagIds != null and tagIds.size() > 0">
+                and exists (select 1 from media_video_tag vt where vt.video_id = v.id and vt.tag_id in
+                    <foreach collection="tagIds" item="tid" open="(" separator="," close=")">#{tid}</foreach>)
+            </if>
         </where>
         order by
         <choose>

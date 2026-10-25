@@ -150,7 +150,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         {
             actors.add(actor.getName());
         }
-        return toVideoNode(video, tags, actors);
+        return toVideoNode(video, tags, actors, videoPersons(id));
     }
 
     @Override
@@ -173,7 +173,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         {
             photos.add(toPhotoNode(photo));
         }
-        return toAlbumNode(album, personNames, photos);
+        return toAlbumNode(album, personNames, photos, albumPersonNames(id));
     }
 
     @Override
@@ -201,6 +201,33 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         {
             actorsByVideo.computeIfAbsent(actor.getVideoId(), k -> new ArrayList<>()).add(actor.getName());
         }
+        // 人物（P3-A）：一次取全部绑定，逐条挂到 videos[]；为此多两条轻查询，
+        // 但索引里「成对 persons + role」比让前端逐个 /person/{id} 反查便宜得多
+        Map<String, List<Map<String, Object>>> personsByVideo = new HashMap<>();
+        for (Map<String, Object> row : mediaPersonMapper.selectVideoPersonList())
+        {
+            String videoId = stringOf(row.get("videoId"));
+            if (videoId == null)
+            {
+                continue;
+            }
+            personsByVideo.computeIfAbsent(videoId, k -> new ArrayList<>()).add(personNode(row));
+        }
+        Map<String, List<String>> personNamesByAlbum = new HashMap<>();
+        for (Map<String, Object> row : mediaPersonMapper.selectAlbumPersonList())
+        {
+            String albumId = stringOf(row.get("albumId"));
+            if (albumId == null)
+            {
+                continue;
+            }
+            List<String> names = personNamesByAlbum.computeIfAbsent(albumId, k -> new ArrayList<>());
+            String name = stringOf(row.get("name"));
+            if (name != null && !names.contains(name))
+            {
+                names.add(name);
+            }
+        }
 
         // 派生资源存在性：一次目录扫描成集合，逐条判断不再 stat（万级视频下差别是一个量级）
         Set<String> spriteKeys = mediaFileService.spriteKeys();
@@ -215,7 +242,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
                 posterCount++;
             }
             Map<String, Object> node = toVideoNode(video, tagsByVideo.get(video.getId()),
-                    actorsByVideo.get(video.getId()));
+                    actorsByVideo.get(video.getId()), personsByVideo.get(video.getId()));
             putDerived(node, video, spriteKeys, previewKeys);
             videoNodes.add(node);
         }
@@ -235,7 +262,8 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         for (MediaAlbum album : albums)
         {
             albumNodes.add(toAlbumNode(album, personNames,
-                    photosByAlbum.getOrDefault(album.getId(), List.of())));
+                    photosByAlbum.getOrDefault(album.getId(), List.of()),
+                    personNamesByAlbum.getOrDefault(album.getId(), List.of())));
             if (album.getPersonId() != null)
             {
                 albumsByPerson.computeIfAbsent(album.getPersonId(), k -> new ArrayList<>()).add(album);
@@ -291,6 +319,66 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         return out;
     }
 
+    /** 单个人物绑定节点：{@code {id,name,role?}}（role 为 null 时整键不输出） */
+    private static Map<String, Object> personNode(Map<String, Object> row)
+    {
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("id", row.get("personId"));
+        node.put("name", row.get("name"));
+        String role = stringOf(row.get("role"));
+        if (role != null)
+        {
+            node.put("role", role);
+        }
+        return node;
+    }
+
+    /** 单片详情用：该视频绑定的人物（含角色），未绑定时返回 null（= 整键不输出） */
+    private List<Map<String, Object>> videoPersons(String videoId)
+    {
+        List<Map<String, Object>> rows = mediaPersonMapper.selectPersonActorsByVideoId(videoId);
+        if (rows == null || rows.isEmpty())
+        {
+            return null;
+        }
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (Map<String, Object> row : rows)
+        {
+            out.add(personNode(row));
+        }
+        return out;
+    }
+
+    /** 单册详情用：该相册的人物名（未绑定时返回 null） */
+    private List<String> albumPersonNames(String albumId)
+    {
+        List<Map<String, Object>> rows = mediaPersonMapper.selectAlbumPersons(albumId);
+        if (rows == null || rows.isEmpty())
+        {
+            return null;
+        }
+        List<String> out = new ArrayList<>(rows.size());
+        for (Map<String, Object> row : rows)
+        {
+            String name = stringOf(row.get("name"));
+            if (name != null && !out.contains(name))
+            {
+                out.add(name);
+            }
+        }
+        return out;
+    }
+
+    private static String stringOf(Object value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        String text = String.valueOf(value).trim();
+        return text.isEmpty() ? null : text;
+    }
+
     private Map<Long, String> loadPersonNames()
     {
         Map<Long, String> names = new HashMap<>();
@@ -301,7 +389,8 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         return names;
     }
 
-    private Map<String, Object> toVideoNode(MediaVideo video, List<String[]> tags, List<String> actors)
+    private Map<String, Object> toVideoNode(MediaVideo video, List<String[]> tags, List<String> actors,
+            List<Map<String, Object>> persons)
     {
         Map<String, Object> node = new LinkedHashMap<>();
         node.put("id", video.getId());
@@ -337,6 +426,11 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         {
             node.put("rating", video.getRating());
         }
+        // 人物（P3-A）：非空才输出，没绑人物的视频索引体积一个字节都不涨
+        if (persons != null && !persons.isEmpty())
+        {
+            node.put("persons", persons);
+        }
         node.put("poster", video.getPosterPath());
         node.put("doc", video.getDocPath());
         node.put("sub", video.getSubPath());
@@ -368,7 +462,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     }
 
     private Map<String, Object> toAlbumNode(MediaAlbum album, Map<Long, String> personNames,
-            List<Map<String, Object>> photos)
+            List<Map<String, Object>> photos, List<String> persons)
     {
         Map<String, Object> node = new LinkedHashMap<>();
         node.put("id", album.getId());
@@ -380,6 +474,11 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         node.put("bytes", album.getBytes());
         node.put("cover", album.getCoverPath());
         node.put("note", album.getNote());
+        // 人物（P3-A）：只给名字数组，非空才输出（前端人物页按名字匹配 albums[].persons）
+        if (persons != null && !persons.isEmpty())
+        {
+            node.put("persons", persons);
+        }
         node.put("photos", photos);
         return node;
     }

@@ -18,6 +18,9 @@ public class MediaTag
     /** 标签名（去首尾空格后 1-32 字符，库内唯一） */
     private String name;
 
+    /** 父标签 id（可空；NULL = 顶层标签）。自引用 / 环 / 深度由服务层校验 */
+    private Long parentId;
+
     /** 颜色（可空，建议 #RRGGBB） */
     private String color;
 
@@ -25,6 +28,14 @@ public class MediaTag
     private Integer useCount;
 
     private Date createTime;
+
+    /**
+     * 只读回填：从顶层到自身的路径，如 {@code 演员/日本/XX}（不落库）
+     *
+     * <p>由 {@code MediaOrganizeServiceImpl#tagList} 沿 parent 链现算，供前端直接展示层级
+     * 而不必自己再拼一遍；环被截断成 {@code ...}。</p>
+     */
+    private String path;
 
     public Long getId()
     {
@@ -44,6 +55,26 @@ public class MediaTag
     public void setName(String name)
     {
         this.name = name;
+    }
+
+    public Long getParentId()
+    {
+        return parentId;
+    }
+
+    public void setParentId(Long parentId)
+    {
+        this.parentId = parentId;
+    }
+
+    public String getPath()
+    {
+        return path;
+    }
+
+    public void setPath(String path)
+    {
+        this.path = path;
     }
 
     public String getColor()

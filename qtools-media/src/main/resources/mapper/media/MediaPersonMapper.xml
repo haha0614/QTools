@@ -2,20 +2,284 @@
 <!DOCTYPE mapper
 PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<!-- 媒体人物表 media_person 映射文件（M1 只读） -->
+<!--
+    媒体人物表 media_person + 视频/相册人物关联（P3-A）。
+
+    "全量替换"（PUT /admin/videos/{id}/persons、PUT /admin/albums/{id}/persons）只删
+    person_id IS NOT NULL 的行：扫描脚本写的 name-only 历史行永远不受影响，
+    与 media_video_tag 里 tag_id IS NULL 的历史 facet 行处理完全对称。
+
+    相册人物是 media_album_person（多对多）∪ media_album.person_id（单选镜像列）的并集，
+    因此"某人物名下的相册"两个来源都要算上，否则老库回填前后行数会不一致。
+-->
 <mapper namespace="com.qtools.media.mapper.MediaPersonMapper">
 
     <resultMap type="com.qtools.media.domain.MediaPerson" id="MediaPersonResult">
-        <id     property="id"   column="id"   />
-        <result property="name" column="name" />
-        <result property="sort" column="sort" />
+        <id     property="id"         column="id"          />
+        <result property="name"       column="name"        />
+        <result property="alias"      column="alias"       />
+        <result property="note"       column="note"        />
+        <result property="avatarPath" column="avatar_path" />
+        <result property="gender"     column="gender"      />
+        <result property="birthday"   column="birthday"    />
+        <result property="useCount"   column="use_count"   />
+        <result property="sort"       column="sort"        />
+        <result property="videoCount" column="video_count" />
+        <result property="albumCount" column="album_count" />
     </resultMap>
 
+    <!-- 人物行 + 两个只读计数（视频数按 media_video_actor 去重；相册数取两个来源的并集） -->
+    <sql id="personColumns">
+        p.id, p.name, p.alias, p.note, p.avatar_path, p.gender, p.birthday, p.use_count, p.sort,
+        (select count(distinct a.video_id) from media_video_actor a where a.person_id = p.id) as video_count,
+        (select count(*) from (
+            select ap.album_id from media_album_person ap where ap.person_id = p.id
+            union
+            select al.id from media_album al where al.person_id = p.id
+        ) alb) as album_count
+    </sql>
+
+    <!-- ================================================================ 人物字典 -->
+
     <select id="selectPersonList" resultMap="MediaPersonResult">
-        select id, name, sort
-        from media_person
-        where hidden = 0
-        order by sort asc, id asc
+        select p.id, p.name, p.alias, p.note, p.avatar_path, p.gender, p.birthday, p.use_count, p.sort
+        from media_person p
+        where p.hidden = 0
+        order by p.sort asc, p.id asc
+    </select>
+
+    <select id="selectPersonDetail" resultMap="MediaPersonResult">
+        select <include refid="personColumns"/>
+        from media_person p
+        where p.id = #{id}
+    </select>
+
+    <select id="selectPersonByName" resultMap="MediaPersonResult">
+        select p.id, p.name, p.alias, p.note, p.avatar_path, p.gender, p.birthday, p.use_count, p.sort
+        from media_person p
+        where p.name = #{name}
+        limit 1
+    </select>
+
+    <select id="selectPersonPage" resultMap="MediaPersonResult">
+        select <include refid="personColumns"/>
+        from media_person p
+        <where>
+            p.hidden = 0
+            <if test="q != null and q != ''">
+                and (p.name like concat('%', #{q}, '%') or p.alias like concat('%', #{q}, '%'))
+            </if>
+        </where>
+        order by p.use_count desc, p.sort asc, p.id asc
+        limit #{offset}, #{size}
+    </select>
+
+    <select id="countPersonPage" resultType="long">
+        select count(*) from media_person p
+        <where>
+            p.hidden = 0
+            <if test="q != null and q != ''">
+                and (p.name like concat('%', #{q}, '%') or p.alias like concat('%', #{q}, '%'))
+            </if>
+        </where>
+    </select>
+
+    <select id="selectPersonBriefList" resultMap="MediaPersonResult">
+        select p.id, p.name, p.alias, p.use_count
+        from media_person p
+        where p.hidden = 0
+        order by p.use_count desc, p.sort asc, p.id asc
+    </select>
+
+    <insert id="insertPerson" parameterType="com.qtools.media.domain.MediaPerson"
+            useGeneratedKeys="true" keyProperty="id">
+        insert into media_person (name, alias, note, avatar_path, gender, birthday, use_count)
+        values (#{name}, #{alias}, #{note}, #{avatarPath}, #{gender}, #{birthday}, 0)
+    </insert>
+
+    <update id="updatePersonName">
+        update media_person set name = #{name} where id = #{id}
+    </update>
+
+    <update id="updatePersonAlias">
+        update media_person set alias = #{alias} where id = #{id}
+    </update>
+
+    <update id="updatePersonNote">
+        update media_person set note = #{note} where id = #{id}
+    </update>
+
+    <update id="updatePersonGender">
+        update media_person set gender = #{gender} where id = #{id}
+    </update>
+
+    <update id="updatePersonBirthday">
+        update media_person set birthday = #{birthday} where id = #{id}
+    </update>
+
+    <update id="updatePersonAvatar">
+        update media_person set avatar_path = #{avatarPath} where id = #{id}
+    </update>
+
+    <delete id="deletePerson">
+        delete from media_person where id = #{id}
+    </delete>
+
+    <!-- 重算 use_count：只扫关联表，几十行量级，代价可忽略 -->
+    <update id="recomputePersonUseCount">
+        update media_person p
+        set p.use_count = (select count(*) from media_video_actor a where a.person_id = p.id)
+        where p.id in
+        <foreach collection="personIds" item="personId" open="(" separator="," close=")">#{personId}</foreach>
+    </update>
+
+    <select id="countPersonsByIds" resultType="long">
+        select count(*) from media_person
+        where id in
+        <foreach collection="personIds" item="personId" open="(" separator="," close=")">#{personId}</foreach>
+    </select>
+
+    <select id="countVideoById" resultType="long">
+        select count(*) from media_video where id = #{videoId}
+    </select>
+
+    <select id="countAlbumById" resultType="long">
+        select count(*) from media_album where id = #{albumId}
+    </select>
+
+    <!-- ================================================================ 视频 ↔ 人物 -->
+
+    <select id="selectPersonActorsByVideoId" resultType="java.util.LinkedHashMap">
+        select a.person_id as personId, p.name as name, p.alias as alias, a.role as role
+        from media_video_actor a
+        inner join media_person p on p.id = a.person_id
+        where a.video_id = #{videoId}
+        order by a.role is null, a.role asc, p.name asc
+    </select>
+
+    <!-- 只删绑定行；person_id IS NULL 的扫描历史行不动 -->
+    <delete id="deleteVideoActorPersons">
+        delete from media_video_actor
+        where video_id = #{videoId} and person_id is not null
+    </delete>
+
+    <!-- name 从字典冗余取，保证渲染名与 media_person 一致；uk_actor_video_person 天然去重 -->
+    <insert id="insertVideoActorPerson">
+        insert ignore into media_video_actor (video_id, name, person_id, role)
+        select #{videoId}, p.name, p.id, #{role}
+        from media_person p
+        where p.id = #{personId}
+    </insert>
+
+    <select id="selectPersonIdsByVideoIds" resultType="java.lang.Long">
+        select distinct person_id from media_video_actor
+        where person_id is not null and video_id in
+        <foreach collection="videoIds" item="videoId" open="(" separator="," close=")">#{videoId}</foreach>
+    </select>
+
+    <select id="countVideoRefsByPerson" resultType="long">
+        select count(distinct video_id) from media_video_actor where person_id = #{personId}
+    </select>
+
+    <!-- ================================================================ 相册 ↔ 人物 -->
+
+    <select id="selectAlbumPersons" resultType="java.util.LinkedHashMap">
+        select p.id as id, p.name as name, p.alias as alias
+        from media_person p
+        where p.id in (
+            select ap.person_id from media_album_person ap where ap.album_id = #{albumId}
+            union
+            select al.person_id from media_album al where al.id = #{albumId} and al.person_id is not null
+        )
+        order by p.name asc
+    </select>
+
+    <delete id="deleteAlbumPersons">
+        delete from media_album_person where album_id = #{albumId}
+    </delete>
+
+    <insert id="insertAlbumPerson">
+        insert ignore into media_album_person (album_id, person_id)
+        values (#{albumId}, #{personId})
+    </insert>
+
+    <update id="updateAlbumPrimaryPerson">
+        update media_album set person_id = #{personId} where id = #{albumId}
+    </update>
+
+    <select id="selectPersonIdsByAlbumIds" resultType="java.lang.Long">
+        select distinct person_id from media_album_person
+        where album_id in
+        <foreach collection="albumIds" item="albumId" open="(" separator="," close=")">#{albumId}</foreach>
+    </select>
+
+    <select id="countAlbumRefsByPerson" resultType="long">
+        select count(*) from (
+            select album_id from media_album_person where person_id = #{personId}
+            union
+            select id from media_album where person_id = #{personId}
+        ) t
+    </select>
+
+    <!-- ================================================================ 站端人物页 / 索引 -->
+
+    <select id="selectPersonVideoPage" resultType="java.util.LinkedHashMap">
+        select v.id as id, v.title as title, v.folder as folder, v.rel_path as rel, v.size as size,
+               v.dur as dur, v.w as w, v.h as h, v.poster_path as poster,
+               (select max(a2.role) from media_video_actor a2
+                 where a2.video_id = v.id and a2.person_id = #{personId}) as role
+        from media_video v
+        where v.hidden = 0
+          and exists (select 1 from media_video_actor a where a.video_id = v.id and a.person_id = #{personId})
+        order by v.folder asc, v.title asc, v.id asc
+        limit #{offset}, #{size}
+    </select>
+
+    <select id="countPersonVideos" resultType="long">
+        select count(*) from media_video v
+        where v.hidden = 0
+          and exists (select 1 from media_video_actor a where a.video_id = v.id and a.person_id = #{personId})
+    </select>
+
+    <select id="selectPersonAlbumPage" resultType="java.util.LinkedHashMap">
+        select al.id as id, al.title as title, al.dir as dir, al.photo_count as count,
+               al.cover_path as cover, al.note as note
+        from media_album al
+        where al.hidden = 0
+          and (al.person_id = #{personId}
+               or exists (select 1 from media_album_person ap
+                           where ap.album_id = al.id and ap.person_id = #{personId}))
+        order by al.sort asc, al.id asc
+        limit #{offset}, #{size}
+    </select>
+
+    <select id="countPersonAlbums" resultType="long">
+        select count(*) from media_album al
+        where al.hidden = 0
+          and (al.person_id = #{personId}
+               or exists (select 1 from media_album_person ap
+                           where ap.album_id = al.id and ap.person_id = #{personId}))
+    </select>
+
+    <!-- 索引 videos[].persons（role 为 null 时不输出该键，由 Java 侧处理） -->
+    <select id="selectVideoPersonList" resultType="java.util.LinkedHashMap">
+        select a.video_id as videoId, a.person_id as personId, p.name as name, a.role as role
+        from media_video_actor a
+        inner join media_person p on p.id = a.person_id
+        order by a.video_id asc, a.role is null, a.role asc, p.name asc
+    </select>
+
+    <!-- 索引 albums[].persons（多对多 ∪ 单选镜像列） -->
+    <select id="selectAlbumPersonList" resultType="java.util.LinkedHashMap">
+        select ap.album_id as albumId, ap.person_id as personId, p.name as name
+        from media_album_person ap
+        inner join media_person p on p.id = ap.person_id
+        union
+        select al.id as albumId, al.person_id as personId, p.name as name
+        from media_album al
+        inner join media_person p on p.id = al.person_id
+        where al.person_id is not null
+        order by albumId asc, name asc
     </select>
 
 </mapper>

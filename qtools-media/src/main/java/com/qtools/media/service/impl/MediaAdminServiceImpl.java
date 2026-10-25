@@ -52,6 +52,7 @@ import com.qtools.media.mapper.MediaVideoMapper;
 import com.qtools.media.service.IMediaAdminService;
 import com.qtools.media.service.IMediaFileService;
 import com.qtools.media.service.IMediaIndexService;
+import com.qtools.media.service.IMediaOrganizeService;
 
 /**
  * 管理端媒体库 服务实现
@@ -145,6 +146,10 @@ public class MediaAdminServiceImpl implements IMediaAdminService
     @Autowired
     private IMediaIndexService mediaIndexService;
 
+    /** 标签层级：{@code GET /admin/videos?tagId=} 要把父标签展开成「自身 + 全部后代」 */
+    @Autowired
+    private IMediaOrganizeService mediaOrganizeService;
+
     @Autowired
     private MediaProperties mediaProperties;
 
@@ -156,10 +161,13 @@ public class MediaAdminServiceImpl implements IMediaAdminService
 
     @Override
     public TableDataInfo selectVideoPage(String keyword, String folder, String person, String vcodec,
-            String hidden, String sort)
+            String hidden, String sort, Long tagId)
     {
+        // 层级筛选语义：选父标签 = 命中「自身 + 全部后代」标签下的视频（前端也能拿 tags 的 parentId 自行展开，
+        // 这里做服务端展开是为了让管理端筛选与将来的服务端筛选共用同一份语义）
+        List<Long> tagIds = tagId == null ? null : mediaOrganizeService.descendantTagIds(tagId);
         List<MediaVideo> rows = mediaAdminMapper.selectVideoPage(trimToNull(keyword), trimToNull(folder),
-                trimToNull(person), trimToNull(vcodec), normalizeHidden(hidden), trimToNull(sort));
+                trimToNull(person), trimToNull(vcodec), normalizeHidden(hidden), trimToNull(sort), tagIds);
         long total = new PageInfo<>(rows).getTotal();
         List<Map<String, Object>> out = new ArrayList<>(rows.size());
         for (MediaVideo video : rows)

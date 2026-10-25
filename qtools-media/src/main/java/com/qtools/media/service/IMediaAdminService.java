@@ -16,9 +16,14 @@ import com.qtools.common.core.page.TableDataInfo;
  */
 public interface IMediaAdminService
 {
-    /** 视频分页；hidden 传 null 表示不过滤 */
+    /**
+     * 视频分页；hidden 传 null 表示不过滤
+     *
+     * @param tagId 标签层级筛选：服务端把它展开成「自身 + 全部后代标签」再过滤
+     *              （选中父标签必须能命中挂在子标签下的视频）；null = 不按标签过滤
+     */
     TableDataInfo selectVideoPage(String keyword, String folder, String person, String vcodec, String hidden,
-            String sort);
+            String sort, Long tagId);
 
     /** 相册分页 */
     TableDataInfo selectAlbumPage(String keyword, Long personId, String hidden, String sort);

@@ -28,10 +28,11 @@ public interface MediaAdminMapper
      * @param vcodec  编码模糊匹配
      * @param hidden  null=全部，'0'=未隐藏，'1'=已隐藏
      * @param sort    size-desc / dur-desc / mtime-desc / title，其余走默认排序
+     * @param tagIds  标签 id 集合（调用方已按层级展开成「自身 + 全部后代」）；null / 空表 = 不按标签过滤
      */
     List<MediaVideo> selectVideoPage(@Param("keyword") String keyword, @Param("folder") String folder,
             @Param("person") String person, @Param("vcodec") String vcodec, @Param("hidden") String hidden,
-            @Param("sort") String sort);
+            @Param("sort") String sort, @Param("tagIds") List<Long> tagIds);
 
     /** 相册分页查询（personId 为 null 时不按人物过滤） */
     List<MediaAlbum> selectAlbumPage(@Param("keyword") String keyword, @Param("personId") Long personId,

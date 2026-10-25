@@ -35,6 +35,9 @@ public interface MediaOrganizeMapper
 
     int deleteTag(@Param("id") Long id);
 
+    /** 置父标签；{@code parentId} 传 null = 置顶（自引用 / 环 / 深度由服务层校验） */
+    int updateTagParent(@Param("id") Long id, @Param("parentId") Long parentId);
+
     /** 标签改名（不改其它列） */
     int updateTagName(@Param("id") Long id, @Param("name") String name);
 
