@@ -36,6 +36,48 @@ public class MediaPerson
     /** 生日（可空） */
     private Date birthday;
 
+    /** 三围 / 尺寸等自由文本（可空，<= 128 字符；P5-A 资料字段） */
+    private String measurements;
+
+    /** 出道年份（可空，1900-2100；与 careerEnd 同时非空时要求 end >= start） */
+    private Integer careerStart;
+
+    /** 退役 / 结束年份（可空，1900-2100） */
+    private Integer careerEnd;
+
+    /** 纹身（可空，<= 255 字符） */
+    private String tattoos;
+
+    /** 穿孔 / 饰钉（可空，<= 255 字符） */
+    private String piercings;
+
+    /** 族裔（可空，<= 32 字符） */
+    private String ethnicity;
+
+    /** 发色（可空，<= 32 字符） */
+    private String hairColor;
+
+    /** 瞳色（可空，<= 32 字符） */
+    private String eyeColor;
+
+    /** 身高 cm（可空，100-250） */
+    private Integer heightCm;
+
+    /** 体重 kg（可空，30-200） */
+    private Integer weightKg;
+
+    /** 是否隆胸（可空 = 未标注；TINYINT(1) NULL 三态） */
+    private Boolean fakeBoobs;
+
+    /** 国籍（可空，<= 64 字符） */
+    private String nationality;
+
+    /** X / Twitter 账号或链接（可空，<= 128 字符） */
+    private String twitter;
+
+    /** Instagram 账号或链接（可空，<= 128 字符） */
+    private String instagram;
+
     /** 引用次数（media_video_actor 中 person_id = 本 id 的行数，写入时重算） */
     private Integer useCount;
 
@@ -46,6 +88,146 @@ public class MediaPerson
 
     /** 只读回填：该人物名下的相册数（不落库） */
     private Long albumCount;
+
+    public String getMeasurements()
+    {
+        return measurements;
+    }
+
+    public void setMeasurements(String measurements)
+    {
+        this.measurements = measurements;
+    }
+
+    public Integer getCareerStart()
+    {
+        return careerStart;
+    }
+
+    public void setCareerStart(Integer careerStart)
+    {
+        this.careerStart = careerStart;
+    }
+
+    public Integer getCareerEnd()
+    {
+        return careerEnd;
+    }
+
+    public void setCareerEnd(Integer careerEnd)
+    {
+        this.careerEnd = careerEnd;
+    }
+
+    public String getTattoos()
+    {
+        return tattoos;
+    }
+
+    public void setTattoos(String tattoos)
+    {
+        this.tattoos = tattoos;
+    }
+
+    public String getPiercings()
+    {
+        return piercings;
+    }
+
+    public void setPiercings(String piercings)
+    {
+        this.piercings = piercings;
+    }
+
+    public String getEthnicity()
+    {
+        return ethnicity;
+    }
+
+    public void setEthnicity(String ethnicity)
+    {
+        this.ethnicity = ethnicity;
+    }
+
+    public String getHairColor()
+    {
+        return hairColor;
+    }
+
+    public void setHairColor(String hairColor)
+    {
+        this.hairColor = hairColor;
+    }
+
+    public String getEyeColor()
+    {
+        return eyeColor;
+    }
+
+    public void setEyeColor(String eyeColor)
+    {
+        this.eyeColor = eyeColor;
+    }
+
+    public Integer getHeightCm()
+    {
+        return heightCm;
+    }
+
+    public void setHeightCm(Integer heightCm)
+    {
+        this.heightCm = heightCm;
+    }
+
+    public Integer getWeightKg()
+    {
+        return weightKg;
+    }
+
+    public void setWeightKg(Integer weightKg)
+    {
+        this.weightKg = weightKg;
+    }
+
+    public Boolean getFakeBoobs()
+    {
+        return fakeBoobs;
+    }
+
+    public void setFakeBoobs(Boolean fakeBoobs)
+    {
+        this.fakeBoobs = fakeBoobs;
+    }
+
+    public String getNationality()
+    {
+        return nationality;
+    }
+
+    public void setNationality(String nationality)
+    {
+        this.nationality = nationality;
+    }
+
+    public String getTwitter()
+    {
+        return twitter;
+    }
+
+    public void setTwitter(String twitter)
+    {
+        this.twitter = twitter;
+    }
+
+    public String getInstagram()
+    {
+        return instagram;
+    }
+
+    public void setInstagram(String instagram)
+    {
+        this.instagram = instagram;
+    }
 
     public Long getId()
     {

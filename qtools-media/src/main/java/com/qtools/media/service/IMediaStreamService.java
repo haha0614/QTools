@@ -2,6 +2,7 @@ package com.qtools.media.service;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
@@ -23,6 +24,15 @@ public interface IMediaStreamService
 
     /** ffmpeg 是否可用 */
     boolean isFfmpegAvailable();
+
+    /**
+     * 实际生效的编码器信息（P5-B）：{@code {requested, effective, hardware, degraded, probeError, available, preset, cq}}
+     *
+     * <p>首次调用会触发一次 {@code ffmpeg -encoders} 探测（结果常驻内存），所以它同时是
+     * {@code GET /media/transcode/info} 与 {@code GET /media/admin/config} 的数据源——
+     * 站端想知道「我这条流会不会吃显卡」只看这一个端点即可。</p>
+     */
+    Map<String, Object> getTranscoderInfo();
 
     /**
      * 把源文件实时转码成分片 MP4 写入响应

@@ -38,8 +38,10 @@ import com.qtools.media.service.IMediaEditPolicyService;
 import com.qtools.media.service.IMediaMaintenanceService;
 import com.qtools.media.service.IMediaOrganizeService;
 import com.qtools.media.service.IMediaPersonService;
+import com.qtools.media.service.IMediaPlaylistService;
 import com.qtools.media.service.IMediaSavedFilterService;
 import com.qtools.media.service.IMediaScanService;
+import com.qtools.media.service.IMediaStudioService;
 import com.qtools.media.service.IMediaWatchService;
 import static com.qtools.media.support.MediaBodyParser.booleanValue;
 import static com.qtools.media.support.MediaBodyParser.boolValue;
@@ -55,6 +57,7 @@ import static com.qtools.media.support.MediaBodyParser.rolesValue;
 import static com.qtools.media.support.MediaBodyParser.parseObject;
 import static com.qtools.media.support.MediaBodyParser.stringValue;
 import static com.qtools.media.support.MediaBodyParser.stringsValue;
+import static com.qtools.media.support.MediaBodyParser.studioPatch;
 
 /**
  * 管理端媒体库接口（前缀 /api/media/admin）
@@ -89,6 +92,10 @@ public class MediaAdminController extends BaseController
     @Autowired
     private IMediaPersonService mediaPersonService;
 
+    /** 工作室（P5-A）：字典 CRUD + 视频绑定全量替换 */
+    @Autowired
+    private IMediaStudioService mediaStudioService;
+
     /** 日常维护：多库根 media_root + 便携包导出产物 */
     @Autowired
     private IMediaMaintenanceService mediaMaintenanceService;
@@ -100,6 +107,10 @@ public class MediaAdminController extends BaseController
     /** 保存的筛选条件（站端写、管理端只读清单 + 清理） */
     @Autowired
     private IMediaSavedFilterService mediaSavedFilterService;
+
+    /** 播放列表（站端写、管理端只读清单 + 清理，P5-B） */
+    @Autowired
+    private IMediaPlaylistService mediaPlaylistService;
 
     /**
      * 文件监听（自动扫描）：<b>常驻 Bean</b>（不再由 {@code qtools.media.watch.enabled} 决定是否注册）
@@ -528,6 +539,30 @@ public class MediaAdminController extends BaseController
         return mediaSavedFilterService.adminDelete(id);
     }
 
+    // ------------------------------------------------------------------ 播放列表（管理端，P5-B）
+
+    /**
+     * 全量播放列表：{@code [{id,name,count,ownerKey,global,note,createTime,updateTime}]}
+     *
+     * <p>与筛选条件同一分工：列表按 {@code owner_key} 隔离，管理端是唯一能看到全部（含全局列表）
+     * 的地方——只读，不提供新建：列表里装什么由用户在站端自己攒。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/playlists")
+    public List<Map<String, Object>> playlistList()
+    {
+        return mediaPlaylistService.adminList();
+    }
+
+    /** 清理任一个播放列表（不看归属，连条目一起删；不存在 404） */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-清理播放列表", businessType = BusinessType.DELETE)
+    @DeleteMapping("/playlists/{id}")
+    public Map<String, Object> playlistDelete(@PathVariable("id") Long id)
+    {
+        return mediaPlaylistService.adminDelete(id);
+    }
+
     // ------------------------------------------------------------------ 多库根（media_root）
 
     /**
@@ -662,7 +697,7 @@ public class MediaAdminController extends BaseController
     /**
      * 单条元数据：{@code {rating, tags:[{id,name,color}], markers:[{id,pos,label,color}]}}
      *
-     * <p>{@code rating} 为 0-10 的整数，{@code null} = 未评分；{@code markers} 按 pos 升序。</p>
+     * <p>{@code rating} 为 0-100 的整数，{@code null} = 未评分；{@code markers} 按 pos 升序。</p>
      */
     @PreAuthorize("@ss.hasPermi('media:admin:list')")
     @GetMapping("/video/{id}/meta")
@@ -677,7 +712,7 @@ public class MediaAdminController extends BaseController
      * <table border="1">
      *   <caption>body 字段 → 语义</caption>
      *   <tr><th>字段</th><th>语义</th></tr>
-     *   <tr><td>{@code rating}</td><td>0-10 整数；出现即覆盖，{@code null} = 清空评分</td></tr>
+     *   <tr><td>{@code rating}</td><td>0-100 整数（越界 400）；出现即覆盖，{@code null} = 清空评分</td></tr>
      *   <tr><td>{@code tagIds}</td><td><b>全量替换</b>：出现即把该视频的字典标签整体换成这一组（{@code []} = 清空）</td></tr>
      *   <tr><td>{@code removeTagIds}</td><td><b>增量摘除</b>（不存在的关联静默忽略，天然幂等）</td></tr>
      *   <tr><td>{@code addTagIds}</td><td><b>增量追加</b>（重复打同一个标签不会产生第二行）</td></tr>
@@ -930,6 +965,89 @@ public class MediaAdminController extends BaseController
             throw MediaException.badRequest("personIds 必填（[] = 未归类）");
         }
         return mediaPersonService.replaceAlbumPersons(id, personIds);
+    }
+
+    // ------------------------------------------------------------------ 工作室（P5-A）
+
+    /**
+     * 工作室清单：{@code GET /api/media/admin/studios}
+     *
+     * <p>返回 {@code [{id,name,alias,note,avatarPath,useCount,sort,hidden,videoCount}]}，按 sort / name 升序。
+     * 与标签字典不同，这里<b>带 hidden 行</b>：被隐藏的工作室仍要让管理端能改回来
+     * （站端清单 {@code GET /api/media/studios} 只出未隐藏的）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/studios")
+    public List<Map<String, Object>> studios()
+    {
+        return mediaStudioService.studioList();
+    }
+
+    /**
+     * 新建工作室：{@code POST /api/media/admin/studios}，body {@code {name, alias?, note?, avatarPath?, sort?, hidden?}}
+     *
+     * <p>name 去首尾空格后 1-64 字符且<b>唯一，重名 409</b>（不像标签那样静默复用：
+     * 复用会把「我以为新建了一个厂牌」变成「悄悄绑到另一个同名厂牌上」）。
+     * avatarPath 只接受 http(s) URL 或站内绝对路径（以 {@code /} 开头）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-新建工作室", businessType = BusinessType.INSERT)
+    @PostMapping("/studios")
+    public Map<String, Object> createStudio(@RequestBody(required = false) String rawBody)
+    {
+        return mediaStudioService.createStudio(studioPatch(parseObject(rawBody, true)));
+    }
+
+    /**
+     * 改工作室：{@code PUT /api/media/admin/studios/{id}}，body 任选
+     * {@code {name?, alias?, note?, avatarPath?, sort?, hidden?}}
+     *
+     * <p>字段出现即覆盖，显式 {@code null} 清空该列（name 除外：name 出现必须是合法名字）；
+     * 改名撞别的行 409。返回改完的整行。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-修改工作室", businessType = BusinessType.UPDATE)
+    @PutMapping("/studios/{id}")
+    public Map<String, Object> updateStudio(@PathVariable("id") Long id,
+            @RequestBody(required = false) String rawBody)
+    {
+        return mediaStudioService.updateStudio(id, studioPatch(parseObject(rawBody, true)));
+    }
+
+    /**
+     * 删工作室：{@code DELETE /api/media/admin/studios/{id}}
+     *
+     * <p>仍被视频引用时 <b>400</b>，message 里带引用计数；先解绑
+     * （{@code PUT /videos/{id}/studios}）再删。不做级联删除。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-删除工作室", businessType = BusinessType.DELETE)
+    @DeleteMapping("/studios/{id}")
+    public Map<String, Object> deleteStudio(@PathVariable("id") Long id)
+    {
+        return mediaStudioService.deleteStudio(id);
+    }
+
+    /**
+     * 全量替换某视频的工作室：{@code PUT /api/media/admin/videos/{id}/studios}
+     *
+     * <p>body {@code {studioIds:[1,2]}}：{@code studioIds} 必填，出现即整体替换
+     * （{@code []} = 解除全部绑定），一次最多 50 个，未知 studioId 400。
+     * 返回 {@code {updated,id,studios:[{id,name,alias}]}}。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-视频工作室", businessType = BusinessType.UPDATE)
+    @PutMapping("/videos/{id}/studios")
+    public Map<String, Object> replaceVideoStudios(@PathVariable("id") String id,
+            @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        List<Long> studioIds = longsValue(body.get("studioIds"), "studioIds");
+        if (studioIds == null)
+        {
+            throw MediaException.badRequest("studioIds 必填（[] = 解除全部绑定）");
+        }
+        return mediaStudioService.replaceVideoStudios(id, studioIds);
     }
 }
 

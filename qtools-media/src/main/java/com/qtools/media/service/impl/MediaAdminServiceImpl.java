@@ -49,6 +49,7 @@ import com.qtools.media.service.IMediaAdminService;
 import com.qtools.media.service.IMediaFileService;
 import com.qtools.media.service.IMediaIndexService;
 import com.qtools.media.service.IMediaOrganizeService;
+import com.qtools.media.support.MediaTranscodeProbe;
 import com.qtools.media.support.MediaTrashSupport;
 
 /**
@@ -149,6 +150,10 @@ public class MediaAdminServiceImpl implements IMediaAdminService
 
     @Autowired
     private MediaProperties mediaProperties;
+
+    /** 硬件编码器探测（P5-B）：自检接口要回显「配置 requested / 实际 effective」 */
+    @Autowired
+    private MediaTranscodeProbe transcodeProbe;
 
     /** 盘上根目录 {@code qtools.home}（application.yml 缺省 E:/111），只用于配置自检回显 */
     @Value("${qtools.home:}")
@@ -918,6 +923,8 @@ public class MediaAdminServiceImpl implements IMediaAdminService
                     fileNode(mediaProperties.getThumbScript(), "thumbScript", "缩略图脚本", false, warnings));
             media.put("scanOutPath", scanOutNode(mediaProperties.getScanOutPath(), warnings));
             media.put("maxTranscode", Math.max(1, mediaProperties.getMaxTranscode()));
+            // 硬件转码（P5-B）：requested 是 yml 里写的，effective 是本机探测后真正在用的
+            media.put("transcode", transcodeProbe.describe());
             media.put("scanArgs", mediaProperties.getScanArgs() == null ? "" : mediaProperties.getScanArgs());
         }
         catch (RuntimeException e)

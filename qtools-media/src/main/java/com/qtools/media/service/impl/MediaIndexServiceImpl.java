@@ -29,6 +29,7 @@ import com.qtools.media.domain.MediaVideoTag;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaAlbumMapper;
 import com.qtools.media.mapper.MediaPersonMapper;
+import com.qtools.media.mapper.MediaStudioMapper;
 import com.qtools.media.mapper.MediaPhotoMapper;
 import com.qtools.media.mapper.MediaVideoMapper;
 import com.qtools.media.service.IMediaFileService;
@@ -79,6 +80,10 @@ public class MediaIndexServiceImpl implements IMediaIndexService
 
     @Autowired
     private MediaPersonMapper mediaPersonMapper;
+
+    /** 工作室（P5-A）：索引 videos[].studios 只需要「视频 → 工作室名」一批轻查询 */
+    @Autowired
+    private MediaStudioMapper mediaStudioMapper;
 
     @Autowired
     private MediaProperties mediaProperties;
@@ -150,7 +155,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         {
             actors.add(actor.getName());
         }
-        return toVideoNode(video, tags, actors, videoPersons(id));
+        return toVideoNode(video, tags, actors, videoPersons(id), mediaStudioMapper.selectStudioNamesByVideoId(id));
     }
 
     @Override
@@ -213,6 +218,18 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             }
             personsByVideo.computeIfAbsent(videoId, k -> new ArrayList<>()).add(personNode(row));
         }
+        // 工作室（P5-A）：一次取全部「视频 / 工作室名」对，逐条挂到 videos[]；hidden 的工作室不输出
+        Map<String, List<String>> studiosByVideo = new HashMap<>();
+        for (Map<String, Object> row : mediaStudioMapper.selectVideoStudioList())
+        {
+            String videoId = stringOf(row.get("videoId"));
+            String name = stringOf(row.get("name"));
+            if (videoId == null || name == null)
+            {
+                continue;
+            }
+            studiosByVideo.computeIfAbsent(videoId, k -> new ArrayList<>()).add(name);
+        }
         Map<String, List<String>> personNamesByAlbum = new HashMap<>();
         for (Map<String, Object> row : mediaPersonMapper.selectAlbumPersonList())
         {
@@ -242,7 +259,8 @@ public class MediaIndexServiceImpl implements IMediaIndexService
                 posterCount++;
             }
             Map<String, Object> node = toVideoNode(video, tagsByVideo.get(video.getId()),
-                    actorsByVideo.get(video.getId()), personsByVideo.get(video.getId()));
+                    actorsByVideo.get(video.getId()), personsByVideo.get(video.getId()),
+                    studiosByVideo.get(video.getId()));
             putDerived(node, video, spriteKeys, previewKeys);
             videoNodes.add(node);
         }
@@ -390,7 +408,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     }
 
     private Map<String, Object> toVideoNode(MediaVideo video, List<String[]> tags, List<String> actors,
-            List<Map<String, Object>> persons)
+            List<Map<String, Object>> persons, List<String> studios)
     {
         Map<String, Object> node = new LinkedHashMap<>();
         node.put("id", video.getId());
@@ -430,6 +448,11 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         if (persons != null && !persons.isEmpty())
         {
             node.put("persons", persons);
+        }
+        // 工作室（P5-A）：同样非空才输出；值是工作室名（站端只按名字筛选 / 展示）
+        if (studios != null && !studios.isEmpty())
+        {
+            node.put("studios", studios);
         }
         node.put("poster", video.getPosterPath());
         node.put("doc", video.getDocPath());

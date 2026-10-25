@@ -624,6 +624,46 @@ P4-A 起它是管理端「重复文件」页的数据源。
 > 取回按 `trashRel` 手工搬回，`POST /admin/trash/restore` 对它们无效。
 > `deleteFiles=false` 只删别名行、不动磁盘；重复 merge 幂等（第二次全 0，不报错）。
 
+### 13. 评分改 0-100（P5-A）
+
+`media_video.rating` 从 `TINYINT NULL`（0-10）扩到 **`SMALLINT NULL`（0-100）**，存量值统一 ×10。
+
+```bash
+# 幂等：只在列类型仍是 tinyint 时扩容 + ×10；跑完变 smallint，第二遍跳过（不会 ×100）
+mysql -uroot -P3307 --default-character-set=utf8mb4 qtools -e "source doc/media_rating_100.sql"
+```
+
+- 语义不变：`NULL` = 未评分、`0` = 有效最低分、`100` = 最高分。
+- 越界（< 0 或 > 100）由服务层回 **400**：`PUT /admin/video/{id}/meta`、`POST /admin/videos/batch-meta`、
+  站端 `PUT /api/media/video/{id}/meta` 走同一个 `checkRating`。
+- `GET /api/media/index` 的 `videos[].rating` 仍是 0-100，未评分时整个键不输出。
+- **导入脚本不写评分**（`scan-media.js` 只写路径 / 大小 / 时长），所以本迁移只影响「管理端打过分的行」。
+- ⚠️ 前端必须同步改成 0-100，否则 80 分会显示成 80 颗星 / 越界。
+
+### 14. 工作室 Studio（P5-A）
+
+```bash
+mysql -uroot -P3307 --default-character-set=utf8mb4 qtools -e "source doc/media_studio.sql"
+```
+
+`media_studio`（name 唯一，含 `use_count` / `sort` / `hidden` / `avatar_path`）+ `media_video_studio`
+（`PRIMARY KEY (video_id, studio_id)`）。管理端 `GET/POST/PUT/DELETE /api/media/admin/studios` 与
+`PUT /api/media/admin/videos/{id}/studios` `{studioIds:[]}`（全量替换）；站端匿名只读
+`GET /api/media/studios`、`GET /api/media/studio/{id}`、`GET /api/media/studio/{id}/videos`。
+索引 `videos[].studios` 是工作室名数组，非空才输出。删工作室仍有引用时 400 并给计数。
+
+### 15. 人物资料字段（P5-A）
+
+```bash
+mysql -uroot -P3307 --default-character-set=utf8mb4 qtools -e "source doc/media_person_profile.sql"
+```
+
+`media_person` 追加 14 个全可空列：`measurements` / `career_start` / `career_end` / `tattoos` /
+`piercings` / `ethnicity` / `hair_color` / `eye_color` / `height_cm` / `weight_kg` / `fake_boobs` /
+`nationality` / `twitter` / `instagram`。管理端 `POST/PUT /api/media/admin/persons` 支持全部字段，
+范围校验：身高 100-250、体重 30-200、年份 1900-2100 且 `career_end >= career_start`；站端
+`GET /api/media/person/{id}` 返回已填写字段（空值不输出）。导入脚本不填这些字段（恒为空）。
+
 ---
 
 ## 历史迁移：旧 Node 站 `index.json` → MySQL（`import.js`，保留）

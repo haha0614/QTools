@@ -29,6 +29,8 @@ import com.qtools.media.config.MediaProperties;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.service.IMediaFileService;
 import com.qtools.media.service.IMediaStreamService;
+import com.qtools.media.support.MediaTranscodeCommand;
+import com.qtools.media.support.MediaTranscodeProbe;
 
 /**
  * 实时转码 服务实现
@@ -38,7 +40,10 @@ import com.qtools.media.service.IMediaStreamService;
  *   <li>并发上限（默认 2），超出立刻 429，名额在启动 ffmpeg 前占用；</li>
  *   <li>先拿到首字节再回 200，超时（15s）回 504，避免客户端拿到空响应；</li>
  *   <li>客户端断开（写失败）或正常结束都必须 kill 进程，否则僵尸进程会占满名额；</li>
- *   <li>ffmpeg 缺失回 503。</li>
+ *   <li>ffmpeg 缺失回 503；</li>
+ *   <li><b>硬件转码（P5-B）</b>：编码器由 {@link MediaTranscodeProbe} 探测决定（auto 时
+ *       h264_nvenc → h264_qsv → libx264），硬件进程失败时记 WARN、把该编码器标记为不可用，
+ *       并<b>用软件参数重试一次</b>——用户宁可慢一点，也不想看黑屏。</li>
  * </ul>
  *
  * @author qtools
@@ -60,13 +65,13 @@ public class MediaStreamServiceImpl implements IMediaStreamService
     private static final String CONTENT_TYPE_MP4 = "video/mp4";
 
     /** 档位 -> 转码参数；w/h 用于 scale 上限，保证小片源不放大 */
-    private static final Map<String, Preset> PRESETS = new LinkedHashMap<>();
+    private static final Map<String, MediaTranscodeCommand.Profile> PRESETS = new LinkedHashMap<>();
 
     static
     {
-        PRESETS.put("720", new Preset(1280, 720, "1500k", "1700k", "3000k", "96k"));
-        PRESETS.put("480", new Preset(854, 480, "700k", "800k", "1500k", "64k"));
-        PRESETS.put("360", new Preset(640, 360, "400k", "450k", "900k", "48k"));
+        PRESETS.put("720", new MediaTranscodeCommand.Profile(1280, 720, "1500k", "1700k", "3000k", "96k"));
+        PRESETS.put("480", new MediaTranscodeCommand.Profile(854, 480, "700k", "800k", "1500k", "64k"));
+        PRESETS.put("360", new MediaTranscodeCommand.Profile(640, 360, "400k", "450k", "900k", "48k"));
     }
 
     @Autowired
@@ -74,6 +79,10 @@ public class MediaStreamServiceImpl implements IMediaStreamService
 
     @Autowired
     private IMediaFileService mediaFileService;
+
+    /** 硬件编码器探测（懒加载 + 内存缓存）；命令构造与失败回退都以它给出的编码器为准 */
+    @Autowired
+    private MediaTranscodeProbe mediaTranscodeProbe;
 
     /** 已占用的转码名额 */
     private final AtomicInteger active = new AtomicInteger();
@@ -101,6 +110,12 @@ public class MediaStreamServiceImpl implements IMediaStreamService
     public List<String> getPresets()
     {
         return new ArrayList<>(PRESETS.keySet());
+    }
+
+    @Override
+    public Map<String, Object> getTranscoderInfo()
+    {
+        return mediaTranscodeProbe.describe();
     }
 
     @Override
@@ -133,8 +148,8 @@ public class MediaStreamServiceImpl implements IMediaStreamService
         {
             throw MediaException.badRequest("missing p");
         }
-        Preset preset = q == null ? null : PRESETS.get(q);
-        if (preset == null)
+        MediaTranscodeCommand.Profile profile = q == null ? null : PRESETS.get(q);
+        if (profile == null)
         {
             throw MediaException.badRequest("bad q");
         }
@@ -152,13 +167,14 @@ public class MediaStreamServiceImpl implements IMediaStreamService
 
         acquire();
         long begin = System.currentTimeMillis();
-        Process process = null;
+        Started started = null;
         String endReason = "unknown";
         long sent = 0;
         try
         {
-            process = startProcess(file, preset, start);
-            byte first = readFirstByte(process);
+            started = startAndFirstByte(file, profile, start);
+            Process process = started.process;
+            byte first = started.firstByte;
 
             response.setStatus(200);
             response.setContentType(CONTENT_TYPE_MP4);
@@ -189,18 +205,91 @@ public class MediaStreamServiceImpl implements IMediaStreamService
         }
         finally
         {
-            destroy(process);
+            destroy(started == null ? null : started.process);
             release();
-            log.info("媒体转码结束 q={} t={} file={} sent={}KB end={} cost={}ms", q, start, p, sent / 1024,
-                    endReason, System.currentTimeMillis() - begin);
+            log.info("媒体转码结束 q={} t={} file={} enc={} sent={}KB end={} cost={}ms", q, start, p,
+                    started == null ? "-" : started.encoder, sent / 1024, endReason,
+                    System.currentTimeMillis() - begin);
         }
     }
 
     // ------------------------------------------------------------------ 进程
 
-    private Process startProcess(Path file, Preset preset, int start) throws IOException
+    /**
+     * 启动 ffmpeg 并拿到首字节；硬件编码器失败时用软件编码器<b>重试一次</b>（P5-B）
+     *
+     * <p>「失败」= 进程起不来 / 首字节超时 / 进程提前退出（{@link #readFirstByte} 把后两种都归成
+     * 非正常返回）。此时硬件这条路已经证明在本机不成立：先 {@code markUnavailable} 让本进程后续请求
+     * 直接走软件（不必每个请求都失败一次），再拿软件参数重跑一遍。软件再失败就是真的失败，
+     * 异常原样上抛（504 / 500），不无限重试。</p>
+     */
+    private Started startAndFirstByte(Path file, MediaTranscodeCommand.Profile profile, int start) throws IOException
     {
-        ProcessBuilder builder = new ProcessBuilder(buildCommand(file, preset, start));
+        String encoder = mediaTranscodeProbe.effective();
+        Process process = startProcess(file, profile, start, encoder);
+        try
+        {
+            return new Started(process, readFirstByte(process), encoder);
+        }
+        catch (MediaException e)
+        {
+            destroy(process);
+            return retrySoftware(file, profile, start, encoder, e);
+        }
+        catch (IOException e)
+        {
+            destroy(process);
+            return retrySoftware(file, profile, start, encoder, e);
+        }
+    }
+
+    /** 回退分支：非硬件编码器直接把原异常抛回去；硬件才降级重试一次 */
+    private Started retrySoftware(Path file, MediaTranscodeCommand.Profile profile, int start, String encoder,
+            Exception cause) throws IOException
+    {
+        if (!MediaTranscodeCommand.isHardware(encoder))
+        {
+            throw rethrow(cause);
+        }
+        log.warn("硬件编码器 {} 转码失败（{}），回退软件编码器重试一次 file={} q={}x{}", encoder,
+                cause.getMessage(), file.getFileName(), profile.width, profile.height);
+        mediaTranscodeProbe.markUnavailable(encoder);
+        String fallback = mediaTranscodeProbe.effective();
+        Process retry = startProcess(file, profile, start, fallback);
+        try
+        {
+            return new Started(retry, readFirstByte(retry), fallback);
+        }
+        catch (IOException e)
+        {
+            destroy(retry);
+            throw e;
+        }
+        catch (MediaException e)
+        {
+            destroy(retry);
+            throw e;
+        }
+    }
+
+    /** 把捕获到的异常按原类型抛出去（方法签名只声明 IOException，业务异常是运行时异常） */
+    private static RuntimeException rethrow(Exception cause) throws IOException
+    {
+        if (cause instanceof IOException)
+        {
+            throw (IOException) cause;
+        }
+        if (cause instanceof RuntimeException)
+        {
+            throw (RuntimeException) cause;
+        }
+        throw new IOException(cause);
+    }
+
+    private Process startProcess(Path file, MediaTranscodeCommand.Profile profile, int start, String encoder)
+            throws IOException
+    {
+        ProcessBuilder builder = new ProcessBuilder(buildCommand(file, profile, start, encoder));
         builder.redirectErrorStream(false);
         Process process = builder.start();
         drainError(process, file.getFileName().toString());
@@ -314,59 +403,15 @@ public class MediaStreamServiceImpl implements IMediaStreamService
         active.decrementAndGet();
     }
 
-    private List<String> buildCommand(Path file, Preset preset, int start)
+    /**
+     * 拼命令：整条命令的构造在 {@link MediaTranscodeCommand}（硬件/软件的唯一分叉点集中在那里，
+     * 好处是能离线逐字打印核验）。本方法只负责把配置里的编码器与档位喂进去。
+     */
+    private List<String> buildCommand(Path file, MediaTranscodeCommand.Profile profile, int start, String encoder)
     {
-        // min(iw,…) 保证小片源不放大；force_divisible_by=2 满足 yuv420p 偶数尺寸
-        String scale = "scale=w='min(iw," + preset.width + ")':h='min(ih," + preset.height
-                + ")':force_original_aspect_ratio=decrease:force_divisible_by=2";
-        List<String> command = new ArrayList<>();
-        command.add(mediaProperties.getFfmpeg());
-        command.add("-hide_banner");
-        command.add("-loglevel");
-        command.add("error");
-        // -ss 放在 -i 之前：输入侧快速 seek，避免从头解码
-        command.add("-ss");
-        command.add(String.valueOf(start));
-        command.add("-i");
-        command.add(file.toString());
-        command.add("-map");
-        command.add("0:v:0");
-        command.add("-map");
-        command.add("0:a:0?");
-        command.add("-sn");
-        command.add("-dn");
-        command.add("-vf");
-        command.add(scale);
-        command.add("-c:v");
-        command.add("libx264");
-        command.add("-preset");
-        command.add("veryfast");
-        command.add("-tune");
-        command.add("zerolatency");
-        command.add("-pix_fmt");
-        command.add("yuv420p");
-        command.add("-b:v");
-        command.add(preset.videoBitrate);
-        command.add("-maxrate");
-        command.add(preset.maxRate);
-        command.add("-bufsize");
-        command.add(preset.bufSize);
-        command.add("-g");
-        command.add("48");
-        command.add("-keyint_min");
-        command.add("48");
-        command.add("-sc_threshold");
-        command.add("0");
-        command.add("-c:a");
-        command.add("aac");
-        command.add("-b:a");
-        command.add(preset.audioBitrate);
-        command.add("-movflags");
-        command.add("frag_keyframe+empty_moov+default_base_moof");
-        command.add("-f");
-        command.add("mp4");
-        command.add("pipe:1");
-        return command;
+        return MediaTranscodeCommand.build(mediaProperties.getFfmpeg(), encoder,
+                mediaProperties.getTranscode().getPreset(), mediaProperties.getTranscode().getCq(), profile, file,
+                start);
     }
 
     private static int parseStart(String t)
@@ -390,36 +435,20 @@ public class MediaStreamServiceImpl implements IMediaStreamService
         }
     }
 
-    /** 单一清晰度档位的转码参数 */
-    private static final class Preset
+    /** 一次转码的启动结果：进程本身 + 已读到的首字节 + 真正用的编码器（日志与回退诊断用） */
+    private static final class Started
     {
-        /** 缩放上限宽度 */
-        private final int width;
+        private final Process process;
 
-        /** 缩放上限高度 */
-        private final int height;
+        private final byte firstByte;
 
-        /** 目标视频码率 */
-        private final String videoBitrate;
+        private final String encoder;
 
-        /** 峰值视频码率 */
-        private final String maxRate;
-
-        /** 码率缓冲 */
-        private final String bufSize;
-
-        /** 音频码率 */
-        private final String audioBitrate;
-
-        private Preset(int width, int height, String videoBitrate, String maxRate, String bufSize,
-                String audioBitrate)
+        private Started(Process process, byte firstByte, String encoder)
         {
-            this.width = width;
-            this.height = height;
-            this.videoBitrate = videoBitrate;
-            this.maxRate = maxRate;
-            this.bufSize = bufSize;
-            this.audioBitrate = audioBitrate;
+            this.process = process;
+            this.firstByte = firstByte;
+            this.encoder = encoder;
         }
     }
 }

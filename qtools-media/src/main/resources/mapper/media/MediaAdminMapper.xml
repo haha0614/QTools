@@ -28,7 +28,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="subPath"    column="sub_path"    />
         <result property="hidden"     column="hidden"      />
         <result property="mtime"      column="mtime"       />
-        <!-- M3-A 组织能力：管理端列表直接回显人工评分 0-10（null = 未评分） -->
+        <!-- M3-A 组织能力：管理端列表直接回显人工评分 0-100（P5-A 扩容；null = 未评分） -->
         <result property="rating"     column="rating"      />
         <!-- 缺失文件（doc/media_missing.sql）：1=扫描时磁盘上不存在；last_seen=最后一次看到它 -->
         <result property="missing"    column="missing"     />

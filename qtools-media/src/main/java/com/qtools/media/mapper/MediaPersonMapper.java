@@ -62,6 +62,14 @@ public interface MediaPersonMapper
     /** 改头像；null = 清空 */
     int updatePersonAvatar(@Param("id") Long id, @Param("avatarPath") String avatarPath);
 
+    /**
+     * 覆盖式更新 P5-A 的 14 个资料字段（null = 清空该列）
+     *
+     * <p>一次 UPDATE 覆盖全部资料列而不是 14 个单列 UPDATE：服务层已经把「未出现的字段」
+     * 合并成库里的现值，这里只需要照写，SQL 与字段一一对应、也不会出现只写一半的半成品行。</p>
+     */
+    int updatePersonProfile(@Param("id") Long id, @Param("person") MediaPerson person);
+
     int deletePerson(@Param("id") Long id);
 
     /** 按关联行实际数量重算 use_count（不做 +1/-1 漂移） */

@@ -44,6 +44,17 @@ qtools:
     mysqlClient: '${qtools.home:E:/111/project/QTools}/tools/mysql/bin/mysql.exe'
     # 实时转码并发上限（超出返回 429）
     maxTranscode: 2
+    # 硬件转码（P5-B）：编码器由「启动后首次转码 / 管理端自检」时执行 ffmpeg -encoders 探测决定，
+    # 结果缓存在内存，可用值见 GET /api/media/admin/config 的 media.transcode.effective
+    transcode:
+      # auto = h264_nvenc → h264_qsv → libx264（没有显卡就自动落在软件）；
+      # 也可写死 software / libx264 / h264_nvenc / hevc_nvenc / av1_nvenc / h264_qsv / hevc_qsv。
+      # 写死的编码器不在本机清单里时 WARN 并回退 auto 链；运行期真失败还会回退软件重试一次。
+      encoder: auto
+      # 硬件编码器的 -preset：nvenc 为 p1(最快)-p7(最清)；软件分支固定 veryfast + zerolatency（保持老行为）
+      preset: p4
+      # 恒定质量因子：nvenc -cq / qsv -global_quality（1-51，越小越清；码率上限仍由档位决定）
+      cq: 23
     # 回收站根目录（软删只在此目录下落文件，恢复时移回原位）
     trashPath: 'E:/111/视频/_媒体站/trash'
     # 重建索引：Node 可执行文件与脚本（doc/media-import/scan-media.js，仓库版通用扫描）

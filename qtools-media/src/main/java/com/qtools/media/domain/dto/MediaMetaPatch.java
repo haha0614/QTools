@@ -23,7 +23,7 @@ public class MediaMetaPatch
     /** 批量目标视频 id（仅批量接口使用，上限 500） */
     private List<String> ids;
 
-    /** 评分 0-10；配合 {@link #ratingPresent}，null 表示清空评分 */
+    /** 评分 0-100；配合 {@link #ratingPresent}，null 表示清空评分 */
     private Integer rating;
 
     private boolean ratingPresent;

@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    播放列表（P5-B）映射文件。
+
+    条目数用相关子查询投影成 item_count：列表页只要 [{id,name,count}]，为此再查一遍条目表
+    就是 N+1；media_playlist 是小表（每台设备几十个），子查询代价可忽略。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaPlaylistMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaPlaylist" id="MediaPlaylistResult">
+        <id     property="id"         column="id"          />
+        <result property="name"       column="name"        />
+        <result property="ownerKey"   column="owner_key"   />
+        <result property="note"       column="note"        />
+        <result property="itemCount"  column="item_count"  />
+        <result property="createTime" column="create_time" />
+        <result property="updateTime" column="update_time" />
+    </resultMap>
+
+    <sql id="selectPlaylistColumns">
+        select p.id, p.name, p.owner_key, p.note, p.create_time, p.update_time,
+               (select count(*) from media_playlist_item i where i.playlist_id = p.id) as item_count
+        from media_playlist p
+    </sql>
+
+    <select id="selectVisibleList" resultMap="MediaPlaylistResult">
+        <include refid="selectPlaylistColumns"/>
+        where p.owner_key is null
+        <if test="ownerKey != null">or p.owner_key = #{ownerKey}</if>
+        order by p.update_time desc, p.id desc
+    </select>
+
+    <select id="selectAll" resultMap="MediaPlaylistResult">
+        <include refid="selectPlaylistColumns"/>
+        order by p.owner_key is not null, p.owner_key asc, p.update_time desc, p.id desc
+    </select>
+
+    <select id="selectById" resultMap="MediaPlaylistResult">
+        <include refid="selectPlaylistColumns"/>
+        where p.id = #{id}
+    </select>
+
+    <select id="selectByNameAndOwner" resultMap="MediaPlaylistResult">
+        <include refid="selectPlaylistColumns"/>
+        where p.name = #{name}
+        <choose>
+            <when test="ownerKey != null">and p.owner_key = #{ownerKey}</when>
+            <otherwise>and p.owner_key is null</otherwise>
+        </choose>
+        limit 1
+    </select>
+
+    <insert id="insert" parameterType="com.qtools.media.domain.MediaPlaylist"
+            useGeneratedKeys="true" keyProperty="id">
+        insert into media_playlist (name, owner_key, note, create_time, update_time)
+        values (#{name}, #{ownerKey}, #{note}, current_timestamp, current_timestamp)
+    </insert>
+
+    <update id="updateNameById">
+        update media_playlist
+        set name = #{name}, update_time = current_timestamp
+        where id = #{id}
+    </update>
+
+    <update id="touchById">
+        update media_playlist set update_time = current_timestamp where id = #{id}
+    </update>
+
+    <delete id="deleteByIdAndOwner">
+        delete from media_playlist
+        where id = #{id}
+        <choose>
+            <when test="ownerKey != null">and owner_key = #{ownerKey}</when>
+            <otherwise>and owner_key is null</otherwise>
+        </choose>
+    </delete>
+
+    <delete id="deleteById">
+        delete from media_playlist where id = #{id}
+    </delete>
+
+</mapper>

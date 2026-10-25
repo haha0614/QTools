@@ -50,6 +50,34 @@ public class MediaPersonServiceImpl implements IMediaPersonService
 
     private static final int GENDER_MAX = 16;
 
+    // ---- P5-A 资料字段的长度 / 范围上限（与 doc/media_person_profile.sql 列宽对齐） ----
+
+    private static final int MEASUREMENTS_MAX = 128;
+
+    private static final int TATTOOS_MAX = 255;
+
+    private static final int PIERCINGS_MAX = 255;
+
+    private static final int ETHNICITY_MAX = 32;
+
+    private static final int COLOR_MAX = 32;
+
+    private static final int NATIONALITY_MAX = 64;
+
+    private static final int SOCIAL_MAX = 128;
+
+    private static final int HEIGHT_MIN = 100;
+
+    private static final int HEIGHT_MAX = 250;
+
+    private static final int WEIGHT_MIN = 30;
+
+    private static final int WEIGHT_MAX = 200;
+
+    private static final int CAREER_MIN = 1900;
+
+    private static final int CAREER_MAX = 2100;
+
     /** 与 media_person.avatar_path VARCHAR(400) 对齐 */
     private static final int AVATAR_MAX = 400;
 
@@ -119,6 +147,7 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         {
             fresh.setAvatarPath(checkAvatar(patch.getAvatarPath()));
         }
+        applyProfile(fresh, patch);
         mediaPersonMapper.insertPerson(fresh);
         invalidateIndex();
         log.info("新建媒体人物 id={} name={}", fresh.getId(), name);
@@ -131,9 +160,12 @@ public class MediaPersonServiceImpl implements IMediaPersonService
     {
         MediaPerson current = requirePerson(id);
         if (patch == null || !(patch.isNamePresent() || patch.isAliasPresent() || patch.isNotePresent()
-                || patch.isGenderPresent() || patch.isBirthdayPresent() || patch.isAvatarPresent()))
+                || patch.isGenderPresent() || patch.isBirthdayPresent() || patch.isAvatarPresent()
+                || patch.isProfilePresent()))
         {
-            throw MediaException.badRequest("body 里没有任何可改字段（name / alias / note / gender / birthday / avatarPath）");
+            throw MediaException.badRequest("body 里没有任何可改字段（name / alias / note / gender / birthday / avatarPath"
+                    + " / measurements / careerStart / careerEnd / tattoos / piercings / ethnicity / hairColor"
+                    + " / eyeColor / heightCm / weightKg / fakeBoobs / nationality / twitter / instagram）");
         }
 
         if (patch.isNamePresent())
@@ -169,6 +201,14 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         if (patch.isAvatarPresent())
         {
             mediaPersonMapper.updatePersonAvatar(id, checkAvatar(patch.getAvatarPath()));
+        }
+        if (patch.isProfilePresent())
+        {
+            // 未出现在 body 里的资料字段沿用库里的现值，出现的（含 null）覆盖成新值，
+            // 然后一次 UPDATE 写全 14 列：不会出现「只写了一半字段」的半成品行
+            MediaPerson target = profileOf(current);
+            applyProfile(target, patch);
+            mediaPersonMapper.updatePersonProfile(id, target);
         }
         invalidateIndex();
         return personNode(mediaPersonMapper.selectPersonDetail(id));
@@ -352,7 +392,154 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         node.put("useCount", person.getUseCount() == null ? 0 : person.getUseCount());
         node.put("videoCount", person.getVideoCount() == null ? 0L : person.getVideoCount());
         node.put("albumCount", person.getAlbumCount() == null ? 0L : person.getAlbumCount());
+        // P5-A 资料字段：空值不输出（库里有 13 个人物、绝大多数没填这些字段，
+        // 全量回 null 只会让站端 payload 变胖、前端还得逐个判空）
+        putIfNotEmpty(node, "measurements", person.getMeasurements());
+        putIfNotEmpty(node, "careerStart", person.getCareerStart());
+        putIfNotEmpty(node, "careerEnd", person.getCareerEnd());
+        putIfNotEmpty(node, "tattoos", person.getTattoos());
+        putIfNotEmpty(node, "piercings", person.getPiercings());
+        putIfNotEmpty(node, "ethnicity", person.getEthnicity());
+        putIfNotEmpty(node, "hairColor", person.getHairColor());
+        putIfNotEmpty(node, "eyeColor", person.getEyeColor());
+        putIfNotEmpty(node, "heightCm", person.getHeightCm());
+        putIfNotEmpty(node, "weightKg", person.getWeightKg());
+        putIfNotEmpty(node, "fakeBoobs", person.getFakeBoobs());
+        putIfNotEmpty(node, "nationality", person.getNationality());
+        putIfNotEmpty(node, "twitter", person.getTwitter());
+        putIfNotEmpty(node, "instagram", person.getInstagram());
         return node;
+    }
+
+    /** 只在有值时才写键（null / 空白字符串都算「未填写」） */
+    private static void putIfNotEmpty(Map<String, Object> node, String key, Object value)
+    {
+        if (value == null)
+        {
+            return;
+        }
+        if (value instanceof String text && text.trim().isEmpty())
+        {
+            return;
+        }
+        node.put(key, value);
+    }
+
+    /**
+     * 把库里现存的 14 个资料字段复制进一个临时对象（更新时作为「未出现字段」的兜底值）
+     *
+     * <p>只复制资料字段，不复制 name / alias 等既有列：它们各自有单列 UPDATE，
+     * 混在一起写会让「只改别名」也去覆盖 name，平白多一次重名判断。</p>
+     */
+    private static MediaPerson profileOf(MediaPerson source)
+    {
+        MediaPerson target = new MediaPerson();
+        target.setMeasurements(source.getMeasurements());
+        target.setCareerStart(source.getCareerStart());
+        target.setCareerEnd(source.getCareerEnd());
+        target.setTattoos(source.getTattoos());
+        target.setPiercings(source.getPiercings());
+        target.setEthnicity(source.getEthnicity());
+        target.setHairColor(source.getHairColor());
+        target.setEyeColor(source.getEyeColor());
+        target.setHeightCm(source.getHeightCm());
+        target.setWeightKg(source.getWeightKg());
+        target.setFakeBoobs(source.getFakeBoobs());
+        target.setNationality(source.getNationality());
+        target.setTwitter(source.getTwitter());
+        target.setInstagram(source.getInstagram());
+        return target;
+    }
+
+    /**
+     * 把补丁里的资料字段写进目标对象并校验（新建与更新共用一段实现）
+     *
+     * <p>校验顺序：长度上限（与列宽对齐）→ 数值范围（身高 100-250 / 体重 30-200 /
+     * 年份 1900-2100）→ 跨字段（careerEnd >= careerStart）。跨字段比较用的是「合并后的有效值」，
+     * 因此只提交 careerEnd 时也会拿库里的 careerStart 做比较。</p>
+     */
+    private static void applyProfile(MediaPerson target, MediaPersonPatch patch)
+    {
+        if (patch.isMeasurementsPresent())
+        {
+            target.setMeasurements(limit(patch.getMeasurements(), MEASUREMENTS_MAX, "measurements"));
+        }
+        if (patch.isCareerStartPresent())
+        {
+            target.setCareerStart(checkRange(patch.getCareerStart(), CAREER_MIN, CAREER_MAX, "careerStart"));
+        }
+        if (patch.isCareerEndPresent())
+        {
+            target.setCareerEnd(checkRange(patch.getCareerEnd(), CAREER_MIN, CAREER_MAX, "careerEnd"));
+        }
+        if (patch.isTattoosPresent())
+        {
+            target.setTattoos(limit(patch.getTattoos(), TATTOOS_MAX, "tattoos"));
+        }
+        if (patch.isPiercingsPresent())
+        {
+            target.setPiercings(limit(patch.getPiercings(), PIERCINGS_MAX, "piercings"));
+        }
+        if (patch.isEthnicityPresent())
+        {
+            target.setEthnicity(limit(patch.getEthnicity(), ETHNICITY_MAX, "ethnicity"));
+        }
+        if (patch.isHairColorPresent())
+        {
+            target.setHairColor(limit(patch.getHairColor(), COLOR_MAX, "hairColor"));
+        }
+        if (patch.isEyeColorPresent())
+        {
+            target.setEyeColor(limit(patch.getEyeColor(), COLOR_MAX, "eyeColor"));
+        }
+        if (patch.isHeightCmPresent())
+        {
+            target.setHeightCm(checkRange(patch.getHeightCm(), HEIGHT_MIN, HEIGHT_MAX, "heightCm"));
+        }
+        if (patch.isWeightKgPresent())
+        {
+            target.setWeightKg(checkRange(patch.getWeightKg(), WEIGHT_MIN, WEIGHT_MAX, "weightKg"));
+        }
+        if (patch.isFakeBoobsPresent())
+        {
+            target.setFakeBoobs(patch.getFakeBoobs());
+        }
+        if (patch.isNationalityPresent())
+        {
+            target.setNationality(limit(patch.getNationality(), NATIONALITY_MAX, "nationality"));
+        }
+        if (patch.isTwitterPresent())
+        {
+            target.setTwitter(limit(patch.getTwitter(), SOCIAL_MAX, "twitter"));
+        }
+        if (patch.isInstagramPresent())
+        {
+            target.setInstagram(limit(patch.getInstagram(), SOCIAL_MAX, "instagram"));
+        }
+        checkCareer(target.getCareerStart(), target.getCareerEnd());
+    }
+
+    /** 数值范围：null = 清空，合法；越界 400 */
+    private static Integer checkRange(Integer value, int min, int max, String field)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (value < min || value > max)
+        {
+            throw MediaException.badRequest(field + " 必须在 " + min + "-" + max + " 之间（null 表示清空）");
+        }
+        return value;
+    }
+
+    /** 出道年份 <= 退役年份；任一侧为空时只校验另一侧（各自的范围已在 checkRange 里校验过） */
+    private static void checkCareer(Integer start, Integer end)
+    {
+        if (start != null && end != null && end < start)
+        {
+            throw MediaException.badRequest("careerEnd 必须 >= careerStart（" + end + " < " + start + "）");
+        }
     }
 
     private MediaPerson requirePerson(Long id)

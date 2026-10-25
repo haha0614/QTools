@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    媒体工作室 media_studio + media_video_studio（P5-A）。
+
+    "全量替换"（PUT /admin/videos/{id}/studios）只删该 video_id 的关联行再重插，
+    PK(video_id, studio_id) 保证同一视频不会重复挂同一个工作室。
+
+    use_count 与 media_tag / media_person 同一套规则：按关联行数重算，不做 +1/-1 漂移。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaStudioMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaStudio" id="MediaStudioResult">
+        <id     property="id"         column="id"          />
+        <result property="name"       column="name"        />
+        <result property="alias"      column="alias"       />
+        <result property="note"       column="note"        />
+        <result property="avatarPath" column="avatar_path" />
+        <result property="useCount"   column="use_count"   />
+        <result property="sort"       column="sort"        />
+        <result property="hidden"     column="hidden"      />
+        <result property="createdAt"  column="created_at"  />
+        <result property="videoCount" column="video_count" />
+    </resultMap>
+
+    <!-- 工作室行 + 只读计数（视频数按 media_video_studio 去重） -->
+    <sql id="studioColumns">
+        s.id, s.name, s.alias, s.note, s.avatar_path, s.use_count, s.sort, s.hidden, s.created_at,
+        (select count(distinct vs.video_id) from media_video_studio vs where vs.studio_id = s.id) as video_count
+    </sql>
+
+    <!-- ================================================================ 工作室字典 -->
+
+    <select id="selectStudioList" resultMap="MediaStudioResult">
+        select <include refid="studioColumns"/>
+        from media_studio s
+        order by s.sort asc, s.name asc, s.id asc
+    </select>
+
+    <select id="selectStudioVisibleList" resultMap="MediaStudioResult">
+        select <include refid="studioColumns"/>
+        from media_studio s
+        where s.hidden = 0
+        order by s.sort asc, s.name asc, s.id asc
+    </select>
+
+    <select id="selectStudioDetail" resultMap="MediaStudioResult">
+        select <include refid="studioColumns"/>
+        from media_studio s
+        where s.id = #{id}
+    </select>
+
+    <select id="selectStudioByName" resultMap="MediaStudioResult">
+        select <include refid="studioColumns"/>
+        from media_studio s
+        where s.name = #{name}
+        limit 1
+    </select>
+
+    <insert id="insertStudio" parameterType="com.qtools.media.domain.MediaStudio"
+            useGeneratedKeys="true" keyProperty="id">
+        insert into media_studio (name, alias, note, avatar_path, use_count, sort, hidden)
+        values (#{name}, #{alias}, #{note}, #{avatarPath}, 0,
+                coalesce(#{sort}, 0), coalesce(#{hidden}, 0))
+    </insert>
+
+    <update id="updateStudio" parameterType="com.qtools.media.domain.MediaStudio">
+        update media_studio
+           set name        = #{name},
+               alias       = #{alias},
+               note        = #{note},
+               avatar_path = #{avatarPath},
+               sort        = coalesce(#{sort}, 0),
+               hidden      = coalesce(#{hidden}, 0)
+         where id = #{id}
+    </update>
+
+    <delete id="deleteStudio">
+        delete from media_studio where id = #{id}
+    </delete>
+
+    <update id="recomputeStudioUseCount">
+        update media_studio s
+        set s.use_count = (select count(*) from media_video_studio vs where vs.studio_id = s.id)
+        where s.id in
+        <foreach collection="studioIds" item="studioId" open="(" separator="," close=")">#{studioId}</foreach>
+    </update>
+
+    <select id="countStudiosByIds" resultType="long">
+        select count(*) from media_studio
+        where id in
+        <foreach collection="studioIds" item="studioId" open="(" separator="," close=")">#{studioId}</foreach>
+    </select>
+
+    <select id="countVideoById" resultType="long">
+        select count(*) from media_video where id = #{videoId}
+    </select>
+
+    <select id="countVideoRefsByStudio" resultType="long">
+        select count(distinct video_id) from media_video_studio where studio_id = #{studioId}
+    </select>
+
+    <!-- ================================================================ 视频 ↔ 工作室 -->
+
+    <select id="selectVideoStudios" resultType="java.util.LinkedHashMap">
+        select s.id as id, s.name as name, s.alias as alias
+        from media_video_studio vs
+        inner join media_studio s on s.id = vs.studio_id
+        where vs.video_id = #{videoId}
+        order by s.name asc, s.id asc
+    </select>
+
+    <select id="selectStudioIdsByVideoId" resultType="java.lang.Long">
+        select studio_id from media_video_studio where video_id = #{videoId}
+    </select>
+
+    <delete id="deleteVideoStudios">
+        delete from media_video_studio where video_id = #{videoId}
+    </delete>
+
+    <insert id="insertVideoStudio">
+        insert ignore into media_video_studio (video_id, studio_id)
+        select #{videoId}, s.id from media_studio s where s.id = #{studioId}
+    </insert>
+
+    <!-- ================================================================ 站端 / 索引 -->
+
+    <select id="selectStudioVideoPage" resultType="java.util.LinkedHashMap">
+        select v.id as id, v.title as title, v.folder as folder, v.rel_path as rel, v.size as size,
+               v.dur as dur, v.w as w, v.h as h, v.poster_path as poster
+        from media_video v
+        where v.hidden = 0
+          and exists (select 1 from media_video_studio vs where vs.video_id = v.id and vs.studio_id = #{studioId})
+        order by v.folder asc, v.title asc, v.id asc
+        limit #{offset}, #{size}
+    </select>
+
+    <select id="countStudioVideos" resultType="long">
+        select count(*) from media_video v
+        where v.hidden = 0
+          and exists (select 1 from media_video_studio vs where vs.video_id = v.id and vs.studio_id = #{studioId})
+    </select>
+
+    <select id="selectVideoStudioList" resultType="java.util.LinkedHashMap">
+        select vs.video_id as videoId, s.name as name
+        from media_video_studio vs
+        inner join media_studio s on s.id = vs.studio_id
+        where s.hidden = 0
+        order by vs.video_id asc, s.name asc
+    </select>
+
+    <select id="selectStudioNamesByVideoId" resultType="java.lang.String">
+        select s.name
+        from media_video_studio vs
+        inner join media_studio s on s.id = vs.studio_id
+        where vs.video_id = #{videoId} and s.hidden = 0
+        order by s.name asc
+    </select>
+
+</mapper>

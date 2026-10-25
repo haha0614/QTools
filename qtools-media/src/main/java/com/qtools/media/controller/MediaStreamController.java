@@ -47,7 +47,12 @@ public class MediaStreamController
         mediaStreamService.transcode(p, q, t, request, response);
     }
 
-    /** 转码占用情况：{max, active, presets, ffmpegAvailable} */
+    /**
+     * 转码占用情况：{max, active, presets, ffmpegAvailable, encoder:{requested,effective,hardware,...}}
+     *
+     * <p>{@code encoder.effective} 是<b>真正在用</b>的编码器（nvenc / qsv / libx264）：
+     * 配了 {@code auto} 又没显卡的机器看这里就是 libx264，不必翻日志。</p>
+     */
     @GetMapping("/transcode/info")
     public Map<String, Object> transcodeInfo()
     {
@@ -56,6 +61,7 @@ public class MediaStreamController
         info.put("active", mediaStreamService.getActive());
         info.put("presets", mediaStreamService.getPresets());
         info.put("ffmpegAvailable", mediaStreamService.isFfmpegAvailable());
+        info.put("encoder", mediaStreamService.getTranscoderInfo());
         return info;
     }
 }

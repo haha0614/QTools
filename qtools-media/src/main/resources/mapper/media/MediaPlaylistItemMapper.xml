@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    播放列表条目（P5-B）映射文件。
+
+    详情用 left join media_video：视频被软删 / 移走时条目仍然返回（title/dur 为 null），
+    前端据此显示「文件缺失」，而不是整条从列表里消失——列表的顺序不该因为一次扫描变乱。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaPlaylistItemMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaPlaylistItem" id="MediaPlaylistItemResult">
+        <result property="playlistId" column="playlist_id" />
+        <result property="videoId"    column="video_id"    />
+        <result property="seq"        column="seq"         />
+        <result property="title"      column="title"       />
+        <result property="dur"        column="dur"         />
+        <result property="createTime" column="create_time" />
+    </resultMap>
+
+    <select id="selectByPlaylistId" resultMap="MediaPlaylistItemResult">
+        select i.playlist_id, i.video_id, i.seq, i.create_time, v.title, v.dur
+        from media_playlist_item i
+        left join media_video v on v.id = i.video_id
+        where i.playlist_id = #{playlistId}
+        order by i.seq asc
+    </select>
+
+    <select id="selectVideoIds" resultType="java.lang.String">
+        select video_id from media_playlist_item
+        where playlist_id = #{playlistId}
+        order by seq asc
+    </select>
+
+    <select id="countByPlaylistAndVideo" resultType="int">
+        select count(*) from media_playlist_item
+        where playlist_id = #{playlistId} and video_id = #{videoId}
+    </select>
+
+    <select id="selectMaxSeq" resultType="java.lang.Integer">
+        select max(seq) from media_playlist_item where playlist_id = #{playlistId}
+    </select>
+
+    <insert id="insertItem" parameterType="com.qtools.media.domain.MediaPlaylistItem">
+        insert into media_playlist_item (playlist_id, video_id, seq, create_time)
+        values (#{playlistId}, #{videoId}, #{seq}, current_timestamp)
+    </insert>
+
+    <delete id="deleteByPlaylistId">
+        delete from media_playlist_item where playlist_id = #{playlistId}
+    </delete>
+
+    <delete id="deleteItem">
+        delete from media_playlist_item
+        where playlist_id = #{playlistId} and video_id = #{videoId}
+    </delete>
+
+    <update id="updateSeq">
+        update media_playlist_item set seq = #{seq}
+        where playlist_id = #{playlistId} and video_id = #{videoId}
+    </update>
+
+</mapper>

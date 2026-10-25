@@ -73,7 +73,9 @@ public class MediaVideo
     private Date lastSeen;
 
     /**
-     * 人工评分 0-10（10 最好；<b>null = 未评分</b>，0 是有效的最低分）
+     * 人工评分 0-100（100 最好；<b>null = 未评分</b>，0 是有效的最低分）
+     *
+     * <p>P5-A 起值域由 0-10 扩到 0-100（列类型 tinyint → smallint，存量值已 ×10）；字段名不变。</p>
      *
      * <p>由 {@code media_video.rating} 承载，只在 M3-A 组织能力接口里写入；
      * 扫描脚本从不写这一列，因此重建索引不会冲掉人工评分。</p>

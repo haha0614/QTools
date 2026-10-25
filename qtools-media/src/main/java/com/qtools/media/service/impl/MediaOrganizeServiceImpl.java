@@ -27,7 +27,7 @@ import com.qtools.media.service.IMediaOrganizeService;
  *
  * <p>数据落点（详见 {@code doc/media_organize.sql}）：</p>
  * <ul>
- *   <li>评分 → {@code media_video.rating}（TINYINT NULL，0-10，<b>null = 未评分</b>，0 是有效最低分）</li>
+ *   <li>评分 → {@code media_video.rating}（SMALLINT NULL，0-100，<b>null = 未评分</b>，0 是有效最低分）</li>
  *   <li>标签字典 → {@code media_tag}；关联写进既有的 {@code media_video_tag}
  *       （{@code facet='标签'} + {@code name} 冗余 + {@code tag_id} 指向字典），
  *       因此索引 / 详情接口的历史 facet+name 读取路径零改动</li>
@@ -44,10 +44,10 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
 {
     private static final Logger log = LoggerFactory.getLogger(MediaOrganizeServiceImpl.class);
 
-    /** 评分刻度 0-10（10 最好） */
+    /** 评分刻度 0-100（100 最好；P5-A 由 0-10 扩容，存量 0-10 已 ×10 迁移） */
     private static final int RATING_MIN = 0;
 
-    private static final int RATING_MAX = 10;
+    private static final int RATING_MAX = 100;
 
     /** 标签名去空格后长度上限（与 media_tag.name VARCHAR(32) 对齐） */
     private static final int TAG_NAME_MAX = 32;

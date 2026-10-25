@@ -13,6 +13,7 @@ import com.qtools.common.utils.StringUtils;
 import com.qtools.media.domain.MediaVideoMarker;
 import com.qtools.media.domain.dto.MediaMetaPatch;
 import com.qtools.media.domain.dto.MediaPersonPatch;
+import com.qtools.media.domain.dto.MediaStudioPatch;
 import com.qtools.media.exception.MediaException;
 
 /**
@@ -262,6 +263,119 @@ public final class MediaBodyParser
             patch.setAvatarPresent(true);
             patch.setAvatarPath(stringValue(body.get("avatarPath")));
         }
+        // P5-A 资料字段：全部可空，空串 / null = 清空；范围校验（身高 / 体重 / 年份）在服务层
+        if (body.containsKey("measurements"))
+        {
+            patch.setMeasurementsPresent(true);
+            patch.setMeasurements(stringValue(body.get("measurements")));
+        }
+        if (body.containsKey("careerStart"))
+        {
+            patch.setCareerStartPresent(true);
+            patch.setCareerStart(intValue(body.get("careerStart")));
+        }
+        if (body.containsKey("careerEnd"))
+        {
+            patch.setCareerEndPresent(true);
+            patch.setCareerEnd(intValue(body.get("careerEnd")));
+        }
+        if (body.containsKey("tattoos"))
+        {
+            patch.setTattoosPresent(true);
+            patch.setTattoos(stringValue(body.get("tattoos")));
+        }
+        if (body.containsKey("piercings"))
+        {
+            patch.setPiercingsPresent(true);
+            patch.setPiercings(stringValue(body.get("piercings")));
+        }
+        if (body.containsKey("ethnicity"))
+        {
+            patch.setEthnicityPresent(true);
+            patch.setEthnicity(stringValue(body.get("ethnicity")));
+        }
+        if (body.containsKey("hairColor"))
+        {
+            patch.setHairColorPresent(true);
+            patch.setHairColor(stringValue(body.get("hairColor")));
+        }
+        if (body.containsKey("eyeColor"))
+        {
+            patch.setEyeColorPresent(true);
+            patch.setEyeColor(stringValue(body.get("eyeColor")));
+        }
+        if (body.containsKey("heightCm"))
+        {
+            patch.setHeightCmPresent(true);
+            patch.setHeightCm(intValue(body.get("heightCm")));
+        }
+        if (body.containsKey("weightKg"))
+        {
+            patch.setWeightKgPresent(true);
+            patch.setWeightKg(intValue(body.get("weightKg")));
+        }
+        if (body.containsKey("fakeBoobs"))
+        {
+            patch.setFakeBoobsPresent(true);
+            patch.setFakeBoobs(boolValue(body.get("fakeBoobs")));
+        }
+        if (body.containsKey("nationality"))
+        {
+            patch.setNationalityPresent(true);
+            patch.setNationality(stringValue(body.get("nationality")));
+        }
+        if (body.containsKey("twitter"))
+        {
+            patch.setTwitterPresent(true);
+            patch.setTwitter(stringValue(body.get("twitter")));
+        }
+        if (body.containsKey("instagram"))
+        {
+            patch.setInstagramPresent(true);
+            patch.setInstagram(stringValue(body.get("instagram")));
+        }
+        return patch;
+    }
+
+    /**
+     * body → {@link MediaStudioPatch}（P5-A：工作室新建 / 改名 / 改字段）
+     *
+     * <p>与 {@link #personPatch} 同一套规则：{@code containsKey} 即「字段出现」，
+     * 显式 {@code null} = 清空该列。name 必填且唯一的校验在服务层。</p>
+     */
+    public static MediaStudioPatch studioPatch(Map<String, Object> body)
+    {
+        MediaStudioPatch patch = new MediaStudioPatch();
+        if (body.containsKey("name"))
+        {
+            patch.setNamePresent(true);
+            patch.setName(stringValue(body.get("name")));
+        }
+        if (body.containsKey("alias"))
+        {
+            patch.setAliasPresent(true);
+            patch.setAlias(stringValue(body.get("alias")));
+        }
+        if (body.containsKey("note"))
+        {
+            patch.setNotePresent(true);
+            patch.setNote(stringValue(body.get("note")));
+        }
+        if (body.containsKey("avatarPath"))
+        {
+            patch.setAvatarPresent(true);
+            patch.setAvatarPath(stringValue(body.get("avatarPath")));
+        }
+        if (body.containsKey("sort"))
+        {
+            patch.setSortPresent(true);
+            patch.setSort(intValue(body.get("sort")));
+        }
+        if (body.containsKey("hidden"))
+        {
+            patch.setHiddenPresent(true);
+            patch.setHidden(boolValue(body.get("hidden")));
+        }
         return patch;
     }
 
@@ -328,7 +442,7 @@ public final class MediaBodyParser
             double asDouble = number.doubleValue();
             if (asDouble != Math.rint(asDouble))
             {
-                throw MediaException.badRequest("rating 必须是整数 0-10");
+                throw MediaException.badRequest("rating 必须是整数 0-100");
             }
             return Integer.valueOf(number.intValue());
         }
@@ -343,7 +457,7 @@ public final class MediaBodyParser
         }
         catch (NumberFormatException e)
         {
-            throw MediaException.badRequest("rating 必须是整数 0-10: " + text);
+            throw MediaException.badRequest("rating 必须是整数 0-100: " + text);
         }
     }
 

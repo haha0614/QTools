@@ -27,6 +27,14 @@ import org.springframework.stereotype.Component;
  *   <tr><td>mysqlClient</td><td>空</td><td>不注入 {@code MS_MYSQL}，脚本自己从 PATH 找 mysql</td>
  *       <td>QTOOLS_MEDIA_MYSQLCLIENT</td></tr>
  *   <tr><td>maxTranscode</td><td>2</td><td>按 1 计</td><td>QTOOLS_MEDIA_MAXTRANSCODE</td></tr>
+ *   <tr><td>transcode.encoder</td><td>auto</td><td>非法值记 WARN 并按 auto 处理；
+ *       实际生效值见 {@code GET /api/media/admin/config} 的 {@code media.transcode.effective}</td>
+ *       <td>QTOOLS_MEDIA_TRANSCODE_ENCODER</td></tr>
+ *   <tr><td>transcode.preset</td><td>p4</td><td>原样透传给硬件编码器的 {@code -preset}
+ *       （写错时由 ffmpeg 拒绝，转码路径自动回退软件重试一次）</td>
+ *       <td>QTOOLS_MEDIA_TRANSCODE_PRESET</td></tr>
+ *   <tr><td>transcode.cq</td><td>23</td><td>越界按 1-51 取边界</td>
+ *       <td>QTOOLS_MEDIA_TRANSCODE_CQ</td></tr>
  *   <tr><td>nodePath</td><td>空</td><td>扫描任务启动即报「nodePath 未配置」</td>
  *       <td>QTOOLS_MEDIA_NODEPATH</td></tr>
  *   <tr><td>scanScript</td><td>空</td><td>full 扫描启动即报「scanScript 未配置」</td>
@@ -97,6 +105,14 @@ public class MediaProperties
 
     /** 实时转码并发上限 */
     private int maxTranscode = 2;
+
+    /**
+     * 实时转码的硬件加速配置：{@code qtools.media.transcode.*}
+     *
+     * <p>「配置想要什么」在这里，「这台机器实际能用什么」由 {@code MediaTranscodeProbe} 探测后缓存；
+     * 两者都可能不一致（配了 nvenc 但机器没显卡），所以管理端自检同时返回 requested 与 effective。</p>
+     */
+    private Transcode transcode = new Transcode();
 
     /**
      * 回收站根目录（软删只移动、绝不真删）
@@ -278,6 +294,16 @@ public class MediaProperties
         this.maxTranscode = maxTranscode;
     }
 
+    public Transcode getTranscode()
+    {
+        return transcode;
+    }
+
+    public void setTranscode(Transcode transcode)
+    {
+        this.transcode = transcode;
+    }
+
     public String getAllowOrigins()
     {
         return allowOrigins;
@@ -298,6 +324,64 @@ public class MediaProperties
     public void setWatch(Watch watch)
     {
         this.watch = watch;
+    }
+
+    /**
+     * 实时转码的编码器配置（{@code qtools.media.transcode.*}）
+     *
+     * <p>三项都很小，但仍然单独成类：以后要加 {@code lookAhead} / {@code tune} 这类编码器参数时，
+     * 不该继续往 {@code qtools.media.*} 顶层堆平铺字段。</p>
+     */
+    public static class Transcode
+    {
+        /**
+         * 目标编码器：{@code auto | software | libx264 | h264_nvenc | hevc_nvenc | av1_nvenc | h264_qsv | hevc_qsv}
+         *
+         * <p>{@code auto} 的探测顺序是 h264_nvenc → h264_qsv → libx264；非法值记 WARN 后按 auto 处理——
+         * 站端接口不接受编码器参数，「非法」只可能来自 yml，一个拼错不该让整个媒体库起不来。</p>
+         */
+        private String encoder = "auto";
+
+        /**
+         * 硬件编码器的 {@code -preset}：nvenc 是 p1(最快)-p7(最清)，qsv 走 veryfast
+         *
+         * <p>只作用于硬件分支：软件分支仍是既有的 {@code veryfast + zerolatency}，保证无显卡机器上
+         * 的行为与 P5 之前完全一致。</p>
+         */
+        private String preset = "p4";
+
+        /** 恒定质量因子：nvenc 的 {@code -cq} / qsv 的 {@code -global_quality}（1-51，越小越清） */
+        private int cq = 23;
+
+        public String getEncoder()
+        {
+            return encoder;
+        }
+
+        public void setEncoder(String encoder)
+        {
+            this.encoder = encoder;
+        }
+
+        public String getPreset()
+        {
+            return preset;
+        }
+
+        public void setPreset(String preset)
+        {
+            this.preset = preset;
+        }
+
+        public int getCq()
+        {
+            return cq;
+        }
+
+        public void setCq(int cq)
+        {
+            this.cq = cq;
+        }
     }
 
     /**
