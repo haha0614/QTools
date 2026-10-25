@@ -161,7 +161,8 @@ node E:\111\project\QTools\QTools\doc\media-import\import-bundle.js --in='D:\bun
 | 大图预览 | `pv/<content_hash>.jpg`（同上，仅 `is_big=1`） |
 | `content_hash` 为 NULL | 回退老命名 `p|pv/<albumId>/<%04d>.jpg`，并在启动时打一条 WARN（提示先跑 `--backfill-hash`）；**绝不**因此失败 |
 | 服务端解析 | 先查 `p|pv/<content_hash>.jpg`，命中不了再回退 `p|pv/<albumId>/<%04d>.jpg`（`MediaFileServiceImpl#resolveThumbPhoto`） |
-| URL | 一律不变：`/api/media/thumb/p/<albumId>/<i>`、`/api/media/preview/p/<albumId>/<i>`；`<i>` 传序号或内容哈希都认（新前端可用 `photos[].hash` 直接拼） |
+| URL | 两种写法都认：内容寻址 `/api/media/thumb/p/<content_hash>`、`/api/media/preview/p/<content_hash>`（推荐），老命名 `/api/media/thumb/p/<albumId>/<i>`、`/api/media/preview/p/<albumId>/<i>`（`<i>` 传序号或内容哈希）；管理端 `GET /api/media/admin/album/{id}/photos` 直接返回内容寻址的 `thumbUrl`/`previewUrl`，前端不必自己拼 |
+| 缓存头 | **按「地址是否内容寻址」分级**：定位符是 16 位内容哈希 → `Cache-Control: public, max-age=31536000, immutable`；序号 / 视频 id 等非内容寻址 → `no-cache, must-revalidate`（配 ETag + Last-Modified，命中回 304）。以前一律 `max-age=604800`，序号 URL 重建后内容变而 URL 不变，浏览器 7 天继续用旧图 —— 这正是「管理端预览弹窗显示上一格的脸」的根因 |
 | 旧文件 | **不删、不迁移**：老命名产物继续能命中（回退路径），新旧共存 |
 | `--gc` | 一并扫 `p/`、`pv/` 顶层：文件名 stem 不是任何 `media_photo.content_hash` 的当孤儿；老命名的 `<albumId>/` 子目录**整棵不动** |
 

@@ -30,7 +30,10 @@ public interface IMediaAdminService
      * 某册全部图片（<b>只读库</b>，不列磁盘）
      *
      * @param albumId 相册 id
-     * @return [{id,seq,relPath,missing,bytes,w,h,thumbUrl,contentHash,lastSeen}]，缺失行排在最后
+     * @return [{id,seq,relPath,missing,bytes,w,h,thumbUrl,previewUrl,thumbVersion,contentHash,lastSeen}]
+     *         —— thumbUrl / previewUrl 有 content_hash 时是内容寻址 URL（{@code /api/media/thumb/p/<hash>}），
+     *         否则回退老命名 {@code /api/media/thumb/p/<albumId>/<%04d seq>}；thumbVersion 恒非空，
+     *         供前端将来拼 {@code ?v=} 做 cache-busting。缺失行排在最后。
      */
     List<Map<String, Object>> albumPhotos(String albumId);
 

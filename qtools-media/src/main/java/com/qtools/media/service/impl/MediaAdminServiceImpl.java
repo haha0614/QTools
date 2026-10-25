@@ -1,6 +1,7 @@
 package com.qtools.media.service.impl;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -9,6 +10,8 @@ import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -43,6 +46,7 @@ import com.qtools.media.domain.MediaVideoTag;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaAdminMapper;
 import com.qtools.media.mapper.MediaPersonMapper;
+import com.qtools.media.mapper.MediaPhotoMapper;
 import com.qtools.media.mapper.MediaRootMapper;
 import com.qtools.media.mapper.MediaVideoMapper;
 import com.qtools.media.service.IMediaAdminService;
@@ -107,6 +111,17 @@ public class MediaAdminServiceImpl implements IMediaAdminService
     /** 库根一致性抽样的条数（自检必须是常数级开销，不能全量扫库） */
     private static final int ROOT_SAMPLE = 200;
 
+    /** 内容哈希：build-thumbs.js 的落盘名，也是内容寻址 URL 的定位符 */
+    private static final Pattern CONTENT_HASH = Pattern.compile("^[0-9a-f]{16}$");
+
+    /** 内容寻址缩略图 / 大图预览前缀（定位符就是内容哈希） */
+    private static final String THUMB_PHOTO_PREFIX = "/api/media/thumb/p/";
+
+    private static final String PREVIEW_PHOTO_PREFIX = "/api/media/preview/p/";
+
+    /** thumbVersion 长度：内容哈希本身就是 16 位，回退的短哈希也对齐这个长度 */
+    private static final int VERSION_WIDTH = 16;
+
     @Autowired
     private MediaAdminMapper mediaAdminMapper;
 
@@ -115,6 +130,10 @@ public class MediaAdminServiceImpl implements IMediaAdminService
 
     @Autowired
     private MediaPersonMapper mediaPersonMapper;
+
+    /** 只看 content_hash（回收站封面要按内容寻址拼 URL），不过滤 hidden */
+    @Autowired
+    private MediaPhotoMapper mediaPhotoMapper;
 
     /** 多库根清单（自检只列不改） */
     @Autowired
@@ -750,7 +769,9 @@ public class MediaAdminServiceImpl implements IMediaAdminService
                 originalRel = album.getDir();
                 if (StringUtils.isNotEmpty(album.getCoverPath()))
                 {
-                    thumbUrl = "/api/media/thumb/p/" + album.getId() + "/" + coverSeq(album.getCoverPath());
+                    // 封面同样按内容寻址拼：cover_path 里的 seq 会随册内新增图片后移，不能拿来做 URL 定位符
+                    Integer coverSeq = Integer.valueOf(coverSeq(album.getCoverPath()));
+                    thumbUrl = thumbUrl(album.getId(), coverSeq, coverHash(album.getId(), coverSeq));
                 }
             }
         }
@@ -760,7 +781,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
             if (photo != null)
             {
                 originalRel = photo.getRelPath();
-                thumbUrl = thumbUrl(photo.getAlbumId(), photo.getSeq());
+                thumbUrl = thumbUrl(photo.getAlbumId(), photo.getSeq(), contentHash(photo.getContentHash()));
             }
         }
 
@@ -1384,22 +1405,116 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         node.put("bytes", photo.getBytes());
         node.put("isBig", photo.getIsBig() != null && photo.getIsBig() != 0);
         node.put("hidden", photo.getHidden() != null && photo.getHidden() != 0);
-        node.put("thumbUrl", thumbUrl(photo.getAlbumId(), photo.getSeq()));
+        // 内容寻址 URL：URL 随内容变，浏览器缓存就不可能再指到旧图。
+        // 产物没落盘时仍需发老命名 URL——内容寻址入口没有序号回退，发出去就是死链
+        String photoHash = contentHash(photo.getContentHash());
+        node.put("thumbUrl", photoUrl(photo, photoHash, false));
+        node.put("previewUrl", photoUrl(photo, photoHash, true));
         // 缺失文件（P2-D）：前端看到 missing=true 就不去请求缩略图，只画「缺失」角标
         node.put("missing", photo.getMissing() != null && photo.getMissing() != 0);
         node.put("lastSeen", formatDate(photo.getLastSeen()));
-        // 内容哈希：前端可以拼 /api/media/thumb/p/<albumId>/<hash>（服务端两种写法都认）
+        // 内容哈希：URL 的定位符来源，也是前端拼 URL 的现成字段
         node.put("contentHash", photo.getContentHash());
+        // 版本号：前端将来可拼 ?v=<thumbVersion> 做 cache-busting（本期只返回，前端暂不使用）
+        node.put("thumbVersion", thumbVersion(photo, photoHash));
         return node;
     }
 
-    private static String thumbUrl(String albumId, Integer seq)
+    /**
+     * 内容哈希规范化：{@code content_hash} 未回填 / 脏数据 → {@code null}
+     *
+     * <p>只有 16 位小写 hex 才当成内容寻址的定位符，别的值一律不拼进 URL——
+     * 拼错了不是「缓存失效」，而是直接 404 或越权路径。</p>
+     */
+    private static String contentHash(String raw)
     {
+        if (StringUtils.isEmpty(raw))
+        {
+            return null;
+        }
+        String value = raw.trim().toLowerCase();
+        return CONTENT_HASH.matcher(value).matches() ? value : null;
+    }
+
+    /** 相册缩略图 URL：有哈希且产物已落盘走内容寻址，否则回退老命名 {@code <albumId>/<%04d>} */
+    private String thumbUrl(String albumId, Integer seq, String contentHash)
+    {
+        return photoUrl(THUMB_PHOTO_PREFIX, albumId, seq, contentHash, false);
+    }
+
+    private String photoUrl(MediaPhoto photo, String contentHash, boolean preview)
+    {
+        return photoUrl(preview ? PREVIEW_PHOTO_PREFIX : THUMB_PHOTO_PREFIX, photo.getAlbumId(), photo.getSeq(),
+                contentHash, preview);
+    }
+
+    /**
+     * 相册图片 URL 拼装（缩略图 / 预览图共用）
+     *
+     * <p>老命名 {@code <prefix><albumId>/<seq4>} 的 seq 会随册内新增图片整体后移，重建缩略图后
+     * 同一个 URL 可能指向另一张图——浏览器按 URL 缓存就必然张冠李戴（管理端预览弹窗第 4 格
+     * 显示第 3 格的脸，就是这个原因）。内容寻址 URL 的定位符就是内容哈希，内容一变 URL 就变，
+     * 缓存陷阱从根上消失。</p>
+     *
+     * <p>只在产物确实落盘时才发内容寻址 URL：那个入口没有序号回退，产物缺失就是 404；
+     * 老命名入口至少还能由服务端回退到 {@code p|pv/<albumId>/<seq4>.jpg}。</p>
+     *
+     * @param contentHash 已规范化的 16 位内容哈希，可为 null（老库还没回填）
+     * @param preview     true=大图预览（pv），false=缩略图（p）
+     */
+    private String photoUrl(String prefix, String albumId, Integer seq, String contentHash, boolean preview)
+    {
+        if (contentHash != null && mediaFileService.hasPhotoArtifact(contentHash, preview))
+        {
+            return prefix + contentHash;
+        }
         if (albumId == null || seq == null)
         {
             return null;
         }
-        return "/api/media/thumb/p/" + albumId + "/" + String.format("%04d", seq);
+        return prefix + albumId + "/" + String.format("%04d", seq);
+    }
+
+    /**
+     * 缓存刷新用的版本号（前端将来可拼 {@code ?v=<thumbVersion>}）
+     *
+     * <p>优先取内容哈希（本身就是 16 位）；老库还没回填哈希时用 {@code bytes|lastSeen|seq}
+     * 的短哈希，保证内容或时间一变版本就变；连库数据都取不到再退回 seq。返回值恒非空。</p>
+     */
+    private static String thumbVersion(MediaPhoto photo, String contentHash)
+    {
+        if (contentHash != null)
+        {
+            return contentHash.length() > VERSION_WIDTH ? contentHash.substring(0, VERSION_WIDTH) : contentHash;
+        }
+        String seed = photo.getBytes() + "|" + photo.getLastSeen() + "|" + photo.getSeq();
+        try
+        {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(seed.getBytes(StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(VERSION_WIDTH);
+            for (int i = 0; i < VERSION_WIDTH / 2; i++)
+            {
+                out.append(String.format("%02x", digest[i]));
+            }
+            return out.toString();
+        }
+        catch (NoSuchAlgorithmException e)
+        {
+            return photo.getSeq() == null ? "0" : String.valueOf(photo.getSeq());
+        }
+    }
+
+    /** 相册封面的内容哈希：查不到 / 读库异常都返回 null，让 URL 回退老命名 */
+    private String coverHash(String albumId, Integer seq)
+    {
+        try
+        {
+            return contentHash(mediaPhotoMapper.selectPhotoContentHashByAlbumSeq(albumId, seq));
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
     }
 
     // ------------------------------------------------------------------ 工具

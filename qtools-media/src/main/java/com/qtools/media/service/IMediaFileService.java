@@ -215,6 +215,33 @@ public interface IMediaFileService
      */
     Path resolveThumbPhoto(String albumId, String index, boolean preview);
 
+    /**
+     * 定位相册缩略图（p）或预览图（pv）——<b>只认内容寻址</b>
+     *
+     * <p>对外 URL 形如 {@code /api/media/thumb/p/<content_hash>}：定位符本身就是内容哈希，
+     * 因此不存在「同一个 URL 先后指向两张图」的问题，响应可以给出永久缓存头。管理端
+     * 有 {@code content_hash} 时就用这条；老库还没回填哈希的行走
+     * {@link #resolveThumbPhoto(String, String, boolean)} 的序号回退。</p>
+     *
+     * @param hash    {@code content_hash}（16 位 hex）
+     * @param preview true=预览图（pv），false=缩略图（p）
+     * @return 图片路径
+     * @throws com.qtools.media.exception.MediaException 403 非法哈希 / 404 产物不存在
+     */
+    Path resolveThumbPhotoByHash(String hash, boolean preview);
+
+    /**
+     * 内容寻址产物是否已经落盘（thumbs/p 或 thumbs/pv 下有没有 {@code <hash>.jpg}）
+     *
+     * <p>管理端拼 URL 前必须先问这一句：内容寻址 URL 没有序号回退，产物缺失就是 404，
+     * 而老命名 URL 至少还能回退到 {@code p|pv/<albumId>/<seq4>.jpg}。所以哈希已回填
+     * 但缩略图还没生成时，仍然发老命名 URL，宁可继续用旧的也别给前端一个死链。</p>
+     *
+     * @param contentHash 已规范化的内容哈希；null / 非法 / 读盘异常一律返回 false
+     * @param preview     true=预览图（pv），false=缩略图（p）
+     */
+    boolean hasPhotoArtifact(String contentHash, boolean preview);
+
     /** 按扩展名返回 Content-Type */
     String contentType(Path path);
 

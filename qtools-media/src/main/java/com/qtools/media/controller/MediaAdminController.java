@@ -141,8 +141,15 @@ public class MediaAdminController extends BaseController
     /**
      * 某册全部图片（<b>只读库</b>，不列磁盘）：管理端相册预览弹窗的数据源
      *
-     * <p>返回裸数组 {@code [{id,seq,relPath,missing,bytes,w,h,thumbUrl,contentHash,lastSeen}]}，
-     * 缺失行排在最后（{@code order by missing asc, seq asc}）。
+     * <p>返回裸数组 {@code [{id,seq,relPath,missing,bytes,w,h,thumbUrl,previewUrl,thumbVersion,
+     * contentHash,lastSeen}]}，缺失行排在最后（{@code order by missing asc, seq asc}）。</p>
+     *
+     * <p><b>thumbUrl / previewUrl 是内容寻址的</b>：有 {@code content_hash} 就给
+     * {@code /api/media/thumb/p/<hash>}（预览图 {@code /api/media/preview/p/<hash>}），
+     * 老库还没回填哈希才回退 {@code /api/media/thumb/p/<albumId>/<%04d seq>}。前者响应头是
+     * {@code Cache-Control: public, max-age=31536000, immutable}，后者是
+     * {@code no-cache, must-revalidate}——序号 URL 重建后内容会变而 URL 不变，不能再让浏览器
+     * 按 URL 缓存（「预览弹窗显示上一格的脸」就是 7 天强缓存导致的）。</p>
      * 与旧的 {@code GET /photos} 的区别：那个是分页的库内列表（且没有 missing/contentHash），
      * 这个一次给全册，由前端自己切片；两者都<b>不</b>读磁盘。</p>
      */

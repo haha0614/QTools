@@ -578,6 +578,42 @@ public class MediaFileServiceImpl implements IMediaFileService
         return requireFile(root.resolve(albumId), name + JPG_SUFFIX);
     }
 
+    @Override
+    public Path resolveThumbPhotoByHash(String hash, boolean preview)
+    {
+        if (hash == null || !SAFE_CONTENT_HASH.matcher(hash).matches())
+        {
+            throw MediaException.forbidden();
+        }
+        Path root = thumbsDir().resolve(preview ? PREVIEW_PHOTO_DIR : THUMB_PHOTO_DIR);
+        Path hit = existingFile(root, hash.toLowerCase() + JPG_SUFFIX);
+        if (hit == null)
+        {
+            // 序号回退在这个入口是错的（没有 albumId 可退），产物缺失就是 404
+            throw MediaException.notFound();
+        }
+        return hit;
+    }
+
+    @Override
+    public boolean hasPhotoArtifact(String contentHash, boolean preview)
+    {
+        if (contentHash == null || !SAFE_CONTENT_HASH.matcher(contentHash).matches())
+        {
+            return false;
+        }
+        try
+        {
+            Path root = thumbsDir().resolve(preview ? PREVIEW_PHOTO_DIR : THUMB_PHOTO_DIR);
+            return existingFile(root, contentHash.toLowerCase() + JPG_SUFFIX) != null;
+        }
+        catch (RuntimeException e)
+        {
+            // 缩略图根没配好 / 读盘异常按「没有产物」处理：退回老命名 URL，别给前端死链
+            return false;
+        }
+    }
+
     /**
      * 图片内容哈希（已校验）
      *

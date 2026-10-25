@@ -11,6 +11,7 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.regex.Pattern;
 import jakarta.servlet.ServletOutputStream;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -56,8 +57,24 @@ public class MediaFileController
     /** 文件流缓存（与 Node 版 /media 一致） */
     private static final String FILE_CACHE = "public, max-age=86400";
 
-    /** 缩略图缓存一周 */
-    private static final String THUMB_CACHE = "public, max-age=604800";
+    /**
+     * 内容寻址档：URL 里的定位符就是内容哈希，同一 URL 的内容永远不会变 → 可以永久缓存
+     *
+     * <p>{@code immutable} 让浏览器连刷新都不回源，这是内容寻址该有的性能。</p>
+     */
+    private static final String IMMUTABLE_CACHE = "public, max-age=31536000, immutable";
+
+    /**
+     * 非内容寻址档（册内序号 / 视频 id / 老命名）：同一个 URL 可能先后指向不同内容
+     *
+     * <p>这正是「缩略图 7 天缓存导致页面显示旧图」的根因：早先一律 {@code max-age=604800}，
+     * 序号 URL 重建缩略图后内容变了而 URL 没变，浏览器继续拿旧图。这里改成每次都回源校验，
+     * 再配合 ETag / Last-Modified 让校验以 304 收场，不必重下整张图。</p>
+     */
+    private static final String REVALIDATE_CACHE = "no-cache, must-revalidate";
+
+    /** 内容哈希：build-thumbs.js 的落盘名，也是内容寻址 URL 里的定位符 */
+    private static final Pattern CONTENT_HASH = Pattern.compile("^[0-9a-f]{16}$");
 
     /** 需要向跨域脚本暴露的响应头（Range 相关） */
     private static final String EXPOSE_HEADERS = "Accept-Ranges, Content-Range, Content-Length, ETag";
@@ -93,14 +110,15 @@ public class MediaFileController
     {
         long begin = System.currentTimeMillis();
         Path path = mediaFileService.resolveMedia(p, r);
-        streamFile(path, request, response, "p=" + p, begin);
+        streamFile(path, request, response, "p=" + p, begin, FILE_CACHE);
     }
 
     /** 视频精灵图 thumbs/s/<content_hash>.jpg（回退 thumbs/s/<id>.jpg；无 hash 或文件不存在 → 404） */
     @GetMapping("/sprite/{id}")
-    public ResponseEntity<Resource> sprite(@PathVariable("id") String id)
+    public ResponseEntity<Resource> sprite(@PathVariable("id") String id, HttpServletRequest request)
     {
-        return imageResponse(mediaFileService.resolveSprite(id));
+        Path path = mediaFileService.resolveSprite(id);
+        return imageResponse(path, isContentHash(path.getFileName().toString()), request);
     }
 
     /**
@@ -115,16 +133,20 @@ public class MediaFileController
     {
         long begin = System.currentTimeMillis();
         Path path = mediaFileService.resolvePreviewClip(id);
-        streamFile(path, request, response, "preview=" + id, begin);
+        // pv2 产物同样是内容寻址：命中 <hash>.mp4/.webm 就永久缓存，回退 <id>.* 就得回源校验
+        boolean contentAddressed = isContentHash(path.getFileName().toString());
+        streamFile(path, request, response, "preview=" + id, begin,
+                contentAddressed ? IMMUTABLE_CACHE : REVALIDATE_CACHE);
     }
 
     /**
      * 字节级 Range 落盘（/file 与 /preview 共用）
      *
-     * @param label 日志用的资源标识
+     * @param label        日志用的资源标识
+     * @param cacheControl 按「地址是否内容寻址」分级后的 Cache-Control 值
      */
     private void streamFile(Path path, HttpServletRequest request, HttpServletResponse response, String label,
-            long begin) throws IOException
+            long begin, String cacheControl) throws IOException
     {
         long size = Files.size(path);
         long mtime = Files.getLastModifiedTime(path).toMillis();
@@ -134,7 +156,7 @@ public class MediaFileController
         response.setHeader("Accept-Ranges", "bytes");
         response.setHeader("ETag", etag);
         response.setHeader("Last-Modified", httpDate(mtime));
-        response.setHeader("Cache-Control", FILE_CACHE);
+        response.setHeader("Cache-Control", cacheControl);
         response.setHeader("X-Content-Type-Options", "nosniff");
         // 跨域场景下浏览器要读到这些头才能用 Range/断点续传
         response.setHeader("Access-Control-Expose-Headers", EXPOSE_HEADERS);
@@ -207,25 +229,48 @@ public class MediaFileController
         }
     }
 
-    /** 视频缩略图 thumbs/v/{id}.jpg */
+    /** 视频缩略图 thumbs/v/<content_hash>.jpg（回退 thumbs/v/<id>.jpg） */
     @GetMapping("/thumb/v/{id}")
-    public ResponseEntity<Resource> thumbVideo(@PathVariable("id") String id)
+    public ResponseEntity<Resource> thumbVideo(@PathVariable("id") String id, HttpServletRequest request)
     {
-        return imageResponse(mediaFileService.resolveThumbVideo(id));
+        Path path = mediaFileService.resolveThumbVideo(id);
+        // 定位符是视频 id 而不是哈希，但命中的文件名可能是内容寻址的 <hash>.jpg —— 以实际文件为准
+        return imageResponse(path, isContentHash(path.getFileName().toString()), request);
     }
 
-    /** 相册缩略图 thumbs/p/{albumId}/{i}.jpg */
+    /** 相册缩略图（内容寻址）thumbs/p/<content_hash>.jpg */
+    @GetMapping("/thumb/p/{i}")
+    public ResponseEntity<Resource> thumbPhotoByHash(@PathVariable("i") String i, HttpServletRequest request)
+    {
+        Path path = mediaFileService.resolveThumbPhotoByHash(i, false);
+        return imageResponse(path, isContentHash(i), request);
+    }
+
+    /** 相册预览图（内容寻址）thumbs/pv/<content_hash>.jpg */
+    @GetMapping("/preview/p/{i}")
+    public ResponseEntity<Resource> previewPhotoByHash(@PathVariable("i") String i, HttpServletRequest request)
+    {
+        Path path = mediaFileService.resolveThumbPhotoByHash(i, true);
+        return imageResponse(path, isContentHash(i), request);
+    }
+
+    /** 相册缩略图 thumbs/p/{albumId}/{i}.jpg（i = 册内序号或内容哈希，老 URL 兼容） */
     @GetMapping("/thumb/p/{albumId}/{i}")
-    public ResponseEntity<Resource> thumbPhoto(@PathVariable("albumId") String albumId, @PathVariable("i") String i)
+    public ResponseEntity<Resource> thumbPhoto(@PathVariable("albumId") String albumId, @PathVariable("i") String i,
+            HttpServletRequest request)
     {
-        return imageResponse(mediaFileService.resolveThumbPhoto(albumId, i, false));
+        Path path = mediaFileService.resolveThumbPhoto(albumId, i, false);
+        // 序号 URL 可能先指向 A 图、重建后指向 B 图，判定只看定位符本身，不看落盘命中的文件名
+        return imageResponse(path, isContentHash(i), request);
     }
 
-    /** 相册预览图 thumbs/pv/{albumId}/{i}.jpg */
+    /** 相册预览图 thumbs/pv/{albumId}/{i}.jpg（i = 册内序号或内容哈希，老 URL 兼容） */
     @GetMapping("/preview/p/{albumId}/{i}")
-    public ResponseEntity<Resource> previewPhoto(@PathVariable("albumId") String albumId, @PathVariable("i") String i)
+    public ResponseEntity<Resource> previewPhoto(@PathVariable("albumId") String albumId, @PathVariable("i") String i,
+            HttpServletRequest request)
     {
-        return imageResponse(mediaFileService.resolveThumbPhoto(albumId, i, true));
+        Path path = mediaFileService.resolveThumbPhoto(albumId, i, true);
+        return imageResponse(path, isContentHash(i), request);
     }
 
     // ------------------------------------------------------------------ Range
@@ -352,13 +397,103 @@ public class MediaFileController
 
     // ------------------------------------------------------------------ 工具
 
-    private ResponseEntity<Resource> imageResponse(Path path)
+    /**
+     * 图片响应：Cache-Control 按「地址是否内容寻址」分两级
+     *
+     * <p>内容寻址（定位符就是 16 位内容哈希）→ {@link #IMMUTABLE_CACHE}，永久缓存；
+     * 其余（册内序号 / 视频 id / 老命名回退）→ {@link #REVALIDATE_CACHE}，每次回源校验，
+     * 命中 ETag 或 Last-Modified 时回 304，不重下整张图。</p>
+     *
+     * <p>注意判定依据是<b>URL 里的定位符</b>，不是落盘命中的文件名：序号 URL 重建后可能
+     * 命中 {@code p/<hash>.jpg}，但那个 URL 本身仍不是内容寻址的，必须继续回源校验——
+     * 否则又回到「URL 不变内容变、浏览器用旧图」的老坑。</p>
+     */
+    private ResponseEntity<Resource> imageResponse(Path path, boolean contentAddressed, HttpServletRequest request)
     {
-        return ResponseEntity.ok()
+        ResponseEntity.BodyBuilder builder = ResponseEntity.ok()
                 .contentType(MediaType.IMAGE_JPEG)
-                .header(HttpHeaders.CACHE_CONTROL, THUMB_CACHE)
-                .header("X-Content-Type-Options", "nosniff")
-                .body(new FileSystemResource(path));
+                .header(HttpHeaders.CACHE_CONTROL, contentAddressed ? IMMUTABLE_CACHE : REVALIDATE_CACHE)
+                .header("X-Content-Type-Options", "nosniff");
+        if (contentAddressed)
+        {
+            // 永久缓存档不需要校验器：浏览器不会再回来问
+            return builder.body(new FileSystemResource(path));
+        }
+        String etag;
+        long mtime;
+        try
+        {
+            mtime = Files.getLastModifiedTime(path).toMillis();
+            etag = '"' + Long.toHexString(Files.size(path)) + '-' + Long.toHexString(mtime) + '"';
+        }
+        catch (IOException e)
+        {
+            log.debug("缩略图校验器生成失败 {}: {}", path, e.getMessage());
+            return builder.body(new FileSystemResource(path));
+        }
+        builder.header(HttpHeaders.ETAG, etag).header(HttpHeaders.LAST_MODIFIED, httpDate(mtime));
+        if (notModified(request, etag, mtime))
+        {
+            return ResponseEntity.<Resource>status(HttpServletResponse.SC_NOT_MODIFIED)
+                    .header(HttpHeaders.CACHE_CONTROL, REVALIDATE_CACHE)
+                    .header(HttpHeaders.ETAG, etag)
+                    .build();
+        }
+        return builder.body(new FileSystemResource(path));
+    }
+
+    /**
+     * 定位符是否内容哈希：截掉扩展名后匹配 {@code ^[0-9a-f]{16}$}
+     *
+     * <p>16 位小写 hex 是 build-thumbs.js 的落盘名约定；视频 id 是
+     * {@code sha1(rel_path)[:12]}（12 位）、相册 id 是 {@code a006}，都不会误判。</p>
+     */
+    private static boolean isContentHash(String name)
+    {
+        if (name == null)
+        {
+            return false;
+        }
+        int dot = name.indexOf('.');
+        String stem = dot >= 0 ? name.substring(0, dot) : name;
+        return CONTENT_HASH.matcher(stem).matches();
+    }
+
+    /** If-None-Match / If-Modified-Since：命中返回 true（调用方回 304） */
+    private static boolean notModified(HttpServletRequest request, String etag, long mtime)
+    {
+        String ifNoneMatch = request.getHeader(HttpHeaders.IF_NONE_MATCH);
+        if (ifNoneMatch != null)
+        {
+            for (String candidate : ifNoneMatch.split(","))
+            {
+                String value = candidate.trim();
+                if (value.startsWith("W/"))
+                {
+                    value = value.substring(2);
+                }
+                if (etag.equals(value))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        String ifModifiedSince = request.getHeader(HttpHeaders.IF_MODIFIED_SINCE);
+        if (ifModifiedSince == null)
+        {
+            return false;
+        }
+        try
+        {
+            long since = ZonedDateTime.parse(ifModifiedSince.trim(), DateTimeFormatter.RFC_1123_DATE_TIME)
+                    .toInstant().toEpochMilli();
+            return Math.floorDiv(since, 1000L) >= Math.floorDiv(mtime, 1000L);
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
     }
 
     private static boolean isHead(HttpServletRequest request)
