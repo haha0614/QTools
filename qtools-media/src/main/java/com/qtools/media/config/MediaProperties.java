@@ -55,6 +55,12 @@ import org.springframework.stereotype.Component;
  *   <tr><td>exportTimeoutMinutes</td><td>60</td><td>-</td><td>QTOOLS_MEDIA_EXPORTTIMEOUTMINUTES</td></tr>
  *   <tr><td>maintainTimeoutMinutes</td><td>120</td><td>-</td><td>QTOOLS_MEDIA_MAINTAINTIMEOUTMINUTES</td></tr>
  *   <tr><td>allowOrigins</td><td>*</td><td>-</td><td>QTOOLS_MEDIA_ALLOWORIGINS</td></tr>
+ *   <tr><td>watch.enabled</td><td>false</td><td>文件监听不启动，「自动扫描」整体关闭</td>
+ *       <td>QTOOLS_MEDIA_WATCH_ENABLED</td></tr>
+ *   <tr><td>watch.debounceSeconds</td><td>5</td><td>按 5 计；小于 1 按 1 计</td>
+ *       <td>QTOOLS_MEDIA_WATCH_DEBOUNCESECONDS</td></tr>
+ *   <tr><td>watch.quietMinutes</td><td>空</td><td>空 = 不静默（全天按需自动扫）</td>
+ *       <td>QTOOLS_MEDIA_WATCH_QUIETMINUTES</td></tr>
  * </table>
  *
  * <p>环境变量名由 Spring Boot 宽松绑定推导：键名的 {@code .} 与 {@code -} 换成 {@code _} 并全大写
@@ -206,6 +212,14 @@ public class MediaProperties
      */
     private String allowOrigins = "*";
 
+    /**
+     * 文件监听（自动增量扫描）配置：{@code qtools.media.watch.*}
+     *
+     * <p>默认整块关闭：监听器由 {@code @ConditionalOnProperty(qtools.media.watch.enabled=true)} 决定是否注册，
+     * 关闭时 {@code /api/media/admin/watch} 仍可读，只是回 {@code enabled=false}。</p>
+     */
+    private Watch watch = new Watch();
+
     public String getRootPath()
     {
         return rootPath;
@@ -264,6 +278,73 @@ public class MediaProperties
     public void setAllowOrigins(String allowOrigins)
     {
         this.allowOrigins = allowOrigins;
+    }
+
+    // ------------------------------------------------------------------ 文件监听（自动扫描，P2-A）
+
+    public Watch getWatch()
+    {
+        return watch;
+    }
+
+    public void setWatch(Watch watch)
+    {
+        this.watch = watch;
+    }
+
+    /**
+     * 文件监听三件套（{@code qtools.media.watch.*}）
+     *
+     * <p>只描述「听不听、合多久、夜间静不静」，扫描本身仍走既有的 {@code mode=scan} 任务：
+     * 并发保护、日志尾部、超时强杀都由 {@code MediaScanServiceImpl} 负责，本配置不会绕过它。</p>
+     */
+    public static class Watch
+    {
+        /** 是否注册文件监听（false = 不注册任何 WatchService，自动扫描不存在） */
+        private boolean enabled = false;
+
+        /** 去抖窗口（秒）：窗口内的所有事件合并成一次扫描；事件不断则计时不断后移 */
+        private int debounceSeconds = 5;
+
+        /**
+         * 夜间静默区间，默认空 = 不静默
+         *
+         * <p>接受两种写法：{@code HH:mm-HH:mm}（如 {@code 23:00-07:00}）或当日分钟数
+         * {@code 起始-结束}（如 {@code 1380-420}）。跨零点即「起始 &gt; 结束」。
+         * 静默期内照常收事件，只是把合并后的扫描推迟到区间结束。</p>
+         */
+        private String quietMinutes = "";
+
+        public boolean isEnabled()
+        {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled)
+        {
+            this.enabled = enabled;
+        }
+
+        /** 去抖秒数：&lt; 1 一律按 1 返回，避免配置成 0 时退化成每条事件一次扫描 */
+        public int getDebounceSeconds()
+        {
+            return debounceSeconds < 1 ? 1 : debounceSeconds;
+        }
+
+        public void setDebounceSeconds(int debounceSeconds)
+        {
+            this.debounceSeconds = debounceSeconds;
+        }
+
+        public String getQuietMinutes()
+        {
+            return quietMinutes;
+        }
+
+        public void setQuietMinutes(String quietMinutes)
+        {
+            this.quietMinutes = quietMinutes;
+        }
     }
 
     public String getTrashPath()

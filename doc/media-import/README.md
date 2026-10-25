@@ -358,6 +358,43 @@ qtools:
 
 ---
 
+### 8. 自动扫描（文件监听）与保存筛选
+
+两个 P2 功能，都不改上面的导入命令；细节（全部字段与边界）见 `../自定义与迁移指南.md` 的 4.13 / 4.14。
+
+**自动扫描（文件监听）**——默认关闭，打开后磁盘有变化会自动跑一次 `mode=scan`（等价「重建索引」按钮）：
+
+```yaml
+qtools:
+  media:
+    watch:
+      enabled: true                 # 默认 false
+      debounceSeconds: 5            # 去抖：窗口内 N 个事件合并成 1 次扫描
+      quietMinutes: '23:00-07:00'   # 夜间静默（可空）
+```
+
+- 监听 `media_root` 里所有 `kind='root'` 且存在的根，递归包含子目录（新建目录会即时注册）；
+  忽略 `*.tmp` / `*.part` / `*.crdownload` / `~$*` 与 `_媒体站`。
+- 同一时刻只跑 1 个任务：正在扫就只置 `pending`，扫完**补跑 1 次**。自动扫描的 job 日志首行是
+  `AUTO 触发：<路径> 变化 N 个事件`，手工触发没有这一行。
+- 管理端：`GET /api/media/admin/watch`（状态）、`POST /api/media/admin/watch/pause|resume`（运行期开关，不写配置）、
+  `POST /api/media/admin/watch/scan-now`（立即扫一次，监听没开也能用）。
+- 它只做 `scan`（建索引），不会顺带生成缩略图 / 元数据：仍按本文第 2 节的顺序补 `thumb` / `enrich`。
+
+**保存筛选**——站端把筛选组合存成命名条目：
+
+```bash
+mysql -uroot --default-character-set=utf8mb4 -P3307 qtools -e "source doc/media_saved_filter.sql"
+```
+
+| 接口 | 权限 | 说明 |
+| :--- | :--- | :--- |
+| `GET /api/media/filters` | 匿名 | `[{id,name,params}]`：自己的 + 全局的 |
+| `POST /api/media/filters` `{name,params}` | 匿名 + 编辑策略 | 新建或同名同 owner 覆盖；`name` 1-64、`params` 合法 JSON 且小于 4KB，否则 400 |
+| `DELETE /api/media/filters/{id}` | 匿名 + 编辑策略 | 只删自己名下的（否则 404） |
+| `GET` / `DELETE /api/media/admin/filters[/{id}]` | `media:admin:list` / `edit` | 全量清单 / 清理任一条 |
+
+---
 ## 历史迁移：旧 Node 站 `index.json` → MySQL（`import.js`，保留）
 
 > 下面这节是原作者把旧 Node 站导出的 `index.json` 迁到 MySQL 的说明，脚本是 `import.js` /

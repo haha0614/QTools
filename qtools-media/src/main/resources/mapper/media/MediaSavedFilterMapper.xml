@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    保存的筛选条件（P2-A）映射文件。
+
+    params 是 TEXT，存前端给的原始筛选 JSON（服务层已校验合法性与 4KB 上限）；
+    本层不解包它，读出来原样交给 Jackson 反序列化。
+
+    唯一键 (name, owner_key)：owner_key 为 NULL 的全局条目在 MySQL 里不参与唯一判重，
+    因此「同名同 owner 覆盖」由服务层先查后改保证，SQL 侧不再用 ON DUPLICATE KEY。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaSavedFilterMapper">
+
+    <resultMap type="com.qtools.media.domain.MediaSavedFilter" id="MediaSavedFilterResult">
+        <id     property="id"         column="id"          />
+        <result property="name"       column="name"        />
+        <result property="params"     column="params"      />
+        <result property="ownerKey"   column="owner_key"   />
+        <result property="createTime" column="create_time" />
+        <result property="updateTime" column="update_time" />
+    </resultMap>
+
+    <sql id="selectFilterColumns">
+        select id, name, params, owner_key, create_time, update_time
+        from media_saved_filter
+    </sql>
+
+    <select id="selectVisibleList" resultMap="MediaSavedFilterResult">
+        <include refid="selectFilterColumns"/>
+        where owner_key is null
+        <if test="ownerKey != null">or owner_key = #{ownerKey}</if>
+        order by update_time desc, id desc
+    </select>
+
+    <select id="selectAll" resultMap="MediaSavedFilterResult">
+        <include refid="selectFilterColumns"/>
+        order by owner_key is not null, owner_key asc, name asc
+    </select>
+
+    <select id="selectById" resultMap="MediaSavedFilterResult">
+        <include refid="selectFilterColumns"/>
+        where id = #{id}
+    </select>
+
+    <select id="selectByNameAndOwner" resultMap="MediaSavedFilterResult">
+        <include refid="selectFilterColumns"/>
+        where name = #{name}
+        <choose>
+            <when test="ownerKey != null">and owner_key = #{ownerKey}</when>
+            <otherwise>and owner_key is null</otherwise>
+        </choose>
+        limit 1
+    </select>
+
+    <insert id="insert" parameterType="com.qtools.media.domain.MediaSavedFilter"
+            useGeneratedKeys="true" keyProperty="id">
+        insert into media_saved_filter (name, params, owner_key, create_time, update_time)
+        values (#{name}, #{params}, #{ownerKey}, current_timestamp, current_timestamp)
+    </insert>
+
+    <update id="updateParamsById">
+        update media_saved_filter
+        set params = #{params}, update_time = current_timestamp
+        where id = #{id}
+    </update>
+
+    <delete id="deleteByIdAndOwner">
+        delete from media_saved_filter
+        where id = #{id}
+        <choose>
+            <when test="ownerKey != null">and owner_key = #{ownerKey}</when>
+            <otherwise>and owner_key is null</otherwise>
+        </choose>
+    </delete>
+
+    <delete id="deleteById">
+        delete from media_saved_filter where id = #{id}
+    </delete>
+
+</mapper>

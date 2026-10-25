@@ -37,6 +37,17 @@ public class MediaScanRequest
     /** mode=export 专用：后端生成的产物目录（{@code <exportPath>/<yyyyMMdd-HHmmss>}），不接受前端传值 */
     private String exportDir;
 
+    /**
+     * 触发来源，只由服务端内部写入（文件监听写 {@code AUTO}，管理端手工触发留 null）
+     *
+     * <p>不来自任何前端 body：控制器从不解析它，否则「自动 / 手动」的来源标识就成了客户端可伪造的字段。
+     * 非空时 {@code MediaScanServiceImpl.runJob} 在 job 日志首行写 {@code <origin> 触发：<triggerNote>}。</p>
+     */
+    private String origin;
+
+    /** 来源说明（写进日志首行），如 {@code E:/111/视频 变化 3 个事件} */
+    private String triggerNote;
+
     public MediaScanRequest()
     {
     }
@@ -58,6 +69,8 @@ public class MediaScanRequest
         copy.noFresh = noFresh;
         copy.force = force;
         copy.exportDir = exportDir;
+        copy.origin = origin;
+        copy.triggerNote = triggerNote;
         return copy;
     }
 
@@ -149,5 +162,25 @@ public class MediaScanRequest
     public void setExportDir(String exportDir)
     {
         this.exportDir = exportDir;
+    }
+
+    public String getOrigin()
+    {
+        return origin;
+    }
+
+    public void setOrigin(String origin)
+    {
+        this.origin = origin;
+    }
+
+    public String getTriggerNote()
+    {
+        return triggerNote;
+    }
+
+    public void setTriggerNote(String triggerNote)
+    {
+        this.triggerNote = triggerNote;
     }
 }

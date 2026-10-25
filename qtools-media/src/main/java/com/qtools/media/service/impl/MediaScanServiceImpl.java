@@ -25,12 +25,14 @@ import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import com.qtools.common.utils.DateUtils;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.config.MediaProperties;
 import com.qtools.media.domain.MediaScanJob;
 import com.qtools.media.domain.dto.MediaScanRequest;
+import com.qtools.media.event.MediaScanFinishedEvent;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaScanJobMapper;
 import com.qtools.media.service.IMediaIndexService;
@@ -160,6 +162,10 @@ public class MediaScanServiceImpl implements IMediaScanService
 
     @Autowired
     private IMediaIndexService mediaIndexService;
+
+    /** 任务结束事件：文件监听（默认不注册）靠它补跑攒下的 pending，扫描服务不反向依赖监听器 */
+    @Autowired
+    private ApplicationEventPublisher eventPublisher;
 
     /** 同一时刻只有一个扫描线程，天然串行 */
     private final ExecutorService executor = Executors.newSingleThreadExecutor(runnable -> {
@@ -409,6 +415,12 @@ public class MediaScanServiceImpl implements IMediaScanService
         String scriptKind = scriptKindOf(jobType);
         long begin = System.currentTimeMillis();
         Deque<String> tail = new ArrayDeque<>();
+        // 来源行必须是日志首行：手工触发没有这一行，自动扫描一眼可辨（AUTO 触发：<路径> 变化 N 个事件）
+        if (req != null && StringUtils.isNotEmpty(req.getOrigin()))
+        {
+            appendLine(tail, req.getOrigin() + " 触发："
+                    + (req.getTriggerNote() == null ? "" : req.getTriggerNote()));
+        }
         // counters[0]=total, counters[1]=done（full 取脚本回读条数；thumb / enrich 取 START/PROGRESS/收尾行）
         int[] counters = new int[2];
         int exit = -1;
@@ -496,6 +508,15 @@ public class MediaScanServiceImpl implements IMediaScanService
         runningJobId.set(0L);
         // 扫描改动了 media_* 或缩略图，索引快照必须失效，否则用户端 60s 内看不到新数据
         mediaIndexService.invalidateSnapshot();
+        // 必须在 runningJobId 归零之后发：监听器收到事件后立刻补跑 pending，早发会撞上自己那条 running 行
+        try
+        {
+            eventPublisher.publishEvent(new MediaScanFinishedEvent(jobId, jobType, status));
+        }
+        catch (Exception e)
+        {
+            log.warn("扫描结束事件发布失败 job={}", jobId, e);
+        }
         log.info("扫描结束 job={} mode={} status={} total={} done={} cost={}ms", jobId,
                 jobType, status, counters[0], counters[1], cost);
     }
