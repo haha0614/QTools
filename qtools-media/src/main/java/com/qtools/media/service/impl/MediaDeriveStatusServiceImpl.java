@@ -50,10 +50,10 @@ public class MediaDeriveStatusServiceImpl implements IMediaDeriveStatusService
     /** 每页默认条数 / 上限（上限按「一页最多 200 条，和扫描任务的 videoIds 上限对齐」） */
     private static final int DEFAULT_SIZE = 50;
 
-    private static final int MAX_SIZE = 200;
+    private static final int MAX_SIZE = 1000;
 
     /** ids 参数上限：与 MediaScanServiceImpl 的 videoIds 上限一致 */
-    private static final int MAX_IDS = 200;
+    private static final int MAX_IDS = 1000;
 
     /** 调用方不传 size 时按默认值 */
     private static final String KIND_ALL = "all";
@@ -74,50 +74,35 @@ public class MediaDeriveStatusServiceImpl implements IMediaDeriveStatusService
     private MediaProperties mediaProperties;
 
     @Override
-    public Map<String, Object> deriveStatus(String ids, String q, String kind, int page, int size)
+    public Map<String, Object> deriveStatus(String ids, String q, String kind, String state, int page, int size)
     {
         List<String> videoIds = parseIds(ids);
         String keyword = trimToNull(q);
         String mode = normalizeKind(kind);
+        String st = normalizeState(state);
         int safePage = Math.max(1, page);
         int safeSize = size <= 0 ? DEFAULT_SIZE : Math.min(MAX_SIZE, size);
         File thumbs = thumbsDir();
         MediaDeriveIndex index = MediaDeriveIndex.scan(thumbs);
-        // 算法版本标记（thumbs/.derive-algo.json，缺失退内置默认）：产物 mtime 早于 since 即旧算法产物
         MediaDeriveAlgoMarker marker = MediaDeriveAlgoMarker.load(thumbs);
         Map<Integer, String> roots = rootPaths();
-
-        List<Map<String, Object>> rows;
-        long total;
-        if (KIND_ALL.equals(mode))
+        // 派生文件不在库里：服务端筛选只能把候选集全取回来，算状态 → 计数 → 过滤 → 再分页
+        List<MediaVideo> videos = mediaAdminMapper.selectDeriveVideos(videoIds, keyword);
+        List<Map<String, Object>> matched = new ArrayList<>(videos.size());
+        Map<String, Object> counts = MediaDeriveStatusSupport.newCounts();
+        for (MediaVideo video : videos)
         {
-            PageHelper.startPage(safePage, safeSize);
-            List<MediaVideo> videos = mediaAdminMapper.selectDeriveVideos(videoIds, keyword);
-            total = new PageInfo<>(videos).getTotal();
-            rows = new ArrayList<>(videos.size());
-            for (MediaVideo video : videos)
+            Map<String, Object> row = viewRow(video, index, roots, marker);
+            MediaDeriveStatusSupport.addRowCounts(counts, row);
+            if (MediaDeriveStatusSupport.matchState(row, mode, st))
             {
-                rows.add(viewRow(video, index, roots, marker));
+                matched.add(row);
             }
         }
-        else
-        {
-            // 派生文件不在库里：非要按档过滤就只能把这一批行全取回来再内存过滤
-            List<MediaVideo> videos = mediaAdminMapper.selectDeriveVideos(videoIds, keyword);
-            List<Map<String, Object>> matched = new ArrayList<>();
-            for (MediaVideo video : videos)
-            {
-                Map<String, Object> row = viewRow(video, index, roots, marker);
-                if (MediaDeriveStatusSupport.needsWork(row, mode))
-                {
-                    matched.add(row);
-                }
-            }
-            total = matched.size();
-            int from = Math.min(matched.size(), (safePage - 1) * safeSize);
-            int to = Math.min(matched.size(), from + safeSize);
-            rows = new ArrayList<>(matched.subList(from, to));
-        }
+        long total = matched.size();
+        int from = Math.min(matched.size(), (safePage - 1) * safeSize);
+        int to = Math.min(matched.size(), from + safeSize);
+        List<Map<String, Object>> rows = new ArrayList<>(matched.subList(from, to));
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("rows", rows);
@@ -125,7 +110,8 @@ public class MediaDeriveStatusServiceImpl implements IMediaDeriveStatusService
         out.put("page", safePage);
         out.put("size", safeSize);
         out.put("kind", mode);
-        // 新旧算法的判据本身也回给前端：前端能把 oldAlgo 解释成「这条片子的片段要重生成」
+        out.put("state", st);
+        out.put("counts", counts);
         out.put("algoSince", marker.getSinceText());
         out.put("algoSinceSource", marker.getSource());
         return out;
@@ -208,7 +194,7 @@ public class MediaDeriveStatusServiceImpl implements IMediaDeriveStatusService
     }
 
     /**
-     * ids 参数：逗号分隔（也接受重复传参拼成的逗号串），≤200 个
+     * ids 参数：逗号分隔（也接受重复传参拼成的逗号串），≤1000 个
      *
      * @return 空表 = 不按 id 过滤
      */
@@ -268,5 +254,20 @@ public class MediaDeriveStatusServiceImpl implements IMediaDeriveStatusService
         }
         String text = value.trim();
         return text.isEmpty() ? null : text;
+    }
+
+    /** state 参数归一：all|ok|oldAlgo|stale|missing，非法值 400 */
+    private static String normalizeState(String state)
+    {
+        if (StringUtils.isEmpty(state))
+        {
+            return MediaDeriveStatusSupport.STATE_ALL;
+        }
+        String v = state.trim();
+        if (MediaDeriveStatusSupport.STATES.contains(v))
+        {
+            return v;
+        }
+        throw new MediaException(400, "state 不支持：" + state + "（可用 all / ok / oldAlgo / stale / missing）");
     }
 }

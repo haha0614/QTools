@@ -144,10 +144,11 @@ public class MediaAdminController extends BaseController
             @RequestParam(value = "vcodec", required = false) String vcodec,
             @RequestParam(value = "hidden", required = false) String hidden,
             @RequestParam(value = "sort", required = false) String sort,
-            @RequestParam(value = "tagId", required = false) Long tagId)
+            @RequestParam(value = "tagId", required = false) Long tagId,
+            @RequestParam(value = "ids", required = false) String ids)
     {
         startPage();
-        return mediaAdminService.selectVideoPage(keyword, folder, person, vcodec, hidden, sort, tagId);
+        return mediaAdminService.selectVideoPage(keyword, folder, person, vcodec, hidden, sort, tagId, ids);
     }
 
     /** 相册分页列表 */
@@ -273,9 +274,10 @@ public class MediaAdminController extends BaseController
             @RequestParam(value = "size", required = false, defaultValue = "50") int size,
             @RequestParam(value = "ids", required = false) String ids,
             @RequestParam(value = "q", required = false) String q,
-            @RequestParam(value = "kind", required = false) String kind)
+            @RequestParam(value = "kind", required = false) String kind,
+            @RequestParam(value = "state", required = false) String state)
     {
-        return mediaDeriveStatusService.deriveStatus(ids, q, kind, page, size);
+        return mediaDeriveStatusService.deriveStatus(ids, q, kind, state, page, size);
     }
 
     /**

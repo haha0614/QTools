@@ -23,7 +23,7 @@ public interface IMediaAdminService
      *              （选中父标签必须能命中挂在子标签下的视频）；null = 不按标签过滤
      */
     TableDataInfo selectVideoPage(String keyword, String folder, String person, String vcodec, String hidden,
-            String sort, Long tagId);
+            String sort, Long tagId, String ids);
 
     /** 相册分页 */
     TableDataInfo selectAlbumPage(String keyword, Long personId, String hidden, String sort);

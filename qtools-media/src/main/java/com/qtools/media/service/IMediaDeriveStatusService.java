@@ -16,9 +16,10 @@ public interface IMediaDeriveStatusService
      *
      * @param ids  逗号分隔的 videoId（空 = 不按 id 筛）；≤200 个，形状不对 400
      * @param q    标题 / 相对路径模糊匹配（空 = 不过滤）
-     * @param kind all（默认）| thumb | sprite | preview：后三者只回「该档缺失或过期」的行
+     * @param kind  all（默认）| thumb | sprite | preview：后三者只回「该档需要补」的行（缺失/旧算法/过期）
+     * @param state all（默认）| ok | oldAlgo | stale | missing：服务端全局筛选，分页在过滤之后
      * @param page 页码（从 1 开始）
-     * @param size 每页条数（默认 50，最大 200）
+     * @param size 每页条数（默认 50，最大 1000）
      * @return {rows:[{videoId,title,dur,thumb:{exists,stale,status,mtime,...},
      *         sprite:{...},preview:{exists,stale,status,frames,mtime,...},bytes}],
      *         total, page, size, kind, algoSince, algoSinceSource}
@@ -28,5 +29,5 @@ public interface IMediaDeriveStatusService
      *         说明判据取自标记文件 {@code <thumbs>/.derive-algo.json} 还是内置默认。</p>
      * @throws com.qtools.media.exception.MediaException 400 参数非法
      */
-    Map<String, Object> deriveStatus(String ids, String q, String kind, int page, int size);
+    Map<String, Object> deriveStatus(String ids, String q, String kind, String state, int page, int size);
 }

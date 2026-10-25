@@ -6,6 +6,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -42,6 +43,29 @@ public final class MediaDeriveStatusSupport
     public static final String STATUS_OLD_ALGO = "oldAlgo";
 
     public static final String STATUS_OK = "ok";
+
+    /** 四档「行状态」：三态 + 过期（接口 state 参数与 counts 的 key，四档互斥） */
+    public static final String STATE_ALL = "all";
+
+    public static final String STATE_OK = STATUS_OK;
+
+    public static final String STATE_OLD_ALGO = STATUS_OLD_ALGO;
+
+    public static final String STATE_STALE = "stale";
+
+    public static final String STATE_MISSING = STATUS_MISSING;
+
+    public static final List<String> STATES = List.of(STATE_ALL, STATE_OK, STATE_OLD_ALGO, STATE_STALE, STATE_MISSING);
+
+    /** kind=all：三档产物一起看（任一档命中即算命中） */
+    public static final String KIND_ALL = "all";
+
+    /** 三个产物档位（kind 的取值，不含 all）；counts 也按这个顺序出 */
+    public static final List<String> KIND_KEYS = List.of(MediaDeriveIndex.KIND_THUMB,
+            MediaDeriveIndex.KIND_SPRITE, MediaDeriveIndex.KIND_PREVIEW);
+
+    public static final List<String> KINDS = List.of(KIND_ALL, MediaDeriveIndex.KIND_THUMB,
+            MediaDeriveIndex.KIND_SPRITE, MediaDeriveIndex.KIND_PREVIEW);
 
     private static final DateTimeFormatter MTIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
@@ -166,14 +190,120 @@ public final class MediaDeriveStatusSupport
      */
     public static boolean needsWork(Map<String, Object> row, String kind)
     {
-        Object status = row.get(kind);
-        if (!(status instanceof Map))
+        return !STATE_OK.equals(stateOf(row == null ? null : row.get(kind)));
+    }
+
+    /**
+     * 单档产物的四档状态：missing / oldAlgo / stale / ok（判定顺序即优先级）
+     *
+     * <p>与前端 {@code deriveModel.stateOfSlot()} 同一口径：<b>oldAlgo 优先于 stale</b>——
+     * 旧算法产物即便源比它新，也是「换算法后要重生成」的那一批。四档互斥，所以每档四个
+     * 计数之和恒等于行数（{@code counts} 的一致性断言靠的就是这一点）。</p>
+     */
+    public static String stateOf(Object slot)
+    {
+        if (!(slot instanceof Map))
         {
-            return false;
+            // 接口没给这一档（行缺失 / 老后端）：按缺失处理，与前端 unknown 的兜底方向一致
+            return STATE_MISSING;
         }
-        Map<?, ?> statusMap = (Map<?, ?>) status;
-        return STATUS_MISSING.equals(statusMap.get("status"))
-                || STATUS_OLD_ALGO.equals(statusMap.get("status"))
-                || Boolean.TRUE.equals(statusMap.get("stale"));
+        Map<?, ?> status = (Map<?, ?>) slot;
+        Object state = status.get("status");
+        if (STATUS_OLD_ALGO.equals(state))
+        {
+            return STATE_OLD_ALGO;
+        }
+        if (STATUS_MISSING.equals(state))
+        {
+            return STATE_MISSING;
+        }
+        if (STATUS_OK.equals(state))
+        {
+            return Boolean.TRUE.equals(status.get("stale")) ? STATE_STALE : STATE_OK;
+        }
+        // 旧契约只有 exists / stale 两态
+        if (!Boolean.TRUE.equals(status.get("exists")))
+        {
+            return STATE_MISSING;
+        }
+        return Boolean.TRUE.equals(status.get("stale")) ? STATE_STALE : STATE_OK;
+    }
+
+    /**
+     * 该行是否命中 kind + state（<b>服务端全局筛选</b>，分页在它之后）
+     *
+     * <ul>
+     *   <li>state=all + kind=all：恒命中（不过滤）；</li>
+     *   <li>state=all + kind=thumb/sprite/preview：保持 P5.10-A 的「要补」语义
+     *       （该档缺失 / 旧算法 / 过期），前端旧调用方不受影响；</li>
+     *   <li>state=ok/oldAlgo/stale/missing：按 {@link #stateOf} 的四档精确匹配；
+     *       kind=all 表示三档产物任一档命中即算。</li>
+     * </ul>
+     *
+     * <p>thumb / sprite 没有 oldAlgo 态（{@code algoTracked()} 只认 preview），所以
+     * kind=thumb|sprite + state=oldAlgo 天然 0 行，不需要特判。</p>
+     */
+    public static boolean matchState(Map<String, Object> row, String kind, String state)
+    {
+        if (STATE_ALL.equals(state))
+        {
+            return KIND_ALL.equals(kind) || needsWork(row, kind);
+        }
+        List<String> targets = KIND_ALL.equals(kind) ? KIND_KEYS : List.of(kind);
+        for (String key : targets)
+        {
+            if (state.equals(stateOf(row == null ? null : row.get(key))))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** counts 骨架：{thumb:{ok,oldAlgo,stale,missing}, sprite:{…}, preview:{…}, totalRows:0} */
+    public static Map<String, Object> newCounts()
+    {
+        Map<String, Object> counts = new LinkedHashMap<>();
+        for (String kind : KIND_KEYS)
+        {
+            counts.put(kind, zeroBuckets());
+        }
+        counts.put("totalRows", 0L);
+        return counts;
+    }
+
+    /**
+     * 把一行计入三档分布（候选集全体的分布，与 page / size / state 无关）
+     */
+    public static void addRowCounts(Map<String, Object> counts, Map<String, Object> row)
+    {
+        for (String kind : KIND_KEYS)
+        {
+            Object value = counts.get(kind);
+            if (value instanceof Map)
+            {
+                bump((Map<?, ?>) value, stateOf(row == null ? null : row.get(kind)));
+            }
+        }
+        Object total = counts.get("totalRows");
+        counts.put("totalRows", (total instanceof Long ? (Long) total : 0L) + 1L);
+    }
+
+    private static Map<String, Object> zeroBuckets()
+    {
+        Map<String, Object> buckets = new LinkedHashMap<>();
+        buckets.put(STATE_OK, 0L);
+        buckets.put(STATE_OLD_ALGO, 0L);
+        buckets.put(STATE_STALE, 0L);
+        buckets.put(STATE_MISSING, 0L);
+        return buckets;
+    }
+
+    private static void bump(Map<?, ?> buckets, String state)
+    {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> target = (Map<String, Object>) buckets;
+        Object current = target.get(state);
+        target.put(state, (current instanceof Long ? (Long) current : 0L) + 1L);
     }
 }

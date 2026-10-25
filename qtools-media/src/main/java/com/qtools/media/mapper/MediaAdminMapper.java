@@ -32,7 +32,7 @@ public interface MediaAdminMapper
      */
     List<MediaVideo> selectVideoPage(@Param("keyword") String keyword, @Param("folder") String folder,
             @Param("person") String person, @Param("vcodec") String vcodec, @Param("hidden") String hidden,
-            @Param("sort") String sort, @Param("tagIds") List<Long> tagIds);
+            @Param("sort") String sort, @Param("tagIds") List<Long> tagIds, @Param("ids") List<String> ids);
 
     /** 相册分页查询（personId 为 null 时不按人物过滤） */
     List<MediaAlbum> selectAlbumPage(@Param("keyword") String keyword, @Param("personId") Long personId,

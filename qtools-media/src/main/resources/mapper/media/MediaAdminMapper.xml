@@ -95,6 +95,10 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
                 and exists (select 1 from media_video_tag vt where vt.video_id = v.id and vt.tag_id in
                     <foreach collection="tagIds" item="tid" open="(" separator="," close=")">#{tid}</foreach>)
             </if>
+            <if test="ids != null and ids.size() > 0">
+                and v.id in
+                <foreach collection="ids" item="vid" open="(" separator="," close=")">#{vid}</foreach>
+            </if>
         </where>
         order by
         <choose>

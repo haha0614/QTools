@@ -163,13 +163,14 @@ public class MediaAdminServiceImpl implements IMediaAdminService
 
     @Override
     public TableDataInfo selectVideoPage(String keyword, String folder, String person, String vcodec,
-            String hidden, String sort, Long tagId)
+            String hidden, String sort, Long tagId, String ids)
     {
         // 层级筛选语义：选父标签 = 命中「自身 + 全部后代」标签下的视频（前端也能拿 tags 的 parentId 自行展开，
         // 这里做服务端展开是为了让管理端筛选与将来的服务端筛选共用同一份语义）
         List<Long> tagIds = tagId == null ? null : mediaOrganizeService.descendantTagIds(tagId);
         List<MediaVideo> rows = mediaAdminMapper.selectVideoPage(trimToNull(keyword), trimToNull(folder),
-                trimToNull(person), trimToNull(vcodec), normalizeHidden(hidden), trimToNull(sort), tagIds);
+                trimToNull(person), trimToNull(vcodec), normalizeHidden(hidden), trimToNull(sort), tagIds,
+                splitIds(ids));
         long total = new PageInfo<>(rows).getTotal();
         List<Map<String, Object>> out = new ArrayList<>(rows.size());
         for (MediaVideo video : rows)
@@ -2070,5 +2071,24 @@ public class MediaAdminServiceImpl implements IMediaAdminService
     private record TrashEntry(String kind, String id, String name, String stamp, Path path, boolean isDir,
             long bytes, Date deletedAt, Integer rootId)
     {
+    }
+
+    /** ids 参数：逗号分隔的 videoId 列表（空 = 不过滤）；形状非法直接忽略该条，避免 500 */
+    private static List<String> splitIds(String ids)
+    {
+        if (ids == null || ids.trim().isEmpty())
+        {
+            return null;
+        }
+        List<String> out = new ArrayList<>();
+        for (String part : ids.split(","))
+        {
+            String v = part.trim();
+            if (!v.isEmpty() && v.length() <= 32)
+            {
+                out.add(v);
+            }
+        }
+        return out.isEmpty() ? null : out;
     }
 }
