@@ -2,7 +2,6 @@ package com.qtools.media.controller;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -31,7 +30,6 @@ import com.qtools.common.core.domain.AjaxResult;
 import com.qtools.common.core.page.TableDataInfo;
 import com.qtools.common.enums.BusinessType;
 import com.qtools.common.utils.StringUtils;
-import com.qtools.media.config.MediaProperties;
 import com.qtools.media.domain.MediaVideoMarker;
 import com.qtools.media.domain.dto.MediaScanRequest;
 import com.qtools.media.exception.MediaException;
@@ -94,16 +92,13 @@ public class MediaAdminController extends BaseController
     private IMediaSavedFilterService mediaSavedFilterService;
 
     /**
-     * 文件监听（自动扫描）：实现类由 {@code qtools.media.watch.enabled} 决定是否注册，默认没有这个 bean
+     * 文件监听（自动扫描）：<b>常驻 Bean</b>（不再由 {@code qtools.media.watch.enabled} 决定是否注册）
      *
-     * <p>因此这里是 {@code required = false}：监听关闭时状态接口仍要能读（回 {@code enabled=false}），
-     * 不能因为「bean 不存在」让整个媒体模块起不来。</p>
+     * <p>「听不听」是运行期状态（{@code sys_config.media.watchEnabled}），所以 bean 一定存在：
+     * 关闭时状态接口照常可查、{@code scan-now} 照常可用，只有 pause / resume 会 409。</p>
      */
-    @Autowired(required = false)
-    private IMediaWatchService mediaWatchService;
-
     @Autowired
-    private MediaProperties mediaProperties;
+    private IMediaWatchService mediaWatchService;
 
     // ------------------------------------------------------------------ 列表
 
@@ -368,41 +363,45 @@ public class MediaAdminController extends BaseController
     // ------------------------------------------------------------------ 文件监听（自动扫描）
 
     /**
-     * 文件监听状态：{@code {enabled,running,paused,debounceSeconds,quietMinutes,roots:[...]}}
+     * 文件监听状态：{@code {allowed,enabled,running,paused,debounceSeconds,quietMinutes,roots:[...],hint}}
      *
-     * <p>{@code roots[]} 每项 {@code {id,path,registered,lastEventAt,lastScanAt,pending,pendingEvents}}：
+     * <p>{@code allowed}=部署层总闸（{@code qtools.media.watch.allowRuntimeToggle}），{@code enabled}=
+     * {@code sys_config.media.watchEnabled} 的值，{@code running}=监听是否真的挂上。
+     * {@code roots[]} 每项 {@code {id,path,registered,lastEventAt,lastScanAt,pending,pendingEvents}}：
      * 「哪些根真的挂上了监听、最后一次事件 / 最后一次自动扫描是什么时候、有没有攒下待补跑」的唯一可视入口。</p>
      *
-     * <p>{@code qtools.media.watch.enabled=false}（默认）时本接口照样 200，只是
-     * {@code enabled=false} + {@code hint}：监听 bean 根本不存在，读状态不该 404 / 500。</p>
+     * <p>关闭（{@code enabled=false}）时本接口照样 200：只是 {@code running=false} + {@code hint}
+     * 提示用 {@code PUT /watch/config} 打开，读状态不该 404 / 500。</p>
      */
     @PreAuthorize("@ss.hasPermi('media:admin:list')")
     @GetMapping("/watch")
     public Map<String, Object> watch()
     {
-        if (mediaWatchService == null)
-        {
-            Map<String, Object> view = new LinkedHashMap<>();
-            view.put("enabled", false);
-            view.put("running", false);
-            view.put("paused", false);
-            view.put("debounceSeconds", mediaProperties.getWatch().getDebounceSeconds());
-            view.put("quietMinutes", mediaProperties.getWatch().getQuietMinutes());
-            view.put("roots", List.of());
-            view.put("hint", "文件监听未开启：把 qtools.media.watch.enabled 设为 true 后重启生效"
-                    + "（在此之前可用 POST /api/media/admin/watch/scan-now 手动触发一次扫描）");
-            return view;
-        }
         return mediaWatchService.status();
     }
 
-    /** 暂停自动扫描（运行期开关，不写配置；重启后以配置为准） */
+    /**
+     * 运行期改自动扫描配置：body {@code {enabled?, debounceSeconds?, quietMinutes?}}，落库后立即生效
+     *
+     * <p>校验在服务层：部署层 {@code allowRuntimeToggle=false} → 403；{@code debounceSeconds} 只能 1-60、
+     * {@code quietMinutes} 只能空或 {@code HH:mm-HH:mm}（跨零点允许），非法 400。返回与
+     * {@code GET /watch} 同结构的最新状态。缺省的字段不改。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-自动扫描配置", businessType = BusinessType.UPDATE)
+    @PutMapping("/watch/config")
+    public Map<String, Object> updateWatchConfig(@RequestBody(required = false) String rawBody)
+    {
+        return mediaWatchService.updateConfig(parseObject(rawBody, true));
+    }
+
+    /** 暂停自动扫描（运行期开关，不写配置；{@code media.watchEnabled=false} 时 409） */
     @PreAuthorize("@ss.hasPermi('media:admin:edit')")
     @Log(title = "媒体库-暂停自动扫描", businessType = BusinessType.UPDATE)
     @PostMapping("/watch/pause")
     public Map<String, Object> watchPause()
     {
-        return requireWatch().pause();
+        return mediaWatchService.pause();
     }
 
     /** 恢复自动扫描（运行期开关，不写配置） */
@@ -411,7 +410,7 @@ public class MediaAdminController extends BaseController
     @PostMapping("/watch/resume")
     public Map<String, Object> watchResume()
     {
-        return requireWatch().resume();
+        return mediaWatchService.resume();
     }
 
     /**
@@ -425,22 +424,7 @@ public class MediaAdminController extends BaseController
     @PostMapping("/watch/scan-now")
     public Map<String, Object> watchScanNow()
     {
-        if (mediaWatchService == null)
-        {
-            return mediaScanService.start(new MediaScanRequest(null, "scan", false, null));
-        }
         return mediaWatchService.scanNow();
-    }
-
-    /** pause / resume 需要监听真的注册了；没开就明确 409，而不是静默返回一个假状态 */
-    private IMediaWatchService requireWatch()
-    {
-        if (mediaWatchService == null)
-        {
-            throw MediaException.conflict("文件监听未开启（qtools.media.watch.enabled=false），"
-                    + "pause / resume 无对象可操作；开启后重启生效");
-        }
-        return mediaWatchService;
     }
 
     // ------------------------------------------------------------------ 保存的筛选条件（管理端）

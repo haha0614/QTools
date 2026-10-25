@@ -362,22 +362,34 @@ qtools:
 
 两个 P2 功能，都不改上面的导入命令；细节（全部字段与边界）见 `../自定义与迁移指南.md` 的 4.13 / 4.14。
 
-**自动扫描（文件监听）**——默认关闭，打开后磁盘有变化会自动跑一次 `mode=scan`（等价「重建索引」按钮）：
+**自动扫描（文件监听）**——默认关闭，打开后磁盘有变化会自动跑一次 `mode=scan`（等价「重建索引」按钮）。
+它是**两层**配置，别再去找 yml 里的 `enabled`（已迁移，且改它不会生效）：
 
-```yaml
-qtools:
-  media:
-    watch:
-      enabled: true                 # 默认 false
-      debounceSeconds: 5            # 去抖：窗口内 N 个事件合并成 1 次扫描
-      quietMinutes: '23:00-07:00'   # 夜间静默（可空）
+| 层 | 在哪 | 改完 | 管什么 |
+| :--- | :--- | :--- | :--- |
+| 部署层 | `application.yml` 的 `qtools.media.watch.*` | 需重启进程 | `allowRuntimeToggle`（默认 `true`；`false` = 封掉运行期开关，`PUT /watch/config` 403）、`debounceSeconds` / `quietMinutes` **仅兜底** |
+| 运行期层 | `sys_config` 三键 / `PUT /api/media/admin/watch/config` | **立即生效** | `media.watchEnabled`（默认 `false`）、`media.watchDebounceSeconds`（默认 `5`，1-60）、`media.watchQuietMinutes`（默认空 = 不静默） |
+
+建键（幂等，可反复执行）：
+
+```bash
+mysql -uroot --default-character-set=utf8mb4 -P3307 qtools -e "source doc/media_watch_config.sql"
+```
+
+打开 / 调参（不用重启）：
+
+```bash
+curl -X PUT 'http://localhost:8080/api/media/admin/watch/config' \
+     -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
+     -d '{"enabled":true,"debounceSeconds":5,"quietMinutes":"23:00-07:00"}'
 ```
 
 - 监听 `media_root` 里所有 `kind='root'` 且存在的根，递归包含子目录（新建目录会即时注册）；
   忽略 `*.tmp` / `*.part` / `*.crdownload` / `~$*` 与 `_媒体站`。
 - 同一时刻只跑 1 个任务：正在扫就只置 `pending`，扫完**补跑 1 次**。自动扫描的 job 日志首行是
   `AUTO 触发：<路径> 变化 N 个事件`，手工触发没有这一行。
-- 管理端：`GET /api/media/admin/watch`（状态）、`POST /api/media/admin/watch/pause|resume`（运行期开关，不写配置）、
+- 管理端：`GET /api/media/admin/watch`（状态 `{allowed,enabled,running,paused,debounceSeconds,quietMinutes,roots,hint}`）、
+  `PUT /api/media/admin/watch/config`（改配置，立即生效）、`POST /api/media/admin/watch/pause|resume`（临时暂停 / 恢复，不写配置）、
   `POST /api/media/admin/watch/scan-now`（立即扫一次，监听没开也能用）。
 - 它只做 `scan`（建索引），不会顺带生成缩略图 / 元数据：仍按本文第 2 节的顺序补 `thumb` / `enrich`。
 

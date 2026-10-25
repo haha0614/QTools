@@ -30,37 +30,53 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import com.qtools.common.utils.DateUtils;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.config.MediaProperties;
+import com.qtools.media.config.MediaWatchConfig;
 import com.qtools.media.domain.MediaRoot;
 import com.qtools.media.domain.dto.MediaScanRequest;
 import com.qtools.media.event.MediaScanFinishedEvent;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaRootMapper;
 import com.qtools.media.service.IMediaScanService;
+import com.qtools.media.service.IMediaWatchConfigService;
 import com.qtools.media.service.IMediaWatchService;
+import com.qtools.media.support.MediaQuietWindow;
 
 /**
  * 文件监听（自动增量扫描）服务实现
  *
+ * <h2>两层配置（本类只管运行期那一层）</h2>
+ * <ul>
+ *   <li><b>部署层</b>（yml，需重启）：{@code qtools.media.watch.allowRuntimeToggle} 是能力总闸——
+ *       false 时 {@code PUT /watch/config} 一律 403、{@code pause/resume} 也不可用，只能改库后重启；
+ *       {@code debounceSeconds} / {@code quietMinutes} 只作 {@code sys_config} 缺失 / 非法时的兜底。</li>
+ *   <li><b>运行期</b>（{@code sys_config}，改完即时生效）：{@code media.watchEnabled} 决定「听不听」，
+ *       {@code media.watchDebounceSeconds} / {@code media.watchQuietMinutes} 决定「合多久、夜间静不静」。
+ *       读取带 30s 缓存（{@link IMediaWatchConfigService}），写后立即失效。</li>
+ * </ul>
+ *
  * <h2>机制</h2>
  * <ol>
+ *   <li><b>常驻 Bean</b>：本类<b>不再</b>由 {@code @ConditionalOnProperty} 决定是否注册。启动时按
+ *       {@code media.watchEnabled} 调用 {@link #applyConfig()}：false 时不注册任何 WatchService
+ *       （不建线程、不占句柄），但 bean 存在、{@code GET /watch} 可查、{@code scan-now} 可用。</li>
  *   <li><b>一个 WatchService，多根多目录</b>：{@code media_root} 里每个 {@code kind='root'} 且存在的根
  *       递归注册（{@code ENTRY_CREATE / ENTRY_DELETE / ENTRY_MODIFY}）；新建目录在
  *       {@code ENTRY_CREATE} 到来时就地递归注册，因此「后建的相册目录」也能收到事件。</li>
  *   <li><b>去抖</b>：事件只更新该根的计数与时间戳，并把一次「flush」推迟 {@code debounceSeconds}
- *       秒；新事件到来就取消并重排，因此窗口内的 N 个事件合并成 <b>1 次</b> 扫描。</li>
+ *       秒；新事件到来就取消并重排，因此窗口内的 N 个事件合并成 <b>1 次</b> 扫描。去抖秒数与静默区间
+ *       每次都从 {@link IMediaWatchConfigService} 现取，所以运行期改参数对<b>下一个事件</b>立即生效。</li>
  *   <li><b>不并发</b>：flush 调既有的 {@code IMediaScanService.start(mode=scan)}；它本身有「同一时刻
  *       仅 1 个任务」的保护，抛 409 时本类只置 {@code pending}，等
  *       {@link MediaScanFinishedEvent} 到了再补跑 <b>1 次</b>（补跑同样走 409 检查，不会并发）。</li>
  *   <li><b>来源可辨</b>：自动触发把 {@code origin=AUTO} 与「路径 变化 N 个事件」写进 job 日志首行，
  *       手工触发没有这一行。</li>
  *   <li><b>不污染主流程</b>：监听线程的每层循环都 catch 并 warn；启动失败/注册失败只降级，
- *       绝不让应用启动失败；{@code @PreDestroy} 关闭 WatchService 并中断线程。</li>
+ *       绝不让应用启动失败；运行期开关失败只把状态留在「未运行 + hint」，同样不抛给上层。</li>
  * </ol>
  *
  * <h2>忽略规则</h2>
@@ -71,7 +87,6 @@ import com.qtools.media.service.IMediaWatchService;
  * @author qtools
  */
 @Service
-@ConditionalOnProperty(prefix = "qtools.media.watch", name = "enabled", havingValue = "true")
 public class MediaWatchService implements IMediaWatchService
 {
     private static final Logger log = LoggerFactory.getLogger(MediaWatchService.class);
@@ -90,19 +105,25 @@ public class MediaWatchService implements IMediaWatchService
 
     private static final String DATE_PATTERN = "yyyy-MM-dd HH:mm:ss";
 
+    /** 部署层封掉运行期开关时的 403 文案（前端直接展示，因此定稿在这里） */
+    public static final String TOGGLE_FORBIDDEN_MESSAGE = "部署层已禁止运行期开关（qtools.media.watch.allowRuntimeToggle=false），"
+            + "本次修改未生效；如需切换请改 sys_config.media.watchEnabled 后重启";
+
     private final MediaProperties mediaProperties;
 
     private final IMediaScanService mediaScanService;
 
     private final MediaRootMapper mediaRootMapper;
 
-    /** 一个 JVM 一个 WatchService：所有根、所有子目录都注册在它上面 */
-    private WatchService watchService;
+    private final IMediaWatchConfigService watchConfigService;
 
-    private Thread watchThread;
+    /** 一个 JVM 一个 WatchService：所有根、所有子目录都注册在它上面（未运行时为 null） */
+    private volatile WatchService watchService;
+
+    private volatile Thread watchThread;
 
     /** 去抖计时器（单线程）：合并动作是毫秒级的，真正耗时的扫描在 media-scan 线程里 */
-    private ScheduledExecutorService debounceScheduler;
+    private volatile ScheduledExecutorService debounceScheduler;
 
     /** WatchKey → 所属根状态（子目录的 key 也指向同一个根） */
     private final Map<WatchKey, RootState> keyToRoot = new ConcurrentHashMap<>();
@@ -112,49 +133,38 @@ public class MediaWatchService implements IMediaWatchService
 
     private final AtomicBoolean paused = new AtomicBoolean(false);
 
+    /** 监听是否在跑（WatchService 已创建且监听线程已启动） */
     private volatile boolean running;
 
-    private volatile boolean closed;
+    /** start / stop 互斥；applyConfig 的读-判-改序列不会和另一个 applyConfig 交错 */
+    private final Object lifecycleLock = new Object();
 
     public MediaWatchService(MediaProperties mediaProperties, IMediaScanService mediaScanService,
-            MediaRootMapper mediaRootMapper)
+            MediaRootMapper mediaRootMapper, IMediaWatchConfigService watchConfigService)
     {
         this.mediaProperties = mediaProperties;
         this.mediaScanService = mediaScanService;
         this.mediaRootMapper = mediaRootMapper;
+        this.watchConfigService = watchConfigService;
     }
 
     // ------------------------------------------------------------------ 生命周期
 
+    /**
+     * 启动时按 {@code sys_config.media.watchEnabled} 决定听不听
+     *
+     * <p>读库 / 建 WatchService / 注册根任何一步失败都只 warn：监听是锦上添花，绝不能让应用启动失败。</p>
+     */
     @PostConstruct
     public void init()
     {
-        MediaProperties.Watch config = mediaProperties.getWatch();
-        if (config == null || !config.isEnabled())
-        {
-            return;
-        }
         try
         {
-            watchService = FileSystems.getDefault().newWatchService();
-            debounceScheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
-                Thread thread = new Thread(runnable, "media-watch-debounce");
-                thread.setDaemon(true);
-                return thread;
-            });
-            int registered = registerRoots();
-            watchThread = new Thread(this::watchLoop, "media-watch");
-            watchThread.setDaemon(true);
-            watchThread.start();
-            running = true;
-            log.info("媒体库文件监听已启动：注册根 {} 个，去抖 {}s，静默区间 {}", registered,
-                    config.getDebounceSeconds(), describeQuiet());
+            applyConfig();
         }
         catch (Exception e)
         {
-            // 监听只是锦上添花：起不来也绝不能让应用启动失败
-            log.warn("媒体库文件监听启动失败（自动扫描不可用，其余功能不受影响）", e);
-            closeQuietly();
+            log.warn("媒体库文件监听初始化失败（自动扫描不可用，其余功能不受影响）", e);
         }
     }
 
@@ -162,43 +172,138 @@ public class MediaWatchService implements IMediaWatchService
     public void shutdown()
     {
         log.info("媒体库文件监听关闭中");
-        closeQuietly();
+        stopListener("应用关闭");
     }
 
-    private void closeQuietly()
+    /**
+     * 让<b>运行期状态</b>追上 {@code sys_config}：开 → 注册监听，关 → 停掉并清理，改参数 → 由下一次事件现取
+     *
+     * <p>幂等：已经在跑且仍然要跑时不做任何启停动作（参数变更不需要重启监听，因为去抖 / 静默都是
+     * 每次现取）。启动失败不抛异常，只留在「enabled=true / running=false」并由 {@link #status()} 的
+     * {@code hint} 说明。</p>
+     */
+    @Override
+    public Map<String, Object> applyConfig()
     {
-        closed = true;
-        running = false;
-        WatchService service = watchService;
-        if (service != null)
+        MediaWatchConfig config = watchConfigService.current();
+        if (config.isEnabled())
         {
+            if (running)
+            {
+                log.debug("自动扫描参数变更已生效（无需重启监听）：{}", config);
+            }
+            else
+            {
+                start();
+            }
+        }
+        else if (running)
+        {
+            stopListener("运行期关闭（media.watchEnabled=false）");
+        }
+        return status();
+    }
+
+    /** 开监听：建 WatchService + 去抖线程 + 注册 kind=root 的根 + 起监听线程；失败返回 false */
+    private boolean start()
+    {
+        synchronized (lifecycleLock)
+        {
+            if (running)
+            {
+                return true;
+            }
+            WatchService service;
+            ScheduledExecutorService scheduler;
             try
             {
-                // close() 让阻塞中的 take() 抛 ClosedWatchServiceException，监听线程随即退出
-                service.close();
+                service = FileSystems.getDefault().newWatchService();
+                scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
+                    Thread thread = new Thread(runnable, "media-watch-debounce");
+                    thread.setDaemon(true);
+                    return thread;
+                });
             }
-            catch (IOException e)
+            catch (Exception e)
             {
-                log.debug("关闭 WatchService 失败", e);
+                log.warn("媒体库文件监听启动失败（自动扫描不可用，其余功能不受影响）", e);
+                return false;
             }
-        }
-        ScheduledExecutorService scheduler = debounceScheduler;
-        if (scheduler != null)
-        {
-            scheduler.shutdownNow();
-        }
-        Thread thread = watchThread;
-        if (thread != null && thread != Thread.currentThread())
-        {
-            thread.interrupt();
-        }
-        keyToRoot.clear();
-        for (RootState state : roots.values())
-        {
-            synchronized (state)
+            watchService = service;
+            debounceScheduler = scheduler;
+            keyToRoot.clear();
+            roots.clear();
+            // 每次「开」都从「未暂停」开始：不要把上一轮暂停的残影带到新的一轮
+            paused.set(false);
+            int registered;
+            try
             {
-                state.flushFuture = null;
-                state.pendingEvents = 0;
+                registered = registerRoots(service);
+            }
+            catch (Exception e)
+            {
+                log.warn("媒体根注册监听失败（自动扫描本次可能收不到事件）", e);
+                registered = 0;
+            }
+            Thread thread = new Thread(() -> watchLoop(service), "media-watch");
+            thread.setDaemon(true);
+            watchThread = thread;
+            running = true;
+            thread.start();
+            MediaWatchConfig config = watchConfigService.current();
+            log.info("媒体库文件监听已启动：注册根 {} 个，去抖 {}s，静默 {}", registered,
+                    config.getDebounceSeconds(), describeQuiet(config));
+            return true;
+        }
+    }
+
+    /** 停监听并清理（幂等，可重复调用） */
+    private void stopListener(String reason)
+    {
+        synchronized (lifecycleLock)
+        {
+            boolean wasRunning = running;
+            running = false;
+            WatchService service = watchService;
+            watchService = null;
+            if (service != null)
+            {
+                try
+                {
+                    // close() 让阻塞中的 take() 抛 ClosedWatchServiceException，监听线程随即退出
+                    service.close();
+                }
+                catch (IOException e)
+                {
+                    log.debug("关闭 WatchService 失败", e);
+                }
+            }
+            ScheduledExecutorService scheduler = debounceScheduler;
+            debounceScheduler = null;
+            if (scheduler != null)
+            {
+                scheduler.shutdownNow();
+            }
+            Thread thread = watchThread;
+            watchThread = null;
+            if (thread != null && thread != Thread.currentThread())
+            {
+                thread.interrupt();
+            }
+            keyToRoot.clear();
+            for (RootState state : roots.values())
+            {
+                synchronized (state)
+                {
+                    state.flushFuture = null;
+                    state.pendingEvents = 0;
+                    state.pendingScan = false;
+                }
+            }
+            roots.clear();
+            if (wasRunning)
+            {
+                log.info("媒体库文件监听已停止（{}）", reason);
             }
         }
     }
@@ -206,7 +311,7 @@ public class MediaWatchService implements IMediaWatchService
     // ------------------------------------------------------------------ 注册
 
     /** 注册全部 {@code kind='root'} 且存在的媒体根，返回成功注册的根数 */
-    private int registerRoots()
+    private int registerRoots(WatchService service)
     {
         int registered = 0;
         for (MediaRoot root : mediaRootMapper.selectRootList())
@@ -223,14 +328,14 @@ public class MediaWatchService implements IMediaWatchService
             }
             RootState state = new RootState(root.getId(), path);
             roots.put(state.pathText, state);
-            registerTree(state, path);
+            registerTree(service, state, path);
             registered++;
         }
         return registered;
     }
 
     /** 递归注册一个根 / 新目录下的所有目录（跳过 {@code _媒体站}） */
-    private void registerTree(RootState state, Path start)
+    private void registerTree(WatchService service, RootState state, Path start)
     {
         try
         {
@@ -245,7 +350,7 @@ public class MediaWatchService implements IMediaWatchService
                     }
                     try
                     {
-                        WatchKey key = dir.register(watchService, StandardWatchEventKinds.ENTRY_CREATE,
+                        WatchKey key = dir.register(service, StandardWatchEventKinds.ENTRY_CREATE,
                                 StandardWatchEventKinds.ENTRY_DELETE, StandardWatchEventKinds.ENTRY_MODIFY);
                         keyToRoot.put(key, state);
                         return FileVisitResult.CONTINUE;
@@ -267,14 +372,15 @@ public class MediaWatchService implements IMediaWatchService
 
     // ------------------------------------------------------------------ 监听主循环
 
-    private void watchLoop()
+    /** 监听循环；{@code service} 是本轮启动时创建的那个，重启后旧循环自己退出 */
+    private void watchLoop(WatchService service)
     {
-        while (!closed)
+        while (running && watchService == service)
         {
             WatchKey key;
             try
             {
-                key = watchService.take();
+                key = service.take();
             }
             catch (ClosedWatchServiceException e)
             {
@@ -303,7 +409,7 @@ public class MediaWatchService implements IMediaWatchService
                 {
                     try
                     {
-                        handleEvent(state, dir, event);
+                        handleEvent(service, state, dir, event);
                     }
                     catch (Exception e)
                     {
@@ -323,7 +429,7 @@ public class MediaWatchService implements IMediaWatchService
         }
     }
 
-    private void handleEvent(RootState state, Path dir, WatchEvent<?> event) throws IOException
+    private void handleEvent(WatchService service, RootState state, Path dir, WatchEvent<?> event) throws IOException
     {
         WatchEvent.Kind<?> kind = event.kind();
         if (kind == StandardWatchEventKinds.OVERFLOW)
@@ -356,7 +462,7 @@ public class MediaWatchService implements IMediaWatchService
         if (kind == StandardWatchEventKinds.ENTRY_CREATE && directory)
         {
             // 新目录：立刻递归注册它的子树，否则新相册里的文件收不到任何事件
-            registerTree(state, child);
+            registerTree(service, state, child);
         }
         onChanged(state, child);
     }
@@ -384,11 +490,12 @@ public class MediaWatchService implements IMediaWatchService
     private void scheduleFlush(RootState state)
     {
         ScheduledExecutorService scheduler = debounceScheduler;
-        if (closed || scheduler == null)
+        if (!running || scheduler == null)
         {
             return;
         }
-        long delay = mediaProperties.getWatch().getDebounceSeconds() * 1000L;
+        // 去抖秒数每次现取：运行期改 debounceSeconds 对下一个事件立即生效
+        long delay = watchConfigService.getDebounceSeconds() * 1000L;
         // 夜间静默：把合并后的扫描推迟到静默区间结束
         long quiet = quietMillisRemaining();
         long effective = quiet > 0 ? Math.max(delay, quiet) : delay;
@@ -411,7 +518,7 @@ public class MediaWatchService implements IMediaWatchService
             {
                 return;
             }
-            if (closed)
+            if (!running)
             {
                 state.pendingEvents = 0;
                 return;
@@ -483,7 +590,7 @@ public class MediaWatchService implements IMediaWatchService
     public void onScanFinished(MediaScanFinishedEvent event)
     {
         ScheduledExecutorService scheduler = debounceScheduler;
-        if (closed || scheduler == null)
+        if (!running || scheduler == null)
         {
             return;
         }
@@ -517,17 +624,147 @@ public class MediaWatchService implements IMediaWatchService
         }
     }
 
+    // ------------------------------------------------------------------ 运行期配置
+
+    /**
+     * 运行期改配置：body {@code {enabled?, debounceSeconds?, quietMinutes?}}，落库后立即 {@link #applyConfig()}
+     *
+     * <p>三层判断顺序固定：<b>能力总闸</b>（403）→ <b>取值范围</b>（400）→ 落库 + 生效。
+     * 总闸先判，所以「封掉了运行期开关」的实例不会因为参数非法先收到 400，
+     * 前端拿到的永远是「部署层禁止」这一条。</p>
+     */
+    @Override
+    public Map<String, Object> updateConfig(Map<String, Object> body)
+    {
+        if (!isRuntimeToggleAllowed())
+        {
+            throw new MediaException(403, TOGGLE_FORBIDDEN_MESSAGE);
+        }
+        Map<String, Object> patch = body == null ? Map.of() : body;
+        Boolean enabled = patch.containsKey("enabled") ? parseEnabled(patch.get("enabled")) : null;
+        Integer debounceSeconds = patch.containsKey("debounceSeconds")
+                ? parseDebounceSeconds(patch.get("debounceSeconds")) : null;
+        boolean quietPresent = patch.containsKey("quietMinutes");
+        String quietMinutes = quietPresent ? MediaQuietWindow.requireValid(stringValueOf(patch.get("quietMinutes"))) : null;
+        if (enabled == null && debounceSeconds == null && !quietPresent)
+        {
+            throw MediaException.badRequest("没有可改的字段：body 至少给 enabled / debounceSeconds / quietMinutes 之一");
+        }
+        watchConfigService.save(enabled, debounceSeconds, quietPresent ? quietMinutes : null);
+        log.info("自动扫描配置已更新：enabledPatch={} debounceSecondsPatch={} quietMinutesPatch={}",
+                enabled, debounceSeconds, quietMinutes);
+        return applyConfig();
+    }
+
+    @Override
+    public boolean isRuntimeToggleAllowed()
+    {
+        MediaProperties.Watch watch = mediaProperties.getWatch();
+        return watch == null || watch.isAllowRuntimeToggle();
+    }
+
+    /** enabled：接受 true / false / 1 / 0；其余 400 */
+    private static Boolean parseEnabled(Object value)
+    {
+        if (value instanceof Boolean flag)
+        {
+            return flag;
+        }
+        String text = stringValueOf(value);
+        if (text == null)
+        {
+            throw MediaException.badRequest("enabled 只能是 true / false");
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        if ("true".equals(lower) || "1".equals(lower))
+        {
+            return Boolean.TRUE;
+        }
+        if ("false".equals(lower) || "0".equals(lower))
+        {
+            return Boolean.FALSE;
+        }
+        throw MediaException.badRequest("enabled 只能是 true / false，本次: " + text);
+    }
+
+    /** debounceSeconds：整数且在 1-60；非法 400 */
+    private static Integer parseDebounceSeconds(Object value)
+    {
+        Integer parsed;
+        try
+        {
+            parsed = intValueOf(value);
+        }
+        catch (MediaException e)
+        {
+            parsed = null;
+        }
+        if (parsed == null)
+        {
+            throw MediaException.badRequest("debounceSeconds 必须是 "
+                    + MediaWatchConfigServiceImpl.MIN_DEBOUNCE_SECONDS + "-"
+                    + MediaWatchConfigServiceImpl.MAX_DEBOUNCE_SECONDS + " 的整数，本次: " + value);
+        }
+        if (parsed.intValue() < MediaWatchConfigServiceImpl.MIN_DEBOUNCE_SECONDS
+                || parsed.intValue() > MediaWatchConfigServiceImpl.MAX_DEBOUNCE_SECONDS)
+        {
+            throw MediaException.badRequest("debounceSeconds 只能是 "
+                    + MediaWatchConfigServiceImpl.MIN_DEBOUNCE_SECONDS + "-"
+                    + MediaWatchConfigServiceImpl.MAX_DEBOUNCE_SECONDS + "，本次: " + parsed);
+        }
+        return parsed;
+    }
+
+    /** 数字 / 数字字符串 → Integer；其余返回 null（由调用方决定 400 文案） */
+    private static Integer intValueOf(Object value)
+    {
+        if (value instanceof Number number)
+        {
+            return Integer.valueOf(number.intValue());
+        }
+        String text = stringValueOf(value);
+        if (text == null)
+        {
+            return null;
+        }
+        try
+        {
+            return Integer.valueOf(text);
+        }
+        catch (NumberFormatException e)
+        {
+            return null;
+        }
+    }
+
+    /** 去首尾空格；null / 空串 / 字面 "null" → null */
+    private static String stringValueOf(Object value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        String text = String.valueOf(value).trim();
+        if (text.isEmpty() || "null".equals(text))
+        {
+            return null;
+        }
+        return text;
+    }
+
     // ------------------------------------------------------------------ 手工控制
 
     @Override
     public Map<String, Object> status()
     {
+        MediaWatchConfig config = watchConfigService.current();
         Map<String, Object> view = new LinkedHashMap<>();
-        view.put("enabled", true);
-        view.put("running", running && !closed);
+        view.put("allowed", isRuntimeToggleAllowed());
+        view.put("enabled", config.isEnabled());
+        view.put("running", running);
         view.put("paused", paused.get());
-        view.put("debounceSeconds", mediaProperties.getWatch().getDebounceSeconds());
-        view.put("quietMinutes", describeQuiet());
+        view.put("debounceSeconds", config.getDebounceSeconds());
+        view.put("quietMinutes", config.getQuietMinutes());
         List<Map<String, Object>> nodes = new ArrayList<>();
         for (RootState state : roots.values())
         {
@@ -545,12 +782,44 @@ public class MediaWatchService implements IMediaWatchService
             nodes.add(node);
         }
         view.put("roots", nodes);
+        view.put("hint", hint(config));
         return view;
     }
 
+    /** 状态页顶部的可读提示：说明「为什么现在不跑」以及下一步该调哪个接口 */
+    private String hint(MediaWatchConfig config)
+    {
+        if (!isRuntimeToggleAllowed())
+        {
+            return "部署层已禁止运行期开关（qtools.media.watch.allowRuntimeToggle=false）："
+                    + "只能直接改 sys_config.media.watchEnabled 后重启；pause / resume 同样不可用";
+        }
+        if (!config.isEnabled())
+        {
+            return "自动扫描已关闭：PUT /api/media/admin/watch/config {enabled:true} 立即开启，无需重启"
+                    + "（在此之前可用 POST /api/media/admin/watch/scan-now 手动触发一次扫描）";
+        }
+        if (!running)
+        {
+            return "自动扫描已开启但监听未挂载（启动失败，详见后端日志）：检查媒体根是否存在 / 是否有监听句柄权限，"
+                    + "修好后 PUT /api/media/admin/watch/config {enabled:true} 重试";
+        }
+        if (paused.get())
+        {
+            return "监听已暂停（运行期状态，不写配置）：POST /api/media/admin/watch/resume 恢复";
+        }
+        return "";
+    }
+
+    /**
+     * 暂停：只在「开了且真的在跑」时可用
+     *
+     * <p>{@code media.watchEnabled=false} 时保持既有语义——409 + 可读文案，而不是静默返回一个假状态。</p>
+     */
     @Override
     public Map<String, Object> pause()
     {
+        requireRunning("pause");
         paused.set(true);
         log.info("媒体库文件监听已暂停（运行期开关，不写配置）");
         return status();
@@ -559,9 +828,25 @@ public class MediaWatchService implements IMediaWatchService
     @Override
     public Map<String, Object> resume()
     {
+        requireRunning("resume");
         paused.set(false);
         log.info("媒体库文件监听已恢复");
         return status();
+    }
+
+    /** pause / resume 的前置检查：没开 / 没跑都明确 409 */
+    private void requireRunning(String action)
+    {
+        if (!watchConfigService.isEnabled())
+        {
+            throw MediaException.conflict("自动扫描已关闭（sys_config.media.watchEnabled=false），"
+                    + action + " 无对象可操作；先 PUT /api/media/admin/watch/config {enabled:true} 开启");
+        }
+        if (!running)
+        {
+            throw MediaException.conflict("文件监听未挂载（启动失败或已停止），" + action + " 无对象可操作；"
+                    + "检查媒体根与监听句柄后 PUT /api/media/admin/watch/config {enabled:true} 重试");
+        }
     }
 
     @Override
@@ -620,87 +905,27 @@ public class MediaWatchService implements IMediaWatchService
         return false;
     }
 
-    /** 距夜间静默区间结束还有多少毫秒；不在区间内返回 0 */
+    /** 距夜间静默区间结束还有多少毫秒；不在区间内（或配置非法）返回 0 */
     private long quietMillisRemaining()
     {
-        MediaProperties.Watch config = mediaProperties.getWatch();
-        int[] window = parseQuietWindow(config == null ? null : config.getQuietMinutes());
-        if (window == null)
-        {
-            return 0L;
-        }
-        LocalTime now = LocalTime.now();
-        int minute = now.getHour() * 60 + now.getMinute();
-        int start = window[0];
-        int end = window[1];
-        boolean inside = start <= end ? (minute >= start && minute < end) : (minute >= start || minute < end);
-        if (!inside)
-        {
-            return 0L;
-        }
-        int remaining = minute < end ? end - minute : 24 * 60 - minute + end;
-        if (remaining < 1)
-        {
-            remaining = 1;
-        }
-        // 少退 1 秒：避免恰好在区间边界上反复重排
-        return remaining * 60_000L - 1000L;
-    }
-
-    /** {@code HH:mm-HH:mm} 或 {@code 起始分钟-结束分钟} → [start,end]；空/非法返回 null */
-    private static int[] parseQuietWindow(String text)
-    {
-        if (text == null || text.trim().isEmpty())
-        {
-            return null;
-        }
-        String raw = text.trim();
-        int dash = raw.indexOf('-');
-        if (dash <= 0 || dash == raw.length() - 1)
-        {
-            log.warn("qtools.media.watch.quietMinutes 格式非法（应为 HH:mm-HH:mm 或 起始分钟-结束分钟），已忽略：{}", raw);
-            return null;
-        }
-        Integer start = minuteOf(raw.substring(0, dash));
-        Integer end = minuteOf(raw.substring(dash + 1));
-        if (start == null || end == null)
-        {
-            log.warn("qtools.media.watch.quietMinutes 取值越界，已忽略：{}", raw);
-            return null;
-        }
-        return new int[] { start.intValue(), end.intValue() };
-    }
-
-    private static Integer minuteOf(String token)
-    {
-        String text = token.trim();
-        int colon = text.indexOf(':');
+        int[] window;
         try
         {
-            if (colon > 0)
-            {
-                int hour = Integer.parseInt(text.substring(0, colon).trim());
-                int minute = Integer.parseInt(text.substring(colon + 1).trim());
-                if (hour < 0 || hour > 23 || minute < 0 || minute > 59)
-                {
-                    return null;
-                }
-                return Integer.valueOf(hour * 60 + minute);
-            }
-            int value = Integer.parseInt(text);
-            return value >= 0 && value <= 1440 ? Integer.valueOf(value) : null;
+            // 静默区间每次现取：运行期改 quietMinutes 对下一次判定立即生效
+            window = MediaQuietWindow.parse(watchConfigService.getQuietMinutes());
         }
-        catch (NumberFormatException e)
+        catch (Exception e)
         {
-            return null;
+            log.warn("静默区间解析异常，按不静默处理", e);
+            return 0L;
         }
+        return MediaQuietWindow.millisRemaining(window, LocalTime.now());
     }
 
-    private String describeQuiet()
+    private String describeQuiet(MediaWatchConfig config)
     {
-        MediaProperties.Watch config = mediaProperties.getWatch();
-        String raw = config == null ? null : config.getQuietMinutes();
-        return StringUtils.isEmpty(raw) ? "" : raw.trim();
+        String raw = config == null || config.getQuietMinutes() == null ? "" : config.getQuietMinutes();
+        return raw.isEmpty() ? "（不静默）" : raw;
     }
 
     // ------------------------------------------------------------------ 小工具

@@ -6,8 +6,8 @@ package com.qtools.media.event;
  * <p>发布点只有一个：{@code MediaScanServiceImpl.runJob} 在 {@code finishJob} +
  * running 标记归零之后发出。存在的理由是<b>解除「自动扫描」与扫描实现之间的直接依赖</b>：
  * 文件监听（{@code MediaWatchService}）需要知道「刚才那次跑完了，可以补跑我攒下的 pending」，
- * 但它默认不注册（{@code qtools.media.watch.enabled=false}），扫描服务不能反过来硬依赖它。
- * 监听未开启时没有任何监听者，{@code publishEvent} 是一次空操作。</p>
+ * 而监听是常驻 Bean、开关在运行期可变（{@code sys_config.media.watchEnabled}），扫描服务不能反过来硬依赖它。
+ * 监听未开启（或没有攒下 pending）时本事件没有任何实际动作，{@code publishEvent} 等价空操作。</p>
  *
  * @author qtools
  */

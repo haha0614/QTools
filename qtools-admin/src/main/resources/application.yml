@@ -87,6 +87,23 @@ qtools:
     exportTimeoutMinutes: 60
     # 允许的跨域来源，逗号分隔；* 仅用于本地开发
     allowOrigins: '*'
+    # ---------------- 自动扫描（文件监听）：两层模型 ----------------
+    # 部署层（本文件，改完需重启进程）：
+    #   allowRuntimeToggle  能力总闸：false = 彻底封掉运行期开关（PUT /watch/config 一律 403、
+    #                       pause / resume 不可用），只能直接改 sys_config 后重启。
+    #                       给「配置只准落 yml」「不允许随手打开全盘递归监听」的环境用。
+    #   debounceSeconds / quietMinutes  只是兜底：sys_config 对应键缺失或值非法时才用。
+    # 运行期层（sys_config，改完即时生效；建键脚本 doc/media_watch_config.sql，幂等）：
+    #   media.watchEnabled          'false'  是否监听媒体根并自动触发 mode=scan
+    #   media.watchDebounceSeconds  '5'      去抖窗口（秒，1-60）：窗口内 N 个事件合并成 1 次扫描
+    #   media.watchQuietMinutes     ''       夜间静默（空 = 不静默；HH:mm-HH:mm 或 起始-结束 分钟）
+    # 改法：PUT /api/media/admin/watch/config {enabled|debounceSeconds|quietMinutes}，或直接改库（最迟 30s 生效）。
+    # 注意：旧的 qtools.media.watch.enabled 已迁移到 sys_config.media.watchEnabled。
+    #      监听器现在是常驻 Bean，本文件再写 enabled 不会报错但也不再生效（Spring 忽略未知属性）。
+    watch:
+      allowRuntimeToggle: true
+      debounceSeconds: 5
+      quietMinutes: ''
   # 用户端账号体系（M5：app_* 表 / 独立 JWT / AppJwtFilter / 接口前缀 /api/app/**）
   # 与若依后台（sys_user + token.secret + /login）完全隔离：两套身份互不承认
   app:
