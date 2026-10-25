@@ -42,6 +42,10 @@
  *   PROGRESS <done>/<total>          每条之后一行
  *   FAIL <rel_path>: <原因>           单条失败不中断
  *   TASK <task> total=<n> ok=<n> skip=<n> fail=<n>
+ *   DISTINCT <photos|previews> rows=<n> files=<n> missing=<n>
+ *        内容寻址的产物比行数少是正常的（多张重复内容共用一个 <content_hash>.jpg），
+ *        rows 是库里的行数、files 是去重后应有的文件数、missing 才是真缺文件。
+ *        「ok=0 skip=470」不代表该建未建：先看这一行的 missing。
  *   GC scan dirs=v,s,pv2 files=<n> orphans=<n> bytes=<n>
  *   GC TOP <v|s|pv2>/<name> size=<n>   最多 10 行（按体积从大到小）
  *   GC dry-run ... / GC remove dirs=v,s,pv2 removed=<n> failed=<n> bytes=<n>
@@ -136,6 +140,9 @@ media_video.content_hash 里、也不在 media_video.id 里」的文件，以及
 
 输出行（管理端解析，不要改）：
   START total=<n> ... / PROGRESS <done>/<total> / DONE ok=<n> skip=<n> fail=<n>
+  DISTINCT photos|previews rows=<n> files=<n> missing=<n>
+      内容寻址去重：rows 是库里的行数、files 是应有的 <content_hash>.jpg 个数、
+      missing 才是真缺文件（skip 多不代表该建未建）
 `;
 
 // ---------------------------------------------------------------- 参数
@@ -390,6 +397,26 @@ function isFresh(out, src, checkMtime) {
     return false; // 源文件不见了交给 buildOne 报 FAIL，不在这里静默跳过
   }
   return outStat.mtimeMs >= srcStat.mtimeMs;
+}
+
+/**
+ * 按内容寻址的任务里「计划行数」常远大于「真实产物数」：多张重复内容共用一个 <content_hash>.jpg。
+ * 汇总一行 {@code DISTINCT <task> rows= files= missing=}，用来把「ok=0 skip=470」和
+ * 「产物真的没落地」区分开——missing 才是缺文件，skip 只是本来就已经生成过。
+ */
+function distinctStats(tasks, taskName) {
+  const outs = new Set();
+  let rows = 0;
+  for (const t of tasks) {
+    if (t.task !== taskName) continue;
+    rows += 1;
+    outs.add(t.out);
+  }
+  let missing = 0;
+  for (const out of outs) {
+    if (!alreadyDone(out)) missing += 1;
+  }
+  return { rows, files: outs.size, missing };
 }
 
 function runFfmpeg(ffmpeg, args) {
@@ -756,6 +783,12 @@ function main() {
     const c = perTask[task];
     if (!c) continue;
     log('TASK ' + task + ' total=' + c.total + ' ok=' + c.ok + ' skip=' + c.skip + ' fail=' + c.fail);
+  }
+  // 内容寻址的产物比行数少是正常的（重复内容共用一个文件）：missing 才是真缺
+  for (const task of ['photos', 'previews']) {
+    if (!perTask[task]) continue;
+    const d = distinctStats(tasks, task);
+    log('DISTINCT ' + task + ' rows=' + d.rows + ' files=' + d.files + ' missing=' + d.missing);
   }
 
   // GC 放在建完之后：刚产出的文件都是有效名字，不会被误当孤儿

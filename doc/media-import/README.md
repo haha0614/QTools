@@ -168,6 +168,21 @@ node E:\111\project\QTools\QTools\doc\media-import\import-bundle.js --in='D:\bun
 
 因此「相册内插入一张图」现在只影响 `seq`（用户端顺序 / 大图预览 URL 里的 i），**不再影响缩略图指向哪张图**。
 
+**产物数 ≠ 行数（别把 `skip` 当「该建未建」）**：内容寻址后，多张「同一份内容」的行共用一个文件。
+真实库实测：`media_photo` 9629 行 → `p/` 顶层 9184 个文件；`is_big=1` 的 470 行 → `pv/` 顶层 326 个文件。
+所以 `TASK previews total=470 ok=0 skip=470 fail=0` 是**正常的增量结果**（326 个文件早就齐了，
+470 行按 `content_hash` 去重后正好落在这 326 个文件上），不是「按老命名判新鲜」。判断「到底缺没缺」看汇总行：
+
+```
+DISTINCT photos rows=9629 files=9184 missing=0
+DISTINCT previews rows=470 files=326 missing=0
+```
+
+`rows` 是库里的行数，`files` 是去重后应有的 `<content_hash>.jpg` 个数，`missing` 才是真缺文件。
+另外 `isFresh()` 只 stat 内容寻址的那一个路径：`p|pv/<content_hash>.jpg` 不存在就重建，
+老命名 `p|pv/<albumId>/<%04d>.jpg` 在不在都不参与判定（实测：删掉 `pv/<hash>.jpg`、保留
+`pv/a004/0000.jpg`，下一次运行 `TASK previews ok=1 skip=469`，重建产物与删掉的那份字节完全相同）。
+
 `/media/index` 与 `GET /api/media/album/{id}` 的每张图都带 `hash` 字段（= `content_hash`，未回填时整键不输出），
 前端可以据此拼内容寻址 URL；不带也照样能用（服务端按序号解析）。
 
