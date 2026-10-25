@@ -49,6 +49,7 @@ import static com.qtools.media.support.MediaBodyParser.integerValue;
 import static com.qtools.media.support.MediaBodyParser.longValue;
 import static com.qtools.media.support.MediaBodyParser.longsValue;
 import static com.qtools.media.support.MediaBodyParser.metaPatch;
+import static com.qtools.media.support.MediaBodyParser.optionalDecimalValue;
 import static com.qtools.media.support.MediaBodyParser.personPatch;
 import static com.qtools.media.support.MediaBodyParser.rolesValue;
 import static com.qtools.media.support.MediaBodyParser.parseObject;
@@ -680,7 +681,9 @@ public class MediaAdminController extends BaseController
      *   <tr><td>{@code tagIds}</td><td><b>全量替换</b>：出现即把该视频的字典标签整体换成这一组（{@code []} = 清空）</td></tr>
      *   <tr><td>{@code removeTagIds}</td><td><b>增量摘除</b>（不存在的关联静默忽略，天然幂等）</td></tr>
      *   <tr><td>{@code addTagIds}</td><td><b>增量追加</b>（重复打同一个标签不会产生第二行）</td></tr>
-     *   <tr><td>{@code markers}</td><td><b>全量替换</b>标记列表（{@code []} = 清空；pos 必须 0 &lt;= pos &lt;= dur，dur 为空则跳过上限）</td></tr>
+     *   <tr><td>{@code markers}</td><td><b>全量替换</b>标记列表（{@code []} = 清空）。每项 {@code {pos,label?,color?,endPos?}}：
+     *       pos 必须 0 &lt;= pos &lt;= dur（dur 为空则跳过上限），{@code endPos} 缺省 / null = 单点标记，
+     *       给值时必须 pos &lt; endPos &lt;= dur，非法 400；单视频最多 100 条</td></tr>
      * </table>
      *
      * <p>合并顺序：{@code tagIds} 全量替换 → {@code removeTagIds} → {@code addTagIds}，
@@ -781,10 +784,13 @@ public class MediaAdminController extends BaseController
     }
 
     /**
-     * 新增单个标记：body {@code {pos, label?, color?}}
+     * 新增单个标记：body {@code {pos, label?, color?, endPos?}}
      *
      * <p>与 {@code PUT /video/{id}/meta} 的 {@code markers} 全量替换互补：本接口只追加一条，
-     * pos 必须 {@code 0 <= pos <= dur}（dur 为 NULL 时跳过上限），返回 {@code {id,pos,label,color}}。</p>
+     * pos 必须 {@code 0 <= pos <= dur}（dur 为 NULL 时跳过上限）。
+     * {@code endPos} 可选：缺省 / {@code null} = 单点标记；给值时必须 {@code pos < endPos <= dur}
+     * （dur 为 NULL 时只校验 {@code > pos}），非法一律 400。返回 {@code {id,pos,endPos,label,color}}，
+     * 单点标记的 {@code endPos} 为 {@code null}。</p>
      */
     @PreAuthorize("@ss.hasPermi('media:admin:edit')")
     @Log(title = "媒体库-新增标记", businessType = BusinessType.INSERT)
@@ -795,6 +801,8 @@ public class MediaAdminController extends BaseController
         Map<String, Object> body = parseObject(rawBody, true);
         MediaVideoMarker marker = new MediaVideoMarker();
         marker.setPos(decimalValue(body.get("pos"), "pos"));
+        // endPos 不传 = 单点标记；传 null 也当单点（老前端回传整条标记时不会带这个字段）
+        marker.setEndPos(optionalDecimalValue(body.get("endPos"), "endPos"));
         marker.setLabel(stringValue(body.get("label")));
         marker.setColor(stringValue(body.get("color")));
         return mediaOrganizeService.addMarker(id, marker);

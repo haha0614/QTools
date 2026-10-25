@@ -2,14 +2,10 @@ package com.qtools.media.service.impl;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.SimpleFileVisitor;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
@@ -53,6 +49,7 @@ import com.qtools.media.service.IMediaAdminService;
 import com.qtools.media.service.IMediaFileService;
 import com.qtools.media.service.IMediaIndexService;
 import com.qtools.media.service.IMediaOrganizeService;
+import com.qtools.media.support.MediaTrashSupport;
 
 /**
  * 管理端媒体库 服务实现
@@ -550,10 +547,10 @@ public class MediaAdminServiceImpl implements IMediaAdminService
 
         // 按记录所属的根分桶：trash/<kind>/<rootId>/，root_id 为 NULL 时沿用老结构 trash/<kind>/
         Path targetDir = mediaFileService.resolveTrashDir(kind, rootId);
-        Path target = uniqueTarget(targetDir, trashId, source.getFileName().toString());
+        Path target = MediaTrashSupport.uniqueTarget(targetDir, trashId, source.getFileName().toString());
         try
         {
-            moveOrCopy(source, target);
+            MediaTrashSupport.moveOrCopy(source, target);
         }
         catch (IOException e)
         {
@@ -629,7 +626,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
             {
                 Files.createDirectories(destination.getParent());
             }
-            moveOrCopy(source, destination);
+            MediaTrashSupport.moveOrCopy(source, destination);
         }
         catch (IOException e)
         {
@@ -733,7 +730,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         boolean isDir = Files.isDirectory(target);
         try
         {
-            deleteRecursively(target);
+            MediaTrashSupport.deleteRecursively(target);
         }
         catch (IOException e)
         {
@@ -1607,83 +1604,6 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         return mediaAdminMapper.updatePhotoHidden(Long.valueOf(storedId), flag);
     }
 
-    /** 回收站目标名：{@code <id>__<原名>}，已存在时加时间戳后缀，绝不覆盖 */
-    private Path uniqueTarget(Path dir, String id, String baseName)
-    {
-        Path target = dir.resolve(id + TRASH_SEP + baseName);
-        if (!Files.exists(target))
-        {
-            return target;
-        }
-        String stamp = LocalDateTime.now().format(SUFFIX_FORMAT);
-        target = dir.resolve(id + TRASH_SEP + stamp + TRASH_SEP + baseName);
-        int n = 1;
-        while (Files.exists(target))
-        {
-            target = dir.resolve(id + TRASH_SEP + stamp + "_" + n + TRASH_SEP + baseName);
-            n++;
-        }
-        return target;
-    }
-
-    /**
-     * 移动；跨卷失败时退化为「复制 + 删源」
-     *
-     * <p>{@link Files#move} 同卷是改名，跨卷（多库根常是另一块盘）直接抛异常。这里补一层：
-     * 复制完整成功之后才删源；复制中途失败就清掉残留目标再抛出，绝不留半份文件、
-     * 也绝不在复制失败时先删掉源。</p>
-     */
-    private static void moveOrCopy(Path source, Path target) throws IOException
-    {
-        try
-        {
-            Files.move(source, target);
-            return;
-        }
-        catch (IOException e)
-        {
-            log.warn("移动失败，改走复制+删源（多为跨盘）：{} -> {}（{}）", source, target, e.getMessage());
-        }
-        try
-        {
-            copyRecursively(source, target);
-        }
-        catch (IOException e)
-        {
-            // 复制半途失败：清掉残留目标，源保持原样
-            try
-            {
-                deleteRecursively(target);
-            }
-            catch (IOException ignored)
-            {
-                log.warn("清理复制残留失败：{}", target);
-            }
-            throw e;
-        }
-        deleteRecursively(source);
-    }
-
-    /** 递归复制（相册软删搬的是整个目录）；目标已存在即失败，绝不覆盖 */
-    private static void copyRecursively(Path source, Path target) throws IOException
-    {
-        Files.walkFileTree(source, new SimpleFileVisitor<>()
-        {
-            @Override
-            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException
-            {
-                Files.createDirectories(target.resolve(source.relativize(dir)));
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException
-            {
-                Files.copy(file, target.resolve(source.relativize(file)), StandardCopyOption.COPY_ATTRIBUTES);
-                return FileVisitResult.CONTINUE;
-            }
-        });
-    }
 
     /**
      * 相册所属库根：相册表没有 {@code root_id} 列，按册内图片的 {@code root_id} 推断
@@ -1797,7 +1717,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
      *
      * <p>文件名两种形态：{@code <id>__<原名>}（首次软删）与
      * {@code <id>__<yyyyMMddHHmmss>[_n]__<原名>}（同 id 再次软删，由
-     * {@link #uniqueTarget} 造）。restore 用 stamp 选最近一次软删，列表接口用同一个 stamp
+     * {@link MediaTrashSupport#uniqueTarget} 造）。restore 用 stamp 选最近一次软删，列表接口用同一个 stamp
      * 算 deletedAt，两处必须是同一个时间戳来源。</p>
      */
     private static TrashEntry parseTrashEntry(String kind, Path path, Integer rootId)
@@ -1902,36 +1822,6 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         {
             throw new MediaException(500, "回收站不可访问: " + trash);
         }
-    }
-
-    /** 彻底删除：文件直接删，目录递归删（回收站里的目录来自相册软删） */
-    private static void deleteRecursively(Path target) throws IOException
-    {
-        if (!Files.isDirectory(target))
-        {
-            Files.delete(target);
-            return;
-        }
-        Files.walkFileTree(target, new SimpleFileVisitor<>()
-        {
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException
-            {
-                Files.delete(file);
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException
-            {
-                if (exc != null)
-                {
-                    throw exc;
-                }
-                Files.delete(dir);
-                return FileVisitResult.CONTINUE;
-            }
-        });
     }
 
     /** 时间戳（yyyyMMddHHmmss[_n]）→ Date；解析失败返回 null（不阻塞列表） */

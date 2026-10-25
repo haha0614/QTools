@@ -9,6 +9,9 @@ import java.util.Date;
  * <p>{@code pos} 是秒（保留 2 位），应用侧校验 {@code 0 <= pos <= media_video.dur}；
  * {@code dur} 为 NULL（扫描脚本还没拿到时长）时跳过上限校验。</p>
  *
+ * <p>P4-A 起支持「区间标记」：{@code endPos} 为 NULL = 单点标记（老数据全部如此，行为不变）；
+ * 非 NULL = 区间标记，应用侧校验 {@code pos < endPos <= dur}。起止时间都允许小数。</p>
+ *
  * @author qtools
  */
 public class MediaVideoMarker
@@ -19,6 +22,9 @@ public class MediaVideoMarker
 
     /** 时间点（秒） */
     private BigDecimal pos;
+
+    /** 结束时间（秒）；null = 单点标记，非 null 时必须 > pos 且 <= media_video.dur */
+    private BigDecimal endPos;
 
     /** 标记名称（可空，去首尾空格后 <= 64 字符） */
     private String label;
@@ -56,6 +62,16 @@ public class MediaVideoMarker
     public void setPos(BigDecimal pos)
     {
         this.pos = pos;
+    }
+
+    public BigDecimal getEndPos()
+    {
+        return endPos;
+    }
+
+    public void setEndPos(BigDecimal endPos)
+    {
+        this.endPos = endPos;
     }
 
     public String getLabel()

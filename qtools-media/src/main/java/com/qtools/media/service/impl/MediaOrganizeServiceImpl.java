@@ -343,8 +343,8 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
             for (MediaVideoMarker marker : markers)
             {
                 checkMarkerPos(videoId, video, marker);
-                mediaOrganizeMapper.insertMarker(videoId, marker.getPos(), trimToNull(marker.getLabel()),
-                        trimToNull(marker.getColor()));
+                mediaOrganizeMapper.insertMarker(videoId, marker.getPos(), marker.getEndPos(),
+                        trimToNull(marker.getLabel()), trimToNull(marker.getColor()));
             }
         }
 
@@ -375,6 +375,7 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
         MediaVideoMarker fresh = new MediaVideoMarker();
         fresh.setVideoId(videoId);
         fresh.setPos(marker.getPos());
+        fresh.setEndPos(marker.getEndPos());
         fresh.setLabel(trimToNull(marker.getLabel()));
         fresh.setColor(trimToNull(marker.getColor()));
         mediaOrganizeMapper.insertMarkerWithKey(fresh);
@@ -384,6 +385,7 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("id", fresh.getId());
         out.put("pos", fresh.getPos());
+        out.put("endPos", fresh.getEndPos());
         out.put("label", fresh.getLabel());
         out.put("color", fresh.getColor());
         return out;
@@ -626,7 +628,12 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
         }
     }
 
-    /** pos 下限恒校验；上限只在 dur 已知时校验（dur 为 null = 扫描脚本还没拿到时长，跳过） */
+    /**
+     * 起止时间校验：pos 下限恒校验；上限只在 dur 已知时校验（dur 为 null = 扫描脚本还没拿到时长，跳过）
+     *
+     * <p>区间标记（{@code endPos != null}）额外要求 {@code endPos > pos}——等于 pos 是零长度区间，
+     * 渲染出来是一个看不见的标记，因此按非法处理（400），而不是静默存成单点。</p>
+     */
     private static void checkMarkerPos(String videoId, MediaVideo video, MediaVideoMarker marker)
     {
         BigDecimal pos = marker.getPos();
@@ -638,6 +645,23 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
         if (dur != null && pos.compareTo(dur) > 0)
         {
             throw MediaException.badRequest("标记时间点 " + pos + "s 超过视频时长 " + dur + "s（id=" + videoId + "）");
+        }
+        BigDecimal endPos = marker.getEndPos();
+        if (endPos == null)
+        {
+            return;
+        }
+        if (endPos.signum() < 0)
+        {
+            throw MediaException.badRequest("标记结束时间不能为负: " + endPos);
+        }
+        if (endPos.compareTo(pos) <= 0)
+        {
+            throw MediaException.badRequest("标记结束时间 " + endPos + "s 必须大于起始时间 " + pos + "s");
+        }
+        if (dur != null && endPos.compareTo(dur) > 0)
+        {
+            throw MediaException.badRequest("标记结束时间 " + endPos + "s 超过视频时长 " + dur + "s（id=" + videoId + "）");
         }
     }
 
@@ -698,6 +722,8 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
             Map<String, Object> node = new LinkedHashMap<>();
             node.put("id", marker.getId());
             node.put("pos", marker.getPos());
+            // 单点标记回 null（不是省略字段）：前端据此区分「点」与「区间」
+            node.put("endPos", marker.getEndPos());
             node.put("label", marker.getLabel());
             node.put("color", marker.getColor());
             markers.add(node);

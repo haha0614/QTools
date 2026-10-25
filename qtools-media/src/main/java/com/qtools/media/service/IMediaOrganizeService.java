@@ -55,7 +55,7 @@ public interface IMediaOrganizeService
     Map<String, Object> updateTag(Long id, String name, String color, boolean colorPresent, Long parentId,
             boolean parentPresent);
 
-    /** 单条元数据 {@code {rating,tags:[{id,name,color}],markers:[{id,pos,label,color}]}} */
+    /** 单条元数据 {@code {rating,tags:[{id,name,color}],markers:[{id,pos,endPos,label,color}]}}（endPos 为 null = 单点标记） */
     Map<String, Object> videoMeta(String videoId);
 
     /** 打补丁：全量 / 增量两种写法见 {@link MediaMetaPatch}；返回补丁后的元数据 */
@@ -66,9 +66,10 @@ public interface IMediaOrganizeService
      *
      * <p>与 {@link #updateVideoMeta} 的 {@code markers} 全量替换相反，这里只追加一条，
      * 前端「此刻打个点」不必回传整张表、也不会覆盖别人刚打的点。
-     * pos 必须 {@code 0 <= pos <= dur}（dur 为 NULL 时跳过上限），单视频标记总数上限同全量接口。</p>
+     * pos 必须 {@code 0 <= pos <= dur}（dur 为 NULL 时跳过上限），单视频标记总数上限同全量接口。
+     * {@code endPos} 可选：null = 单点标记，非 null 必须 {@code pos < endPos <= dur}。</p>
      *
-     * @return 新建的 {@code {id,pos,label,color}}
+     * @return 新建的 {@code {id,pos,endPos,label,color}}
      */
     Map<String, Object> addMarker(String videoId, MediaVideoMarker marker);
 

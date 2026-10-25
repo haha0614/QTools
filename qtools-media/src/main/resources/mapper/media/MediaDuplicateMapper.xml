@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    媒体库重复文件合并（P4-A）映射文件：消费 media_video_alias / media_photo_alias。
+
+    两张别名表结构完全同构（content_hash, rel_path, root_id, size），主表却不同：
+      media_video(content_hash 唯一, size, folder) / media_photo(content_hash 非唯一, bytes)。
+    因此表名与 size 列名用 <choose> 分支，SQL 本体只有一份。
+
+    kind 的取值由服务层白名单校验（video / photo）后才进到这里；本文件不接受自由表名。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaDuplicateMapper">
+
+    <!-- 别名表（kind 已由服务层白名单校验） -->
+    <sql id="aliasTable">
+        <choose>
+            <when test="kind == 'video'">media_video_alias</when>
+            <otherwise>media_photo_alias</otherwise>
+        </choose>
+    </sql>
+
+    <!-- 主表 -->
+    <sql id="mainTable">
+        <choose>
+            <when test="kind == 'video'">media_video</when>
+            <otherwise>media_photo</otherwise>
+        </choose>
+    </sql>
+
+    <!-- 别名分组：只列「主表里确实有对应主行」的 hash（孤立别名不进列表，merge 也碰不到） -->
+    <select id="selectAliasGroups" resultType="java.util.LinkedHashMap">
+        select a.content_hash as contentHash,
+               count(*)        as aliasCount,
+               coalesce(sum(a.size), 0) as aliasBytes
+        from <include refid="aliasTable"/> a
+        where exists (select 1 from <include refid="mainTable"/> m where m.content_hash = a.content_hash)
+        group by a.content_hash
+        order by aliasBytes desc, a.content_hash asc
+        limit #{limit} offset #{offset}
+    </select>
+
+    <select id="countAliasGroups" resultType="int">
+        select count(*) from (
+            select a.content_hash
+            from <include refid="aliasTable"/> a
+            where exists (select 1 from <include refid="mainTable"/> m where m.content_hash = a.content_hash)
+            group by a.content_hash
+        ) t
+    </select>
+
+    <!-- 某 hash 的全部别名行（按 id 升序，保证 merge 的搬运顺序稳定可复现） -->
+    <select id="selectAliasesByHash" resultType="java.util.LinkedHashMap">
+        select id            as id,
+               content_hash  as contentHash,
+               rel_path      as relPath,
+               root_id       as rootId,
+               size          as size
+        from <include refid="aliasTable"/>
+        where content_hash = #{contentHash}
+        order by id asc
+    </select>
+
+    <select id="selectAliasById" resultType="java.util.LinkedHashMap">
+        select id            as id,
+               content_hash  as contentHash,
+               rel_path      as relPath,
+               root_id       as rootId,
+               size          as size
+        from <include refid="aliasTable"/>
+        where id = #{id}
+    </select>
+
+    <!--
+        主行：同一 hash 在 media_video 里唯一（uk_media_video_hash），在 media_photo 里可能多行
+        （同一内容出现在多个相册）。取「未隐藏优先、其次 id 最小」，保证列表与 keep 选到同一行。
+    -->
+    <select id="selectPrimaryByHash" resultType="java.util.LinkedHashMap">
+        <choose>
+            <when test="kind == 'video'">
+                select id as id, rel_path as relPath, size as size, root_id as rootId, content_hash as contentHash
+                from media_video
+                where content_hash = #{contentHash}
+                order by hidden asc, id asc
+                limit 1
+            </when>
+            <otherwise>
+                select id as id, rel_path as relPath, bytes as size, root_id as rootId, content_hash as contentHash
+                from media_photo
+                where content_hash = #{contentHash}
+                order by hidden asc, id asc
+                limit 1
+            </otherwise>
+        </choose>
+    </select>
+
+    <!-- keep 前的前置检查：目标 rel_path 是否已被主表其它记录占用（media_video 有 uk_video_rel 唯一键） -->
+    <select id="countMainRowsByRelPath" resultType="int">
+        select count(*) from <include refid="mainTable"/>
+        where rel_path = #{relPath}
+    </select>
+
+    <update id="updatePrimaryPath">
+        <choose>
+            <when test="kind == 'video'">
+                update media_video
+                set rel_path = #{relPath}, root_id = #{rootId}, size = #{size}, folder = #{folder}
+                where id = #{id}
+            </when>
+            <otherwise>
+                update media_photo
+                set rel_path = #{relPath}, root_id = #{rootId}, bytes = #{size}
+                where id = #{id}
+            </otherwise>
+        </choose>
+    </update>
+
+    <update id="updateAliasPath">
+        update <include refid="aliasTable"/>
+        set rel_path = #{relPath}, root_id = #{rootId}, size = #{size}
+        where id = #{id}
+    </update>
+
+    <delete id="deleteAliasById">
+        delete from <include refid="aliasTable"/> where id = #{id}
+    </delete>
+
+    <delete id="deleteAliasesByHash">
+        delete from <include refid="aliasTable"/> where content_hash = #{contentHash}
+    </delete>
+
+</mapper>

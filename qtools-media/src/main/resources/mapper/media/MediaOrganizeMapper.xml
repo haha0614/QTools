@@ -25,6 +25,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <id     property="id"         column="id"          />
         <result property="videoId"    column="video_id"    />
         <result property="pos"        column="pos"         />
+        <result property="endPos"     column="end_pos"     />
         <result property="label"      column="label"       />
         <result property="color"      column="color"       />
         <result property="createTime" column="create_time" />
@@ -168,8 +169,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <!-- ================================================================ 标记 -->
 
+    <!-- 标记按 pos 升序（同 pos 按 id）；end_pos 为 NULL 的行 = 单点标记（老数据全是这种） -->
     <select id="selectMarkersByVideoId" resultMap="MediaVideoMarkerResult">
-        select id, video_id, pos, label, color, create_time
+        select id, video_id, pos, end_pos, label, color, create_time
         from media_video_marker
         where video_id = #{videoId}
         order by pos asc, id asc
@@ -180,17 +182,18 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </delete>
 
     <insert id="insertMarker">
-        insert into media_video_marker (video_id, pos, label, color)
-        values (#{videoId}, #{pos}, #{label}, #{color})
+        insert into media_video_marker (video_id, pos, end_pos, label, color)
+        values (#{videoId}, #{pos}, #{endPos}, #{label}, #{color})
     </insert>
 
     <!-- 单条新增：单一参数对象 + keyProperty=id，主键回填到 MediaVideoMarker.id -->
     <insert id="insertMarkerWithKey" parameterType="com.qtools.media.domain.MediaVideoMarker"
             useGeneratedKeys="true" keyProperty="id">
-        insert into media_video_marker (video_id, pos, label, color)
-        values (#{videoId}, #{pos}, #{label}, #{color})
+        insert into media_video_marker (video_id, pos, end_pos, label, color)
+        values (#{videoId}, #{pos}, #{endPos}, #{label}, #{color})
     </insert>
 
+    <!-- 批量 markerDelta.add 只支持单点标记：end_pos 留空（NULL） -->
     <insert id="batchInsertMarker">
         insert into media_video_marker (video_id, pos, label, color)
         select v.video_id, #{pos}, #{label}, #{color}

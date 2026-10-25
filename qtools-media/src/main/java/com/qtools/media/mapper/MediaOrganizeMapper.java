@@ -98,8 +98,13 @@ public interface MediaOrganizeMapper
     /** 清掉某视频全部标记（全量替换用） */
     int deleteMarkersByVideoId(@Param("videoId") String videoId);
 
-    int insertMarker(@Param("videoId") String videoId, @Param("pos") BigDecimal pos, @Param("label") String label,
-            @Param("color") String color);
+    /**
+     * 插入一条标记（全量替换接口用）
+     *
+     * @param endPos 结束时间；null = 单点标记（区间合法性由服务层校验）
+     */
+    int insertMarker(@Param("videoId") String videoId, @Param("pos") BigDecimal pos,
+            @Param("endPos") BigDecimal endPos, @Param("label") String label, @Param("color") String color);
 
     /**
      * 插入单条标记并把自增主键回填到入参对象的 id 上（单条新增接口要回 {"id":...}）

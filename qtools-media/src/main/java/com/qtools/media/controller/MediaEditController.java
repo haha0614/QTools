@@ -96,6 +96,10 @@ public class MediaEditController
     /**
      * 站端单条元数据补丁：body 同 {@code PUT /api/media/admin/video/{id}/meta}
      * （{@code rating / tagIds / addTagIds / removeTagIds / markers}），返回补丁后的完整元数据
+     *
+     * <p>{@code markers[]} 每项支持 {@code endPos}（P4-A）：缺省 / null = 单点标记，
+     * 给值 = 区间标记（{@code pos < endPos <= dur}）。解析与校验全部复用管理端同一段实现，
+     * 本接口只多一道策略闸门。</p>
      */
     @PutMapping("/video/{id}/meta")
     public Map<String, Object> updateVideoMeta(@PathVariable("id") String id,

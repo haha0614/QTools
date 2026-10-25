@@ -397,7 +397,12 @@ public final class MediaBodyParser
         return out;
     }
 
-    /** 标记数组：[{pos, label?, color?}]；pos 必填（秒，允许小数） */
+    /**
+     * 标记数组：[{pos, label?, color?, endPos?}]；pos 必填（秒，允许小数）
+     *
+     * <p>{@code endPos} 可选：缺失或显式 null = 单点标记；给了数字就解析成区间标记
+     * （{@code pos < endPos} 与 dur 上限由服务层校验，格式错误仍在这里回 400）。</p>
+     */
     public static List<MediaVideoMarker> markersValue(Object value, String field)
     {
         if (value == null)
@@ -419,11 +424,34 @@ public final class MediaBodyParser
             Map<?, ?> map = (Map<?, ?>) item;
             MediaVideoMarker marker = new MediaVideoMarker();
             marker.setPos(decimalValue(map.get("pos"), field + ".pos"));
+            marker.setEndPos(optionalDecimalValue(map.get("endPos"), field + ".endPos"));
             marker.setLabel(stringValue(map.get("label")));
             marker.setColor(stringValue(map.get("color")));
             out.add(marker);
         }
         return out;
+    }
+
+    /** 秒数（可空）：缺失 / null = null；有值但非数字 400（用于 endPos 这类可选字段） */
+    public static BigDecimal optionalDecimalValue(Object value, String field)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        String text = stringValue(value);
+        if (text == null)
+        {
+            return null;
+        }
+        try
+        {
+            return new BigDecimal(text);
+        }
+        catch (NumberFormatException e)
+        {
+            throw MediaException.badRequest(field + " 必须是数字（秒）: " + text);
+        }
     }
 
     /** 秒数：接受数字或数字字符串；缺失 / 非数字 400 */

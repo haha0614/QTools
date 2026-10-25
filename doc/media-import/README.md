@@ -582,7 +582,50 @@ UPDATE media_video_actor a JOIN media_person p ON p.name = a.name
   `parentId` 自建子树，选中父标签时把「自身 + 全部后代」的标签名一起匹配，等于命中所有后代标签的媒体；
   管理端 `GET /api/media/admin/videos?tagId=` 由服务端做同样的展开，是这条语义的权威实现。
 
+
+### 11. 标记起止时间（P4-A）
+
+时间点标记升级成「点 / 区间」两态，只加一列、不动老数据：
+
+```bash
+# 幂等；必须在启动新后端之前跑（标记读写都会 select end_pos）
+mysql -uroot -P3307 --default-character-set=utf8mb4 qtools -e "source doc/media_marker_end.sql"
+```
+
+- `media_video_marker.end_pos` DECIMAL(10,2) NULL：**NULL = 单点标记**（全部存量行都是这种，行为不变），
+  非 NULL = 区间标记。
+- 校验在服务层（DB 不加 CHECK）：`pos >= 0`；`endPos` 为 null 或 `pos < endPos <= dur`
+  （`dur` 为 NULL 时只校验 `> pos`）；单视频标记 ≤ 100 条；非法一律 **400**。
+- 端点：`POST /api/media/admin/video/{id}/markers` 的 body 多一个可选 `endPos`；
+  `PUT /api/media/admin/video/{id}/meta` 的 `markers[]` 每项支持 `endPos`；站端
+  `PUT /api/media/video/{id}/meta` 同步支持（受编辑策略闸门）。返回的 `markers[]` 每项恒带 `endPos`。
+- 批量接口 `markerDelta.add` 仍是单点（同一条标记广播到整批视频，区间语义无意义）。
+
+### 12. 重复文件合并：把别名表用起来（P4-A）
+
+`doc/media_dup_alias.sql` 建的 `media_video_alias` / `media_photo_alias` 以前只沉淀、不读；
+P4-A 起它是管理端「重复文件」页的数据源。
+
+| 端点（前缀 `/api/media/admin`） | 说明 |
+| :--- | :--- |
+| `GET /duplicates?kind=video\|photo&page=&size=` | 按 `content_hash` 分组：`primary`（主表那一行）+ `aliases`（别名行）+ `count` + `bytesWasted` |
+| `POST /duplicates/merge` `{kind,contentHash,deleteFiles}` | 删别名行；`deleteFiles=true` 时先把副本文件搬进回收站 |
+| `POST /duplicates/keep` `{kind,contentHash,id}` | 把指定别名提升为主行指向的那份（交换 `rel_path`，主行 id 不变） |
+
+- **只列「主行还在」的组**：别名表里 `content_hash` 在主表查不到的孤立行不会出现在列表里（也就 merge 不到），
+  这类行来自「主文件被删、副本还在」的历史状态。
+- **照片的 primary 选取**：`media_photo.content_hash` 不是唯一键（同一张图可以合法出现在多个相册），
+  因此取「未隐藏优先、id 最小」那一行，列表与 keep 用同一口径。
+- 判定口径与扫描脚本一致：照片别名只登记**同相册内**的副本；视频别名登记同 hash 的跨路径副本（见 `../media_dup_alias.sql` 与本文件 4.1 节）。
+
+> ⚠️ **合并会移动文件到回收站**：`merge(deleteFiles=true)` 把副本文件搬到
+> `_媒体站/trash/<kind>/<rootId>/`，条目名 `<别名 id>__<原名>`。这些条目在
+> `GET /api/media/admin/trash` 里是 `orphan:true`（原路径未知，因为别名表不存恢复映射），
+> 取回按 `trashRel` 手工搬回，`POST /admin/trash/restore` 对它们无效。
+> `deleteFiles=false` 只删别名行、不动磁盘；重复 merge 幂等（第二次全 0，不报错）。
+
 ---
+
 ## 历史迁移：旧 Node 站 `index.json` → MySQL（`import.js`，保留）
 
 > 下面这节是原作者把旧 Node 站导出的 `index.json` 迁到 MySQL 的说明，脚本是 `import.js` /
