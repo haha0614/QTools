@@ -40,6 +40,38 @@ public interface MediaAdminMapper
     /** 某册图片分页查询（不过滤 hidden，含隐藏行） */
     List<MediaPhoto> selectPhotoPage(@Param("albumId") String albumId);
 
+    /** 某册全部图片（只读库，不列磁盘）：缺失行排在最后；content_hash 一并带出 */
+    List<MediaPhoto> selectAlbumPhotos(@Param("albumId") String albumId);
+
+    /** 缺失图片分页（missing = 1）；albumId 非空时只查该册 */
+    List<MediaPhoto> selectMissingPhotoPage(@Param("albumId") String albumId);
+
+    /** 缺失视频分页（missing = 1） */
+    List<MediaVideo> selectMissingVideoPage();
+
+    /**
+     * 真删缺失图片行
+     *
+     * @param ids 要删的 photo id；为空 = 全部 missing = 1 的行（调用方负责 all:true 的语义）
+     * @return 实际删除行数
+     */
+    int deleteMissingPhotos(@Param("ids") List<Long> ids);
+
+    /** 真删缺失视频行（ids 为空 = 全部 missing = 1 的行） */
+    int deleteMissingVideos(@Param("ids") List<String> ids);
+
+    /** 视频标签行（跟着视频一起删，别留孤儿） */
+    int deleteVideoTagsByVideoIds(@Param("ids") List<String> ids);
+
+    /** 视频演员行 */
+    int deleteVideoActorsByVideoIds(@Param("ids") List<String> ids);
+
+    /** 视频标记行 */
+    int deleteVideoMarkersByVideoIds(@Param("ids") List<String> ids);
+
+    /** 当前全部 missing = 1 的视频 id（删附属行用） */
+    List<String> selectMissingVideoIds();
+
     // ------------------------------------------------------------------ 单行（含隐藏）
 
     /** 按 id 查询视频，不过滤 hidden */

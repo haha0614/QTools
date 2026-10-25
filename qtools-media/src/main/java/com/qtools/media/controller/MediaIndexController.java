@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import com.qtools.common.annotation.Anonymous;
 import com.qtools.common.utils.StringUtils;
@@ -42,9 +43,12 @@ public class MediaIndexController
      * <p>带 ETag（数据版本号），命中 If-None-Match 时回 304；结果缓存 60s。</p>
      */
     @GetMapping("/index")
-    public void index(HttpServletRequest request, HttpServletResponse response) throws IOException
+    public void index(HttpServletRequest request, HttpServletResponse response,
+            @RequestParam(value = "includeMissing", required = false, defaultValue = "true") boolean includeMissing)
+            throws IOException
     {
-        MediaIndexSnapshot snapshot = mediaIndexService.indexSnapshot();
+        // includeMissing=false 时服务端滤掉 missing=1 的行；默认 true = 老行为（前端自行过滤）
+        MediaIndexSnapshot snapshot = mediaIndexService.indexSnapshot(includeMissing);
         String etag = snapshot.getEtag();
         response.setHeader("ETag", etag);
         response.setHeader("Cache-Control", "no-cache");
@@ -72,12 +76,13 @@ public class MediaIndexController
         return mediaIndexService.selectVideoDetail(id);
     }
 
-    /** 单册详情（含 photos，seq 升序） */
+    /** 单册详情（含 photos，seq 升序；photos[].hash = content_hash，供前端拼内容寻址缩略图） */
     @GetMapping("/album/{id}")
-    public Map<String, Object> album(@PathVariable("id") String id)
+    public Map<String, Object> album(@PathVariable("id") String id,
+            @RequestParam(value = "includeMissing", required = false, defaultValue = "true") boolean includeMissing)
     {
-        log.debug("查询媒体相册详情 id={}", id);
-        return mediaIndexService.selectAlbumDetail(id);
+        log.debug("查询媒体相册详情 id={} includeMissing={}", id, includeMissing);
+        return mediaIndexService.selectAlbumDetail(id, includeMissing);
     }
 
     /** If-None-Match 是否命中当前 ETag（支持 *、逗号列表、弱比较前缀） */

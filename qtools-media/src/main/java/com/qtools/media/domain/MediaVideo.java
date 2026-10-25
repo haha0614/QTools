@@ -61,6 +61,18 @@ public class MediaVideo
     private Integer hidden;
 
     /**
+     * 文件是否已消失（1=缺失 / 0=正常）
+     *
+     * <p>由 {@code doc/media_missing.sql} 加的列，{@code doc/media-import/scan-media.js} 在每次
+     * 真实扫描的收尾阶段维护；{@code --prune-missing --yes} 才会真删除这些行。
+     * 列表/索引默认仍带出它们（{@code includeMissing=true}），由调用方自行过滤。</p>
+     */
+    private Integer missing;
+
+    /** 最后一次在磁盘上看到该文件的扫描时间（缺失行即「最后 seen」） */
+    private Date lastSeen;
+
+    /**
      * 人工评分 0-10（10 最好；<b>null = 未评分</b>，0 是有效的最低分）
      *
      * <p>由 {@code media_video.rating} 承载，只在 M3-A 组织能力接口里写入；
@@ -246,5 +258,25 @@ public class MediaVideo
     public void setRating(Integer rating)
     {
         this.rating = rating;
+    }
+
+    public Integer getMissing()
+    {
+        return missing;
+    }
+
+    public void setMissing(Integer missing)
+    {
+        this.missing = missing;
+    }
+
+    public Date getLastSeen()
+    {
+        return lastSeen;
+    }
+
+    public void setLastSeen(Date lastSeen)
+    {
+        this.lastSeen = lastSeen;
     }
 }

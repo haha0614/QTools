@@ -27,6 +27,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import com.github.pagehelper.PageHelper;
 import com.github.pagehelper.PageInfo;
 import com.qtools.common.core.page.TableDataInfo;
 import com.qtools.common.utils.DateUtils;
@@ -181,8 +182,207 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         return dataTable(out, total);
     }
 
-    // ------------------------------------------------------------------ 详情
+    @Override
+    public List<Map<String, Object>> albumPhotos(String albumId)
+    {
+        if (StringUtils.isEmpty(albumId))
+        {
+            throw MediaException.badRequest("missing albumId");
+        }
+        List<MediaPhoto> rows = mediaAdminMapper.selectAlbumPhotos(albumId);
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (MediaPhoto photo : rows)
+        {
+            out.add(photoRow(photo));
+        }
+        return out;
+    }
 
+    // ------------------------------------------------------------------ 缺失文件（P2-D）
+
+    /** 缺失记录里每行最多给多少条（kind=all 时两条查询都按它兜底，防止一次拉爆内存） */
+    private static final int MISSING_PAGE_MAX = 200;
+
+    @Override
+    public Map<String, Object> missingList(String kind, String albumId, int pageNum, int pageSize)
+    {
+        Mode mode = Mode.of(kind);
+        int page = Math.max(1, pageNum);
+        int size = Math.min(MISSING_PAGE_MAX, Math.max(1, pageSize));
+        List<Map<String, Object>> rows = new ArrayList<>();
+        long total = 0L;
+        if (mode.photos)
+        {
+            PageHelper.startPage(page, size);
+            List<MediaPhoto> photos = mediaAdminMapper.selectMissingPhotoPage(trimToNull(albumId));
+            total += "photo".equals(mode.name) ? new PageInfo<>(photos).getTotal() : countMissingPhotos(albumId);
+            for (MediaPhoto photo : photos)
+            {
+                rows.add(missingPhotoRow(photo));
+            }
+        }
+        if (mode.videos)
+        {
+            PageHelper.startPage(page, size);
+            List<MediaVideo> videos = mediaAdminMapper.selectMissingVideoPage();
+            total += "video".equals(mode.name) ? new PageInfo<>(videos).getTotal() : countMissingVideos();
+            for (MediaVideo video : videos)
+            {
+                rows.add(missingVideoRow(video));
+            }
+        }
+        rows.sort(Comparator.comparing((Map<String, Object> row) -> String.valueOf(row.get("missingSince"))));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("rows", rows);
+        out.put("total", total);
+        out.put("kind", mode.name);
+        return out;
+    }
+
+    @Override
+    public Map<String, Object> pruneMissing(String kind, List<String> ids, boolean all)
+    {
+        Mode mode = Mode.of(kind);
+        if (!all && (ids == null || ids.isEmpty()))
+        {
+            throw MediaException.badRequest("缺少 ids（或传 all:true 清空该类型的全部缺失记录）");
+        }
+        int deleted = 0;
+        int photoDeleted = 0;
+        int videoDeleted = 0;
+        if (mode.videos)
+        {
+            List<String> videoIds = all ? mediaAdminMapper.selectMissingVideoIds() : ids;
+            if (videoIds != null && !videoIds.isEmpty())
+            {
+                // 附属行先删，media_video_tag / actor / marker 里不留指向已删视频的孤儿行
+                mediaAdminMapper.deleteVideoTagsByVideoIds(videoIds);
+                mediaAdminMapper.deleteVideoActorsByVideoIds(videoIds);
+                mediaAdminMapper.deleteVideoMarkersByVideoIds(videoIds);
+                videoDeleted = mediaAdminMapper.deleteMissingVideos(videoIds);
+                deleted += videoDeleted;
+            }
+        }
+        if (mode.photos)
+        {
+            List<Long> photoIds = null;
+            if (!all)
+            {
+                photoIds = new ArrayList<>();
+                for (String raw : ids)
+                {
+                    try
+                    {
+                        photoIds.add(Long.valueOf(raw));
+                    }
+                    catch (NumberFormatException e)
+                    {
+                        throw MediaException.badRequest("photo id 必须是数字: " + raw);
+                    }
+                }
+            }
+            photoDeleted = mediaAdminMapper.deleteMissingPhotos(photoIds);
+            deleted += photoDeleted;
+        }
+        log.info("管理端清理缺失记录 kind={} all={} deleted={}（photo={} video={}）", mode.name, all, deleted,
+                photoDeleted, videoDeleted);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("deleted", deleted);
+        out.put("kind", mode.name);
+        out.put("all", all);
+        out.put("photos", photoDeleted);
+        out.put("videos", videoDeleted);
+        return out;
+    }
+
+    /** kind 归一化：photo / video / all（缺省 photo，与前端弹窗的调用方式一致） */
+    private enum Mode
+    {
+        PHOTO("photo", true, false),
+        VIDEO("video", false, true),
+        ALL("all", true, true);
+
+        private final String name;
+        private final boolean photos;
+        private final boolean videos;
+
+        Mode(String name, boolean photos, boolean videos)
+        {
+            this.name = name;
+            this.photos = photos;
+            this.videos = videos;
+        }
+
+        static Mode of(String kind)
+        {
+            if (StringUtils.isEmpty(kind))
+            {
+                return PHOTO;
+            }
+            String k = kind.trim().toLowerCase();
+            if ("video".equals(k))
+            {
+                return VIDEO;
+            }
+            if ("all".equals(k))
+            {
+                return ALL;
+            }
+            if ("photo".equals(k))
+            {
+                return PHOTO;
+            }
+            throw MediaException.badRequest("kind 只接受 photo / video / all: " + kind);
+        }
+    }
+
+    private long countMissingPhotos(String albumId)
+    {
+        return new PageInfo<>(mediaAdminMapper.selectMissingPhotoPage(trimToNull(albumId))).getTotal();
+    }
+
+    private long countMissingVideos()
+    {
+        return new PageInfo<>(mediaAdminMapper.selectMissingVideoPage()).getTotal();
+    }
+
+    /** 缺失图片行：id/相册/路径/最后 seen（前端 photoSource=db 的缺失列表直接用它） */
+    private Map<String, Object> missingPhotoRow(MediaPhoto photo)
+    {
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("kind", "photo");
+        node.put("id", photo.getId());
+        node.put("albumId", photo.getAlbumId());
+        node.put("seq", photo.getSeq());
+        node.put("title", null);
+        node.put("relPath", photo.getRelPath());
+        node.put("bytes", photo.getBytes());
+        node.put("contentHash", photo.getContentHash());
+        node.put("missing", true);
+        node.put("lastSeen", formatDate(photo.getLastSeen()));
+        // 语义：最后一次在磁盘上看到它的时间——文件是「这之后」消失的，故上界即 missingSince
+        node.put("missingSince", formatDate(photo.getLastSeen()));
+        return node;
+    }
+
+    private Map<String, Object> missingVideoRow(MediaVideo video)
+    {
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("kind", "video");
+        node.put("id", video.getId());
+        node.put("albumId", null);
+        node.put("seq", null);
+        node.put("title", video.getTitle());
+        node.put("relPath", video.getRelPath());
+        node.put("bytes", video.getSize());
+        node.put("contentHash", video.getContentHash());
+        node.put("missing", true);
+        node.put("lastSeen", formatDate(video.getLastSeen()));
+        node.put("missingSince", formatDate(video.getLastSeen()));
+        return node;
+    }
+
+    // ------------------------------------------------------------------ 详情
     @Override
     public Map<String, Object> selectDetail(String kind, String id)
     {
@@ -660,6 +860,10 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         out.put("hiddenVideos", longOf(counts.get("hiddenVideos")));
         out.put("hiddenAlbums", longOf(counts.get("hiddenAlbums")));
         out.put("hiddenPhotos", longOf(counts.get("hiddenPhotos")));
+        // 缺失文件（P2-D）：missingCount = 图片 + 视频，另给两个分项便于管理端分别提示
+        out.put("missingPhotos", longOf(counts.get("missingPhotos")));
+        out.put("missingVideos", longOf(counts.get("missingVideos")));
+        out.put("missingCount", longOf(counts.get("missingPhotos")) + longOf(counts.get("missingVideos")));
         out.put("byFolder", byFolder);
         out.put("byPerson", byPerson);
         out.put("trashBytes", trashBytes());
@@ -1150,6 +1354,9 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         node.put("poster", video.getPosterPath());
         node.put("hidden", video.getHidden() != null && video.getHidden() != 0);
         node.put("mtime", formatDate(video.getMtime()));
+        // 缺失文件（P2-D）：管理端列表据此标红点；用户端默认仍带出，由前端自行过滤
+        node.put("missing", video.getMissing() != null && video.getMissing() != 0);
+        node.put("lastSeen", formatDate(video.getLastSeen()));
         return node;
     }
 
@@ -1178,6 +1385,11 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         node.put("isBig", photo.getIsBig() != null && photo.getIsBig() != 0);
         node.put("hidden", photo.getHidden() != null && photo.getHidden() != 0);
         node.put("thumbUrl", thumbUrl(photo.getAlbumId(), photo.getSeq()));
+        // 缺失文件（P2-D）：前端看到 missing=true 就不去请求缩略图，只画「缺失」角标
+        node.put("missing", photo.getMissing() != null && photo.getMissing() != 0);
+        node.put("lastSeen", formatDate(photo.getLastSeen()));
+        // 内容哈希：前端可以拼 /api/media/thumb/p/<albumId>/<hash>（服务端两种写法都认）
+        node.put("contentHash", photo.getContentHash());
         return node;
     }
 

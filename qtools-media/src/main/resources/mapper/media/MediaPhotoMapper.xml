@@ -14,21 +14,33 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="w"       column="w"        />
         <result property="h"       column="h"        />
         <result property="isBig"   column="is_big"   />
+        <!-- 内容哈希：前端用它拼缩略图 URL（/media/thumb/p/<albumId>/<hash>），也用于收藏身份 -->
+        <result property="contentHash" column="content_hash" />
     </resultMap>
 
+    <!--
+        includeMissing：默认 true（老行为：缺失行照旧带出，由前端自行过滤）；
+        显式传 false 时加 missing = 0，服务端就把「文件已消失」的行滤掉。
+    -->
     <select id="selectPhotoList" resultMap="MediaPhotoResult">
-        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big
+        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big, p.content_hash
         from media_photo p
         inner join media_album a on a.id = p.album_id and a.hidden = 0
         where p.hidden = 0
+        <if test="includeMissing != null and includeMissing == false">
+            and p.missing = 0
+        </if>
         order by p.album_id asc, p.seq asc
     </select>
 
-    <select id="selectPhotoListByAlbumId" parameterType="String" resultMap="MediaPhotoResult">
-        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big
+    <select id="selectPhotoListByAlbumId" resultMap="MediaPhotoResult">
+        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big, p.content_hash
         from media_photo p
         inner join media_album a on a.id = p.album_id and a.hidden = 0
         where p.hidden = 0 and p.album_id = #{albumId}
+        <if test="includeMissing != null and includeMissing == false">
+            and p.missing = 0
+        </if>
         order by p.seq asc
     </select>
 
@@ -49,6 +61,18 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         from media_photo p
         inner join media_album a on a.id = p.album_id and a.hidden = 0
         where p.album_id = #{albumId} and p.seq = #{seq} and p.hidden = 0
+        limit 1
+    </select>
+
+    <!--
+        照片缩略图 / 大图预览的内容寻址：按 (album_id, seq) 取 content_hash，
+        命中 thumbs/p|pv/<content_hash>.jpg。**不过滤 hidden**：管理端要能看已隐藏行的缩略图，
+        隐藏不让接口退化成 404；未回填时返回 null，调用方回退老命名 p/<albumId>/<seq4>.jpg。
+    -->
+    <select id="selectPhotoContentHashByAlbumSeq" resultType="String">
+        select p.content_hash
+        from media_photo p
+        where p.album_id = #{albumId} and p.seq = #{seq}
         limit 1
     </select>
 

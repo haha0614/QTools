@@ -49,6 +49,7 @@ import static com.qtools.media.support.MediaBodyParser.longValue;
 import static com.qtools.media.support.MediaBodyParser.metaPatch;
 import static com.qtools.media.support.MediaBodyParser.parseObject;
 import static com.qtools.media.support.MediaBodyParser.stringValue;
+import static com.qtools.media.support.MediaBodyParser.stringsValue;
 
 /**
  * 管理端媒体库接口（前缀 /api/media/admin）
@@ -137,6 +138,58 @@ public class MediaAdminController extends BaseController
         return mediaAdminService.selectPhotoPage(albumId);
     }
 
+    /**
+     * 某册全部图片（<b>只读库</b>，不列磁盘）：管理端相册预览弹窗的数据源
+     *
+     * <p>返回裸数组 {@code [{id,seq,relPath,missing,bytes,w,h,thumbUrl,contentHash,lastSeen}]}，
+     * 缺失行排在最后（{@code order by missing asc, seq asc}）。
+     * 与旧的 {@code GET /photos} 的区别：那个是分页的库内列表（且没有 missing/contentHash），
+     * 这个一次给全册，由前端自己切片；两者都<b>不</b>读磁盘。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/album/{id}/photos")
+    public List<Map<String, Object>> albumPhotos(@PathVariable("id") String id)
+    {
+        return mediaAdminService.albumPhotos(id);
+    }
+
+    /**
+     * 缺失记录分页（{@code missing = 1} 的行）
+     *
+     * <p>查询参数：{@code kind=photo|video|all}（默认 photo）、{@code albumId}（photo 用）、
+     * {@code pageNum/pageSize}。返回 {@code {rows:[{kind,id,albumId,seq,title,relPath,bytes,
+     * contentHash,missing,lastSeen,missingSince}], total, kind}}。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/missing")
+    public Map<String, Object> missing(@RequestParam(value = "kind", required = false) String kind,
+            @RequestParam(value = "albumId", required = false) String albumId,
+            @RequestParam(value = "pageNum", required = false, defaultValue = "1") int pageNum,
+            @RequestParam(value = "pageSize", required = false, defaultValue = "20") int pageSize)
+    {
+        return mediaAdminService.missingList(kind, albumId, pageNum, pageSize);
+    }
+
+    /**
+     * 清理缺失记录：body {@code {kind:"photo"|"video"|"all", ids?:[...]}} 或 {@code {kind, all:true}}
+     *
+     * <p>为什么<b>硬删</b>而不是走回收站：这些行指向的文件在磁盘上根本不存在，回收站里没有源文件
+     * 可搬，软删只会留下「hidden=1 但源不存在」的僵尸行（正是本次要清理的东西）。删除有安全闸：
+     * SQL 里恒带 {@code where missing = 1}，扫描又把文件找回来（missing=0）的行永远删不掉。</p>
+     *
+     * @return {@code {deleted, kind, all, photos, videos}}
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-清理缺失记录", businessType = BusinessType.DELETE)
+    @PostMapping("/missing/prune")
+    public Map<String, Object> pruneMissing(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        String kind = stringValue(body.get("kind"));
+        List<String> ids = stringsValue(body.get("ids"), "ids");
+        boolean all = Boolean.TRUE.equals(boolValue(body.get("all")));
+        return mediaAdminService.pruneMissing(kind, ids, all);
+    }
     /** 详情：kind ∈ video / album / photo */
     @PreAuthorize("@ss.hasPermi('media:admin:list')")
     @GetMapping("/detail/{kind}/{id}")

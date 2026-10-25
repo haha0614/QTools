@@ -19,6 +19,7 @@ import com.qtools.common.utils.StringUtils;
 import com.qtools.media.config.MediaProperties;
 import com.qtools.media.domain.MediaRoot;
 import com.qtools.media.exception.MediaException;
+import com.qtools.media.mapper.MediaPhotoMapper;
 import com.qtools.media.mapper.MediaRootMapper;
 import com.qtools.media.mapper.MediaVideoMapper;
 import com.qtools.media.service.IMediaFileService;
@@ -132,6 +133,10 @@ public class MediaFileServiceImpl implements IMediaFileService
     /** 视频内容哈希来源：只有「按内容寻址取封面」需要读库，读不到就回退老命名 */
     @Autowired
     private MediaVideoMapper mediaVideoMapper;
+
+    /** 图片内容哈希来源：照片缩略图 / 大图预览按内容寻址取（p/<hash>.jpg），读不到就回退老命名 */
+    @Autowired
+    private MediaPhotoMapper mediaPhotoMapper;
 
     /** 多库根来源：只有显式 root_id 或默认根找不到文件时才读库 */
     @Autowired
@@ -517,6 +522,24 @@ public class MediaFileServiceImpl implements IMediaFileService
         return out;
     }
 
+    /**
+     * 图片缩略图 / 大图预览：内容寻址 + 回退（与 {@link #resolveThumbVideo} 同一范式）
+     *
+     * <p>build-thumbs.js 现在把图片产物落成 {@code p|pv/<content_hash>.jpg}。老命名
+     * {@code p|pv/<albumId>/<%04d>.jpg} 里的 seq 会随相册内新增图片整体后移，同一个 seq
+     * 可能先后属于两张不同的图——那正是「缩略图张冠李戴」的根因。</p>
+     *
+     * <p>查找顺序：</p>
+     * <ol>
+     *   <li>{@code index} 本身就是内容哈希（新前端可直接拼 {@code /thumb/p/<albumId>/<hash>}）
+     *       → 只找 {@code p|pv/<hash>.jpg}；</li>
+     *   <li>{@code index} 是册内序号（老 URL，如 {@code /thumb/p/a006/0003}）→ 先按
+     *       {@code (album_id, seq)} 取 content_hash 命中 {@code p|pv/<hash>.jpg}，
+     *       <b>命中不了再回退</b>老命名 {@code p|pv/<albumId>/<%04d>.jpg}；</li>
+     * </ol>
+     *
+     * <p>对外 URL 始终不变，前端零改动；历史产物不迁移也能直接上线。</p>
+     */
     @Override
     public Path resolveThumbPhoto(String albumId, String index, boolean preview)
     {
@@ -524,14 +547,60 @@ public class MediaFileServiceImpl implements IMediaFileService
         {
             throw MediaException.forbidden();
         }
-        if (index == null || !SAFE_INDEX.matcher(index).matches())
+        boolean bySeq = index != null && SAFE_INDEX.matcher(index).matches();
+        if (!bySeq && (index == null || !SAFE_CONTENT_HASH.matcher(index).matches()))
         {
             throw MediaException.forbidden();
         }
+        Path root = thumbsDir().resolve(preview ? PREVIEW_PHOTO_DIR : THUMB_PHOTO_DIR);
+        if (!bySeq)
+        {
+            // 调用方直接给了内容哈希：只认内容寻址产物
+            Path hit = existingFile(root, index.toLowerCase() + JPG_SUFFIX);
+            if (hit == null)
+            {
+                throw MediaException.notFound();
+            }
+            return hit;
+        }
         String name = index.length() >= THUMB_INDEX_WIDTH ? index
                 : "0".repeat(THUMB_INDEX_WIDTH - index.length()) + index;
-        Path base = thumbsDir().resolve(preview ? PREVIEW_PHOTO_DIR : THUMB_PHOTO_DIR).resolve(albumId);
-        return requireFile(base, name + JPG_SUFFIX);
+        String hash = photoContentHash(albumId, Integer.valueOf(index));
+        if (hash != null)
+        {
+            Path hit = existingFile(root, hash + JPG_SUFFIX);
+            if (hit != null)
+            {
+                return hit;
+            }
+        }
+        // 回退：老命名 p|pv/<albumId>/<%04d>.jpg
+        return requireFile(root.resolve(albumId), name + JPG_SUFFIX);
+    }
+
+    /**
+     * 图片内容哈希（已校验）
+     *
+     * <p>与视频那条不同：这里<b>不过滤 hidden</b>——管理端要能看已隐藏行的缩略图，
+     * 隐藏不该让图片变成 404。读库异常 / 未回填 / 脏数据一律返回 null，由调用方回退老命名。</p>
+     */
+    private String photoContentHash(String albumId, Integer seq)
+    {
+        String hash;
+        try
+        {
+            hash = mediaPhotoMapper.selectPhotoContentHashByAlbumSeq(albumId, seq);
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+        if (StringUtils.isEmpty(hash))
+        {
+            return null;
+        }
+        String name = hash.trim();
+        return SAFE_CONTENT_HASH.matcher(name).matches() ? name : null;
     }
 
     @Override

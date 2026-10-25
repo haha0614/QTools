@@ -26,6 +26,33 @@ public interface IMediaAdminService
     /** 某册图片分页 */
     TableDataInfo selectPhotoPage(String albumId);
 
+    /**
+     * 某册全部图片（<b>只读库</b>，不列磁盘）
+     *
+     * @param albumId 相册 id
+     * @return [{id,seq,relPath,missing,bytes,w,h,thumbUrl,contentHash,lastSeen}]，缺失行排在最后
+     */
+    List<Map<String, Object>> albumPhotos(String albumId);
+
+    /**
+     * 缺失记录分页（missing = 1 的行）
+     *
+     * @param kind    photo / video / all（默认 photo）
+     * @param albumId photo 用：只查该册（可空）
+     * @return {rows:[{kind,id,albumId,seq,relPath,title,bytes,missing,lastSeen,missingSince}], total}
+     */
+    Map<String, Object> missingList(String kind, String albumId, int pageNum, int pageSize);
+
+    /**
+     * 清理缺失记录（真删库里的行；磁盘上本来就没文件）
+     *
+     * @param kind photo / video / all
+     * @param ids  精确清理的 id（photo 用数字串，video 用 video id）
+     * @param all  true = 清空该类型所有缺失行（与 ids 互斥，优先 all）
+     * @return {deleted, kind, all}
+     */
+    Map<String, Object> pruneMissing(String kind, List<String> ids, boolean all);
+
     /** 详情：kind ∈ video/album/photo */
     Map<String, Object> selectDetail(String kind, String id);
 

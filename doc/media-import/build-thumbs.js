@@ -6,8 +6,10 @@
  * 从库里读 media_video / media_photo，按 Java 端（MediaFileServiceImpl）的磁盘约定生成：
  *   视频封面   <thumbs>/v/<content_hash>.jpg                  scale=480:-2
  *              content_hash 为 NULL 时回退 <thumbs>/v/<videoId>.jpg（老命名，仍可用）
- *   图片缩略图 <thumbs>/p/<albumId>/<%04d>.jpg                 scale=400:-2
- *   大图预览   <thumbs>/pv/<albumId>/<%04d>.jpg（仅 is_big=1）  scale=1600:-2
+ *   图片缩略图 <thumbs>/p/<content_hash>.jpg                   scale=400:-2
+ *              content_hash 为 NULL 时回退 <thumbs>/p/<albumId>/<%04d>.jpg（老命名，仍可用）
+ *   大图预览   <thumbs>/pv/<content_hash>.jpg（仅 is_big=1）     scale=1600:-2
+ *              content_hash 为 NULL 时回退 <thumbs>/pv/<albumId>/<%04d>.jpg
  *   精灵图     <thumbs>/s/<content_hash>.jpg                  10x10 网格，每格 160x90
  *              （fps=tile 一次成型，间隔由时长决定，目标 ≤100 帧，图片恒为 1600 宽）
  *   预览视频   <thumbs>/pv2/<content_hash>.mp4（或 .webm）       静音 320x180 4fps 5-8 秒
@@ -19,9 +21,15 @@
  * 所以同一份内容改名 / 移动后复用同一张封面。新老命名共存：Java 端先找 <hash>.jpg，
  * 找不到再回退 <id>.jpg，历史产物不迁移也能直接上线。
  *
- * 派生资源回收（--gc）：扫 thumbs/v、thumbs/s、thumbs/pv2，删掉「文件名去掉扩展名后
- * 既不是任何 media_video.content_hash 也不是任何 media_video.id」的孤儿产物；
- * 只碰这三类派生文件，绝不碰媒体源。默认干跑只打印，--gc --yes 才真删
+ * 图片缩略图/大图同样按内容寻址：旧命名 p/<albumId>/<%04d>.jpg 里的 seq 会随相册内新增
+ * 图片整体后移，导致「同一张图串到别的 seq 上」——P4 只改了视频这一半，本条即补齐。
+ * 新老命名共存：Java 端先找 <content_hash>.jpg，找不到再回退 <albumId>/<seq4>.jpg，
+ * 历史产物不迁移也能直接上线。
+ *
+ * 派生资源回收（--gc）：扫 thumbs/v、thumbs/s、thumbs/pv2（按 video 的 hash/id 判定）与
+ * thumbs/p、thumbs/pv（按 photo 的 content_hash 判定），删掉孤儿产物；p/ pv/ 只看顶层
+ * 文件，老命名的 <albumId>/ 子目录一律不动。只碰这几类派生文件，绝不碰媒体源。
+ * 默认干跑只打印，--gc --yes 才真删
  * （与 scan-media.js 的 --truncate/--yes 同一套确认语义）。
  *
  * 增量：产物存在、非空，且产物 mtime >= 源文件 mtime -> skip（源被替换 / 重编码后自动重建）；
@@ -89,7 +97,7 @@ const HELP = `
   --limit=<n>         只处理前 n 条（调试用）
   --sprite            顺手生成视频精灵图 s/<hash>.jpg（10x10 网格，每格 160x90；默认关）
   --preview           顺手生成预览视频 pv2/<hash>.mp4|webm（静音 5-8 秒；默认关）
-  --gc                扫 v/ s/ pv2/ 删孤儿派生文件（默认只打印，配 --yes 才真删）
+  --gc                扫 v/ s/ pv2/ p/ pv/ 删孤儿派生文件（默认只打印，配 --yes 才真删）
   --yes, -y           确认 --gc 的删除动作（不给就只是干跑统计）
   --secret=<file>     密码来源②：从 secret.yml 取 spring.datasource.druid.master.password
                       （管理端「重建缩略图」按钮触发时没有 MYSQL_PWD，用它）
@@ -105,8 +113,10 @@ const HELP = `
 产物路径（相对 --thumbs）：
   v/<content_hash>.jpg      视频封面，按内容寻址（-ss 3 抽帧；不足 3 秒自动回退 -ss 0）
   v/<videoId>.jpg           仅当 content_hash 为 NULL 时的回退命名
-  p/<albumId>/0000.jpg...   图片缩略图（seq 4 位补零）
-  pv/<albumId>/0000.jpg...  大图预览（仅 is_big=1）
+  p/<content_hash>.jpg      图片缩略图，按内容寻址（相册内顺序变化不影响它）
+  pv/<content_hash>.jpg     大图预览，按内容寻址（仅 is_big=1）
+  p/<albumId>/0000.jpg...   仅当 content_hash 为 NULL 时的回退命名（老命名，保留不删）
+  pv/<albumId>/0000.jpg...  同上（大图预览的回退命名）
   s/<content_hash>.jpg      精灵图（--sprite）
   pv2/<content_hash>.mp4    预览视频（--preview；编码器只有 VP9/VP8 时是 .webm）
 
@@ -116,8 +126,10 @@ const HELP = `
 一张图/一段视频失败只计一次 fail，不中断整批。
 
 --gc：只删 thumbs/v、thumbs/s、thumbs/pv2 里「文件名去掉扩展名后既不在
-media_video.content_hash 里、也不在 media_video.id 里」的文件；不递归、不碰
-媒体源目录、不删目录本身。删除前打印 TOP 10 与总数，只有再加 --yes 才真删。
+media_video.content_hash 里、也不在 media_video.id 里」的文件，以及 thumbs/p、thumbs/pv
+顶层「文件名去掉扩展名后不是任何 media_photo.content_hash」的文件；不递归、不碰
+媒体源目录、不删目录本身（老命名的 p/<albumId>/、pv/<albumId>/ 子目录整棵保留）。
+删除前打印 TOP 10 与总数，只有再加 --yes 才真删。
 
 增量判定：产物存在且非空，且产物 mtime >= 源文件 mtime 才算「已是最新」。
 源文件被替换 / 重编码后 mtime 变新，下一次运行自动重建该条产物。
@@ -294,6 +306,25 @@ function thumbName(v) {
   return hash !== '' ? hash : v.id;
 }
 
+/** 图片 content_hash（去空白；NULL / 空串返回 ''） */
+function photoHashOf(p) {
+  return p.hash == null ? '' : String(p.hash).trim();
+}
+
+/**
+ * 图片缩略图 / 大图预览的产物路径
+ *
+ * <p>与视频封面同一范式：有 content_hash 就 <b>按内容寻址</b> {@code p|pv/<content_hash>.jpg}，
+ * 相册内新增 / 删除图片导致 seq 顺移时缩略图不会串到别的图上；content_hash 为 NULL 的老数据
+ * 回退老命名 {@code p|pv/<albumId>/<%04d>.jpg}（Java 端同样先内容寻址再回退，两处必须一致）。</p>
+ */
+function photoOutPath(thumbs, p, preview) {
+  const sub = preview ? 'pv' : 'p';
+  const hash = photoHashOf(p);
+  if (hash !== '') return path.join(thumbs, sub, hash + '.jpg');
+  return path.join(thumbs, sub, p.albumId, pad4(p.seq) + '.jpg');
+}
+
 function planTasks(videos, photos, o) {
   const t = [];
   for (const v of videos) {
@@ -314,17 +345,12 @@ function planTasks(videos, photos, o) {
     }
   }
   for (const p of photos) {
-    t.push({
-      task: 'photos', src: p.rel,
-      out: path.join(o.thumbs, 'p', p.albumId, pad4(p.seq) + '.jpg'), kind: 'photo',
-    });
+    // 内容寻址：相册内加图后 seq 会整体后移，按 <content_hash>.jpg 落盘才不会张冠李戴
+    t.push({ task: 'photos', src: p.rel, out: photoOutPath(o.thumbs, p, false), kind: 'photo' });
   }
   for (const p of photos) {
     if (String(p.isBig) !== '1') continue;
-    t.push({
-      task: 'previews', src: p.rel,
-      out: path.join(o.thumbs, 'pv', p.albumId, pad4(p.seq) + '.jpg'), kind: 'preview',
-    });
+    t.push({ task: 'previews', src: p.rel, out: photoOutPath(o.thumbs, p, true), kind: 'preview' });
   }
   return o.limit > 0 ? t.slice(0, o.limit) : t;
 }
@@ -529,20 +555,32 @@ function detectPreviewEncoder(ffmpeg) {
 }
 
 /**
- * GC：扫 thumbs/v、thumbs/s、thumbs/pv2，把「文件名去掉扩展名后既不是任何
- * media_video.content_hash、也不是任何 media_video.id」的文件当孤儿。
- * 只处理这三个目录里的普通文件：不递归、不删目录、不碰媒体源。
+ * GC：扫 thumbs/v、thumbs/s、thumbs/pv2、thumbs/p、thumbs/pv，把「文件名去掉扩展名后
+ * 不在对应 keep 集合里」的文件当孤儿：
+ *   · v/ s/ pv2/ 的 keep = 所有 media_video.content_hash + media_video.id；
+ *   · p/ pv/ 的 keep = 所有 media_photo.content_hash（内容寻址后的顶层文件名）。
+ * 只处理这些目录里的普通文件：不递归、不删目录、不碰媒体源；老命名的
+ * p/<albumId>/、pv/<albumId>/ 子目录整个保留（不是文件，直接跳过）。
  * 默认干跑只打印，gcYes（--yes）才真删。
  */
-function gcDerived(o, videos) {
-  const keep = new Set();
+function gcDerived(o, videos, photos) {
+  const videoKeep = new Set();
   for (const v of videos) {
-    if (v.id != null && String(v.id) !== '') keep.add(String(v.id));
+    if (v.id != null && String(v.id) !== '') videoKeep.add(String(v.id));
     const hash = v.hash == null ? '' : String(v.hash).trim();
-    if (hash !== '') keep.add(hash);
+    if (hash !== '') videoKeep.add(hash);
   }
+  const photoKeep = new Set();
+  for (const p of (photos || [])) {
+    const hash = photoHashOf(p);
+    if (hash !== '') photoKeep.add(hash);
+  }
+  const scanPlan = [
+    { sub: 'v', keep: videoKeep }, { sub: 's', keep: videoKeep }, { sub: 'pv2', keep: videoKeep },
+    { sub: 'p', keep: photoKeep }, { sub: 'pv', keep: photoKeep },
+  ];
   const scanned = [];
-  for (const sub of ['v', 's', 'pv2']) {
+  for (const { sub, keep } of scanPlan) {
     const dir = path.join(o.thumbs, sub);
     let entries;
     try {
@@ -566,7 +604,7 @@ function gcDerived(o, videos) {
   }
   const orphans = scanned.filter((f) => f.orphan).sort((a, b) => b.size - a.size);
   const bytes = orphans.reduce((s, f) => s + f.size, 0);
-  log('GC scan dirs=v,s,pv2 files=' + scanned.length + ' orphans=' + orphans.length + ' bytes=' + bytes);
+  log('GC scan dirs=v,s,pv2,p,pv files=' + scanned.length + ' orphans=' + orphans.length + ' bytes=' + bytes);
   for (const f of orphans.slice(0, 10)) log('GC TOP ' + f.sub + '/' + f.name + ' size=' + f.size);
   if (!o.gcYes) {
     log('GC dry-run 未删除任何文件（确认无误后加 --yes 才真删）');
@@ -583,7 +621,7 @@ function gcDerived(o, videos) {
       warn('GC 删除失败 ' + f.sub + '/' + f.name + '：' + (e.code || e.message));
     }
   }
-  log('GC remove dirs=v,s,pv2 removed=' + removed + ' failed=' + failed + ' bytes=' + bytes);
+  log('GC remove dirs=v,s,pv2,p,pv removed=' + removed + ' failed=' + failed + ' bytes=' + bytes);
   return { removed, kept: scanned.length - removed };
 }
 
@@ -640,12 +678,15 @@ function main() {
   const videoRows = query(mysqlExe, o, password,
     'SELECT id,rel_path,content_hash,dur FROM media_video ORDER BY id;');
   const photoRows = query(mysqlExe, o, password,
-    'SELECT album_id,seq,rel_path,is_big FROM media_photo ORDER BY album_id,seq;');
+    'SELECT album_id,seq,rel_path,is_big,content_hash FROM media_photo ORDER BY album_id,seq;');
   // mysql --batch 把 NULL 打成字面量 "NULL"，这里还原成 null，免得拿 "NULL" 当哈希拼文件名
   const videos = videoRows.map((c) => ({
     id: c[0], rel: c[1], hash: c[2] === 'NULL' ? null : c[2], dur: c[3] === 'NULL' ? null : c[3],
   }));
-  const photos = photoRows.map((c) => ({ albumId: c[0], seq: Number(c[1]), rel: c[2], isBig: c[3] }));
+  const photos = photoRows.map((c) => ({
+    albumId: c[0], seq: Number(c[1]), rel: c[2], isBig: c[3],
+    hash: c[4] === undefined || c[4] === 'NULL' ? null : c[4],
+  }));
 
   const tasks = planTasks(videos, photos, o);
   const total = tasks.length;
@@ -662,6 +703,11 @@ function main() {
   const noHash = videos.filter((v) => !v.hash || String(v.hash).trim() === '').length;
   if (noHash > 0) {
     warn(noHash + ' 个视频 content_hash 为 NULL，封面回退 v/<videoId>.jpg（重命名后会重复生成，建议先回填哈希）');
+  }
+  const noHashPhoto = photos.filter((p) => photoHashOf(p) === '').length;
+  if (noHashPhoto > 0) {
+    warn(noHashPhoto + ' 张图片 content_hash 为 NULL，缩略图/预览图回退 p|pv/<albumId>/<seq>.jpg' +
+      '（相册内加图会让 seq 后移、缩略图可能串位；先跑 scan-media.js --backfill-hash）');
   }
 
   const needBuild = (t) => o.force || !isFresh(t.out, srcPathOf(t, root), o.fresh);
@@ -715,7 +761,7 @@ function main() {
   // GC 放在建完之后：刚产出的文件都是有效名字，不会被误当孤儿
   let gcTail = '';
   if (o.gc) {
-    const gc = gcDerived(o, videos);
+    const gc = gcDerived(o, videos, photos);
     gcTail = ' GC removed=' + gc.removed + ' kept=' + gc.kept;
   }
 

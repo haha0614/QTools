@@ -27,6 +27,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="mtime"      column="mtime"       />
         <!-- M3-A 组织能力：人工评分 0-10（null = 未评分），索引条目按需输出 -->
         <result property="rating"     column="rating"      />
+        <!-- 缺失文件（doc/media_missing.sql）：1=扫描时磁盘上不存在 -->
+        <result property="missing"    column="missing"     />
+        <result property="lastSeen"   column="last_seen"   />
     </resultMap>
 
     <resultMap type="com.qtools.media.domain.MediaVideoTag" id="MediaVideoTagResult">
@@ -47,13 +50,17 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     -->
     <sql id="selectVideoVo">
         select id, content_hash, root_id, folder, rel_path, title, size, dur, w, h, vcodec, browser_ok,
-               poster_path, doc_path, sub_path, mtime, rating
+               poster_path, doc_path, sub_path, mtime, rating, missing, last_seen
         from media_video
     </sql>
 
+    <!-- includeMissing：默认 true（缺失行照旧带出）；false 时加 missing = 0 服务端过滤 -->
     <select id="selectVideoList" resultMap="MediaVideoResult">
         <include refid="selectVideoVo"/>
         where hidden = 0
+        <if test="includeMissing != null and includeMissing == false">
+            and missing = 0
+        </if>
         order by folder asc, title asc, id asc
     </select>
 

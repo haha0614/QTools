@@ -136,14 +136,39 @@ node E:\111\project\QTools\QTools\doc\media-import\import-bundle.js --in='D:\bun
 | 类型 | 命令 | 路径 |
 | --- | --- | --- |
 | 视频封面（P4 内容寻址） | `-ss 3 -i <src> -frames:v 1 -vf scale=480:-2 -q:v 4`（不足 3 秒自动回退 `-ss 0`） | `v/<content_hash>.jpg`；`content_hash` 为 NULL 时回退 `v/<videoId>.jpg`（老命名） |
-| 图片缩略图 | `-i <src> -frames:v 1 -vf scale=400:-2 -q:v 4` | `p/<albumId>/<%04d>.jpg` |
-| 大图预览（仅 `is_big=1`） | `-i <src> -frames:v 1 -vf scale=1600:-2 -q:v 4` | `pv/<albumId>/<%04d>.jpg` |
+| 图片缩略图（内容寻址） | `-i <src> -frames:v 1 -vf scale=400:-2 -q:v 4` | `p/<content_hash>.jpg`；`content_hash` 为 NULL 时回退 `p/<albumId>/<%04d>.jpg`（老命名） |
+| 大图预览（仅 `is_big=1`，同一套规则） | `-i <src> -frames:v 1 -vf scale=1600:-2 -q:v 4` | `pv/<content_hash>.jpg`；`content_hash` 为 NULL 时回退 `pv/<albumId>/<%04d>.jpg` |
 
 跳过条件（默认）：产物存在、非空，且产物 `mtime >= 源文件 mtime`。源文件被替换 / 重编码后 mtime 变新，
 下一次运行会自动重建那一条；`--no-fresh` 退回「存在即跳过」，`--force` 全量重建。
 
 服务端取封面时**先找 `<content_hash>.jpg`，找不到再回退 `<id>.jpg`**，对外 URL 仍是
 `/api/media/thumb/v/<id>` —— 只在服务端内部换文件，前端零改动（`MediaFileServiceImpl.java:300-345`）。
+
+### 2.1 照片缩略图按内容寻址（相册内顺序变化不再影响缩略图）
+
+**问题（实测）**：缩略图以前按 `p/<albumId>/<%04d>.jpg` 落盘，`<%04d>` 就是册内 `seq`。相册里
+插入一张字母序居中的新图，后面所有图的 `seq` 整体后移，旧缩略图文件名不动 —— 于是同一个
+`0002.jpg` 先属于 A 图、后属于 B 图。用户端表现为「点开是这张、缩略图是另一张」，而且旧缩略图
+是旧文件生成的，看起来像"图片不对"。真实库 a006 就踩过：`thumbs/p/a006/0002.jpg` 与
+`0003.jpg` 字节数相同（25461）、mtime 不同，同一张图被两个 seq 共用。
+
+**现在的规则**（与视频封面 P4 的做法一致，请一起看）：
+
+| 项目 | 规则 |
+| --- | --- |
+| 图片缩略图 | `p/<content_hash>.jpg`（`content_hash` = `md5(size+首/中/尾64KB)` 前 16 位，改名 / 移动 / 相册内顺序变化都不变） |
+| 大图预览 | `pv/<content_hash>.jpg`（同上，仅 `is_big=1`） |
+| `content_hash` 为 NULL | 回退老命名 `p|pv/<albumId>/<%04d>.jpg`，并在启动时打一条 WARN（提示先跑 `--backfill-hash`）；**绝不**因此失败 |
+| 服务端解析 | 先查 `p|pv/<content_hash>.jpg`，命中不了再回退 `p|pv/<albumId>/<%04d>.jpg`（`MediaFileServiceImpl#resolveThumbPhoto`） |
+| URL | 一律不变：`/api/media/thumb/p/<albumId>/<i>`、`/api/media/preview/p/<albumId>/<i>`；`<i>` 传序号或内容哈希都认（新前端可用 `photos[].hash` 直接拼） |
+| 旧文件 | **不删、不迁移**：老命名产物继续能命中（回退路径），新旧共存 |
+| `--gc` | 一并扫 `p/`、`pv/` 顶层：文件名 stem 不是任何 `media_photo.content_hash` 的当孤儿；老命名的 `<albumId>/` 子目录**整棵不动** |
+
+因此「相册内插入一张图」现在只影响 `seq`（用户端顺序 / 大图预览 URL 里的 i），**不再影响缩略图指向哪张图**。
+
+`/media/index` 与 `GET /api/media/album/{id}` 的每张图都带 `hash` 字段（= `content_hash`，未回填时整键不输出），
+前端可以据此拼内容寻址 URL；不带也照样能用（服务端按序号解析）。
 
 `enrich-meta.js` 参数（只补 `media_video` 的 `dur` / `w` / `h` / `vcodec`，其它列一概不动）：
 
@@ -196,8 +221,9 @@ ffprobe 报错）只打 `FAIL <rel_path>: <原因>` 并继续，**退出码仍�
 - **源目录只读**：`scan-media.js` 只 `readdirSync` / `statSync`；`build-thumbs.js` 只往 `--thumbs` 下写。
   不要把自己的媒体目录设成 `--thumbs` 的子目录之外的位置搞混（举例：把 `--thumbs` 指到媒体根内部的
   `_thumbs`，记得把 `_thumbs` 加进 `--exclude`）。
-- **时序**：先 `scan-media.js`，再 `build-thumbs.js` 与 `enrich-meta.js`。缩略图文件名里的
-  id / 相册 / seq 全部来自库，封面文件名还来自 `content_hash`，反过来做会找不到源、拿不到哈希。
+- **时序**：先 `scan-media.js`，再 `build-thumbs.js` 与 `enrich-meta.js`。视频封面 / 图片缩略图的
+  文件名都来自库里的 `content_hash`（相册 / seq 只在哈希为 NULL 的老数据上才用），反过来做会
+  找不到源、拿不到哈希。
 - **多库根（`--root-id` / 接口参数 `r`）**：
   - 每个根在 `media_root` 里一行（`kind='root'`）；扫描时 `--root-id=` 决定写进
     `media_video.root_id` / `media_photo.root_id`。不给就取 `kind='root'` 的第一行，
@@ -215,8 +241,9 @@ ffprobe 报错）只打 `FAIL <rel_path>: <原因>` 并继续，**退出码仍�
     （纯新增表、可重复执行，`UNIQUE(content_hash, rel_path)`）。
   - 主表**保留先入库那一行**当主文件，其余同内容路径写别名表；重扫幂等：`(hash, rel_path)` 命中就只刷
     `root_id` / `size`，`create_time` 保留首次登记时间。
-  - 范围：视频别名**只登记同一次扫描内**发现的副本（跨次扫描的同内容靠 `content_hash` 认「改名/移动」，
-    不是别名）；照片别名**只登记同一本相册内**的副本（同一张图出现在不同相册是合法的内容复用，不算重复）。
+  - 范围：视频别名登记「同一次扫描内的副本」+「跨次扫描、两份文件都还在磁盘上的副本」；照片别名
+    **只登记同一本相册内**的副本（同一张图出现在不同相册是合法的内容复用，不算重复）。
+    判定规则见下面「4.1 同相册同内容副本的判定规则」。
   - 别名表没建时自动降级成老行为：打印 `DUP <hash> 保留=<path> 忽略=<path>`、`别名=0`，扫描不失败。
   - 本期后端**不读**别名表（只沉淀数据），所以「磁盘副本被登记了」≠「站点能看到它」。
 - **重扫不会删行**：目录里删掉的图片靠「`seq >= 当前张数` 的残留行清理 + 孤儿图清理」处理；
@@ -279,11 +306,92 @@ qtools:
 - `--truncate` 会被 Java 侧过滤掉（管理端永远不做全量清空）；脚本自身还要求 `--truncate` 必须同时给 `--yes`。
 - 无法识别的参数（例如旧脚本时代的 `--out=`、`--dir-mode=raw`）脚本只 `WARN` 忽略、不中断。
 - ffmpeg / mysql 路径由 Java 通过环境变量 `MS_FFMPEG` / `MS_MYSQL` 传给脚本（优先级：`--ffmpeg=` > `MS_FFMPEG` > `PATH`、`--mysql=` > `MS_MYSQL` > `PATH`）；配了 `qtools.media.mysqlClient` 才注入 `MS_MYSQL`，留空时脚本自己找 `PATH`。
-- 缩略图产物从 P4 起按 `v/<content_hash>.jpg` 落盘：老 `v/<id>.jpg` 不会被删，服务端先找 hash 再回退 id，
+- 缩略图产物从 P4 起按 `v/<content_hash>.jpg` 落盘（本次起图片 / 大图预览同样按内容寻址：
+  `p|pv/<content_hash>.jpg`）：老 `v/<id>.jpg`、`p|pv/<albumId>/<seq>.jpg` 都不会被删，服务端先找 hash 再回退老命名，
   所以「换脚本后老图还能显示」是设计如此，不是没生效——想确认的话看 `--thumbs` 下有没有新的 `v/<16位hex>.jpg`。
 - **元数据补齐已接按钮**：`mode=enrich` 跑 `enrichScript`（默认就是本目录的 `enrich-meta.js`），
   ffprobe 走配置项 `qtools.media.ffprobe` → 环境变量 `MS_FFPROBE`；参数写在 `enrichArgs` 里
   （与 `scanArgs` 同理必须自带 `--root= --port= --secret=`）。逐字的参数清单见第 6 节。
+
+### 4.1 同相册同内容副本的判定规则（跨扫描）
+
+同一个 `content_hash` 在库里命中、但磁盘上的 `rel_path` 变了，只可能是两件事，**必须先看旧行
+对应的文件还在不在磁盘上**（`scan-media.js` 的 `stillOnDisk()` + 「本次扫描看到的 rel_path 集合」）：
+
+| 旧行对应的文件 | 事实 | 处理 |
+| --- | --- | --- |
+| **还在**磁盘上 | 同内容的两份真实副本（复制出来的那份） | **别名 + 主表新增一行**：照片两张各占一行（册内张数与磁盘一致），同时把这条路径写进 `media_photo_alias`；视频因 `uk_media_video_hash` 唯一键冲突，第二份只进 `media_video_alias`、主表保持先入库那条 |
+| **已不在**磁盘上 | 改名 / 移动（或又一次"消失"） | **只改旧行**：`UPDATE rel_path / album_id / seq`，主键 `id` 不变、**不新增行、不产生幽灵行** |
+
+细化到照片还有一条优先级：**同路径的旧行永远优先认领**（`rel_path` 完全一致的那行），
+所以「只是册内序号变了」不会误判成副本。
+
+「跨次扫描的同内容副本以前没被去重」正是 a006 那类幽灵行的另一半根因：老版本只看「同一次扫描内」，
+第二次扫描遇到同哈希、不同路径时一律当移动，于是把先入库那行改走、把另一条路径彻底丢掉。
+现在按上表分叉后，两种事实各走各的路。
+
+### 4.2 缺失文件与 `--prune-missing`
+
+磁盘上的文件被删掉（或整个目录被移走）之后，库里那行**不会**自动消失。以前它就这样一直留着，
+用户端照旧显示（缩略图还是旧文件生成的），看起来像"图片不对"——所以要给「库里有、磁盘没有」
+一个显式状态。
+
+1. **建列**（一次性，幂等）：
+
+   ```bash
+   mysql -uroot -P3307 --default-character-set=utf8mb4 qtools -e "source doc/media_missing.sql"
+   ```
+
+   加的是 `media_photo.missing` / `media_video.missing`（`TINYINT NOT NULL DEFAULT 0`）与
+   `last_seen`（`DATETIME NULL`，最后一次在磁盘上看到它的扫描时间），外加
+   `media_photo(album_id, missing)`、`media_video(missing)` 两个索引。没建列时扫描器只 WARN，
+   生成的 SQL 与改动前逐字相同，扫描不会失败。
+
+2. **每次真实扫描的收尾**都会比对：
+
+   | 情况 | 动作 |
+   | --- | --- |
+   | 库里有、磁盘上没有 | `missing = 1`（`last_seen` 保持最后一次看到的时间，不刷新） |
+   | 磁盘上又有了 | `missing = 0` + `last_seen = NOW()`（**复活**） |
+   | 磁盘上还在 | upsert 顺手刷 `missing = 0, last_seen = NOW()` |
+
+   判定范围按库根收：显式 `--root-id=N` 只比对 `root_id = N`（默认根额外含 `root_id IS NULL` 的存量行），
+   绝不会拿 A 根的磁盘视角去标 B 根的行；落在 `--exclude` 目录里的行不参与判定。
+
+   汇总行因此多两个键：`… 别名=<n> missing=<n> revived=<n>`（`missing` = 扫完仍缺失的行数，
+   `revived` = 本次复活的条数）。dry-run / dump-sql 不写库，这两个键给 `-`。
+
+3. **为什么"消失"的行会被挪到 `seq + 1000000`**：`media_photo` 的唯一键是 `(album_id, seq)`。
+   文件没了、后面的图 `seq` 前移，残留行会挡住新图 —— 以前表现为「新图插不进去 / 旧行被覆盖成
+   别的图」。现在收尾前先把它停泊到 `seq + PARK_BASE(1000000)`：行还在（`missing=1`、仍属于原相册，
+   管理端能按相册列出来），册内真实序号槽位则全部腾空；它复活时会被当成「移动」按磁盘序号写回去。
+
+4. **只标记，不删**（默认）。真删是显式动作：
+
+   ```bash
+   # 只打印 TOP 10 + 总数（不删）
+   node scan-media.js --root='D:\我的媒体' --prune-missing
+
+   # 确认后真删（删前仍会打印 TOP 10 与总数）
+   node scan-media.js --root='D:\我的媒体' --prune-missing --yes
+   ```
+
+   删除是**硬删**而不是进回收站：这些行指向的文件在磁盘上本来就不存在，回收站里没有源文件可搬，
+   软删只会留下「hidden=1 但源不存在」的僵尸行。安全闸：删除语句恒带 `where missing = 1`，
+   扫描又把文件找回来（`missing = 0`）的行永远删不掉；视频的标签 / 演员 / 标记行一并清掉。
+
+5. **管理端接口**（`media:admin:list` / `media:admin:edit`）：
+
+   | 接口 | 说明 |
+   | --- | --- |
+   | `GET /api/media/admin/missing?kind=photo|video|all&albumId=&pageNum=&pageSize=` | 分页列出缺失行：`{rows:[{kind,id,albumId,seq,title,relPath,bytes,contentHash,missing,lastSeen,missingSince}], total}`（`missingSince` = 最后一次看到的时间，即缺失上界） |
+   | `POST /api/media/admin/missing/prune` body `{kind, ids?:[...]}` 或 `{kind, all:true}` | 删除并返回 `{deleted, kind, all, photos, videos}` |
+   | `GET /api/media/admin/album/{id}/photos` | **只读库**、不列磁盘：`[{id,seq,relPath,missing,bytes,w,h,thumbUrl,contentHash,lastSeen}]`，缺失行排最后 |
+   | `GET /api/media/admin/photos?albumId=` | 旧的库内分页列表（同样带 `missing` / `contentHash`；旧前端回退用） |
+
+   统计接口 `GET /api/media/admin/stats` 多三个数：`missingCount`（图片+视频）、`missingPhotos`、`missingVideos`。
+   用户端 `/media/index?includeMissing=false`、`/media/album/{id}?includeMissing=false` 可以让服务端
+   直接滤掉缺失行；默认 `true`（老行为，前端自行过滤）。
 
 ### 5. 常见坑（本机实测）
 

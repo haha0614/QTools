@@ -18,6 +18,16 @@ public interface IMediaIndexService
     MediaIndexSnapshot indexSnapshot();
 
     /**
+     * 取索引快照（同上），但可以要求服务端过滤缺失文件
+     *
+     * @param includeMissing true（默认，老行为）= 缺失行照旧带出，由前端自行过滤；
+     *                       false = 服务端把 {@code media_photo/missing=1}、{@code media_video/missing=1}
+     *                       的行从 videos / albums[].photos 里滤掉
+     * @return 快照（两种取值各自缓存，ETag 不同）
+     */
+    MediaIndexSnapshot indexSnapshot(boolean includeMissing);
+
+    /**
      * 单片详情（含 tags/actors）
      *
      * @param id 视频 id
@@ -32,6 +42,15 @@ public interface IMediaIndexService
      * @return 与 index.albums[] 同构的节点
      */
     Map<String, Object> selectAlbumDetail(String id);
+
+    /**
+     * 单册详情（同上），可要求服务端过滤缺失的图片行
+     *
+     * @param id             相册 id
+     * @param includeMissing true（默认）= 带出缺失行；false = 只给文件还在的图片
+     * @return 与 index.albums[] 同构的节点
+     */
+    Map<String, Object> selectAlbumDetail(String id, boolean includeMissing);
 
     /**
      * 丢弃索引快照缓存

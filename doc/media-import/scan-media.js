@@ -69,6 +69,16 @@ const BROWSER_OK_EXT = new Set(['.mp4', '.webm']);
 
 /** media_*.rel_path VARCHAR(700)，超长直接跳过（写入会报 1406） */
 const MAX_REL = 700;
+
+/**
+ * 「缺失行」在册内序号上的停泊偏移
+ *
+ * <p>册内序号 {@code (album_id, seq)} 有唯一键。磁盘上某张图消失后，它在册内的序号槽位要腾给
+ * 后面的图，但行本身必须留着（missing=1，管理端可清理）——所以把它整体挪到
+ * {@code seq + PARK_BASE}，既保住 album_id（还能按相册看到它），又不会和真实序号撞键。
+ * 下一次扫描该文件复活时，planPhotos 会把它当「移动」按磁盘序号写回去。</p>
+ */
+const PARK_BASE = 1000000;
 /** media_album.dir_key / dir VARCHAR(600) */
 const MAX_DIR_KEY = 600;
 /** 回填/预载的分页行数 */
@@ -120,6 +130,8 @@ const HELP = `
                       注意顺序：先跑 build-thumbs.js（P4 起按 <content_hash>.jpg 落盘），
                       再执行本模式；封面文件还是 <id>.jpg 时刷完会指向不存在的文件
   --limit=<n>         --backfill-hash 时最多处理多少行（默认不限）
+  --prune-missing     扫完把 media_photo / media_video 里 missing=1 的行真删（默认只标记不删）；
+                      删除前先打印 TOP 10 与总数，必须同时给 --yes 才真删
   --help              显示本帮助
 
 查找 mysql 客户端（优先级）：
@@ -144,10 +156,20 @@ const HELP = `
 输出（管理端 MediaScanServiceImpl 按这些行解析，改动前先看它）：
   videos=<n> albums=<n> photos=<n> people=0            扫描到的源数据条数
   条数 videos=<n> albums=<n> photos=<n> people=<n>    写库后回读的库内条数
-  新插入=<n> 移动=<n> 更新=<n> 重复=<n> 跳过=<n> 别名=<n>   本次写的分类计数
+  新插入=<n> 移动=<n> 更新=<n> 重复=<n> 跳过=<n> 别名=<n> missing=<n> revived=<n>
+                                                       本次写的分类计数；missing=扫完仍缺失的行数，
+                                                       revived=本次「磁盘又有了」复活的行数
   ALIAS <hash> 主=<path> 别名=<path>                   同内容副本：主文件留在主表，这条进别名表
   DUP <hash> 保留=<path> 忽略=<path>                   同上，但别名表未建时退回老行为（副本被丢弃）
   回填 videos=<n> photos=<n> missing=<n>               --backfill-hash 的计数
+
+缺失文件（doc/media_missing.sql 加的 missing 列）：
+  每次真实扫描收尾都会比对「本次看到的 rel_path」与库内行：
+    磁盘上没了 -> missing=1（last_seen 保留最后一次看到的时间，不刷新）
+    磁盘上又有 -> missing=0（复活）+ last_seen=当前时间
+  默认只标记不删；幽灵行确需清掉时：
+    node scan-media.js --root=D:\\媒体 [--prune-missing [--yes]]
+  没建 missing 列的老库只 WARN，不会让扫描失败。
 `;
 
 // ---------------------------------------------------------------- 参数
@@ -156,6 +178,7 @@ function parseArgs(argv) {
   const o = Object.assign({}, DEFAULTS, {
     root: null, mysql: null, secret: null, dumpSql: null, truncate: false, yes: false, dryRun: false,
     ignored: [], noHash: false, backfillHash: false, fixPosterPath: false, limit: null, rootId: null,
+    pruneMissing: false,
   });
   for (const a of argv) {
     if (a === '--truncate') o.truncate = true;
@@ -165,6 +188,7 @@ function parseArgs(argv) {
     else if (a === '--no-hash') o.noHash = true;
     else if (a === '--backfill-hash') o.backfillHash = true;
     else if (a === '--fix-poster-path') o.fixPosterPath = true;
+    else if (a === '--prune-missing') o.pruneMissing = true;
     else if (a.startsWith('--root=')) o.root = a.slice('--root='.length);
     else if (a.startsWith('--db=')) o.db = a.slice('--db='.length);
     else if (a.startsWith('--user=')) o.user = a.slice('--user='.length);
@@ -470,6 +494,11 @@ function scanDisk(root, o) {
   const sink = { files: [], errors: [], skippedLinks: 0 };
   walk(root, o.excludeSet, sink);
 
+  // 本次扫描「在磁盘上看到过」的 rel_path 集合：missing 同步的唯一依据。
+  // 在长度 / stat / 哈希等跳过判定**之前**就登记——这些文件明明还在磁盘上，
+  // 绝不能因为「本次没写进库」就被标成缺失。
+  const present = { photo: new Set(), video: new Set() };
+
   const rootTitle = path.basename(root) || '未分组';
   const videos = [];
   const groups = new Map();
@@ -481,6 +510,8 @@ function scanDisk(root, o) {
     const isVideo = VIDEO_EXT.has(f.ext);
     const isPhoto = PHOTO_EXT.has(f.ext);
     if (!isVideo && !isPhoto) continue;
+    if (isVideo) present.video.add(f.rel);
+    else present.photo.add(f.rel);
     if (f.rel.length > MAX_REL) {
       longPath += 1;
       skipped += 1;
@@ -555,7 +586,7 @@ function scanDisk(root, o) {
   if (sink.skippedLinks) warnings.push(sink.skippedLinks + ' 个符号链接/联接点已跳过（不跟随）');
 
   videos.sort((a, b) => naturalCompare(a.rel, b.rel));
-  return { videos, groups: list, warnings, skipped, rootTitle };
+  return { videos, groups: list, warnings, skipped, rootTitle, present };
 }
 
 // ---------------------------------------------------------------- 库内状态
@@ -566,6 +597,7 @@ function emptyState() {
     videoByRel: new Map(),
     videoByHash: new Map(),
     photoByHash: new Map(),
+    photoByAlbum: new Map(),
     albumById: new Map(),
     albumKey: new Map(),
     albumLegacyDirKey: new Map(),
@@ -583,21 +615,31 @@ function loadState(o, mysqlExe, password) {
   const s = emptyState();
 
   const vRows = queryRows(o, mysqlExe, password,
-    "SELECT id, rel_path, IFNULL(content_hash, '') FROM media_video;");
-  for (const [id, rel, hash] of vRows) {
-    s.videoById.set(id, { id, rel, hash });
+    "SELECT id, rel_path, IFNULL(content_hash, ''), IFNULL(root_id, 0) FROM media_video;");
+  for (const [id, rel, hash, rootId] of vRows) {
+    const row = { id, rel, hash, rootId: Number(rootId) || null };
+    s.videoById.set(id, row);
     s.videoByRel.set(rel, id);
-    if (hash) s.videoByHash.set(hash, { id, rel });
+    if (hash) s.videoByHash.set(hash, row);
   }
 
+  // 图片行：hash 索引（认「同一份内容」）+ album 索引（判断册内哪些行已消失、要腾序号槽位）。
+  // 这里不再用 WHERE content_hash IS NOT NULL 过滤：没有哈希的老行同样需要参与
+  // 「消失 / 停泊」判断，否则它们会一直霸着 (album_id, seq) 把新图挡掉。
   const pRows = queryRows(o, mysqlExe, password,
-    "SELECT id, album_id, seq, rel_path, IFNULL(content_hash, '') FROM media_photo " +
-    'WHERE content_hash IS NOT NULL;');
-  for (const [id, albumId, seq, rel, hash] of pRows) {
-    if (!hash) continue;
-    const list = s.photoByHash.get(hash) || [];
-    list.push({ id, albumId, seq: Number(seq), rel });
-    s.photoByHash.set(hash, list);
+    'SELECT id, album_id, seq, rel_path, IFNULL(content_hash, \'\'), IFNULL(root_id, 0) FROM media_photo;');
+  for (const [id, albumId, seq, rel, hash, rootId] of pRows) {
+    const row = {
+      id, albumId, seq: Number(seq), rel, hash: hash || '',
+      rootId: Number(rootId) || null,
+    };
+    const byAlbum = s.photoByAlbum.get(albumId) || [];
+    byAlbum.push(row);
+    s.photoByAlbum.set(albumId, byAlbum);
+    if (!row.hash) continue;
+    const list = s.photoByHash.get(row.hash) || [];
+    list.push(row);
+    s.photoByHash.set(row.hash, list);
   }
 
   const aRows = queryRows(o, mysqlExe, password,
@@ -704,6 +746,22 @@ function recordAlias(ctx, table, hash, keepRel, rel, size) {
   ctx.dupList.push({ hash, keep: keepRel, drop: rel });
 }
 
+/**
+ * 旧行对应的文件现在还在不在磁盘上
+ *
+ * <p>同一个 content_hash 命中、rel_path 却不同时，只有这一条能区分两种截然不同的事实：</p>
+ * <ul>
+ *   <li>旧文件<b>还在</b> → 同内容的两份真实副本（复制出来的那份）；</li>
+ *   <li>旧文件<b>没了</b> → 改名 / 移动，库里的行应该跟着走，不能再多出一行。</li>
+ * </ul>
+ *
+ * <p>跨库根的旧行一律当「不在」处理：别的根没参与本次遍历，用本根的视角判断它会误判。</p>
+ */
+function stillOnDisk(prior, presentVideo, o) {
+  if (o.rootId !== null && prior.rootId !== null && prior.rootId !== o.rootId) return false;
+  return presentVideo.has(prior.rel);
+}
+
 function planVideos(videos, state, ctx) {
   const stats = ctx.stats;
   const rows = [];
@@ -720,8 +778,14 @@ function planVideos(videos, state, ctx) {
     }
     const hit = v.hash ? state.videoByHash.get(v.hash) : null;
     const pathId = crypto.createHash('sha1').update(v.rel, 'utf8').digest('hex').slice(0, 12);
+    if (hit && hit.rel !== v.rel && stillOnDisk(hit, ctx.present.video, ctx.o)) {
+      // 同一份内容在两处真实存在：media_video.content_hash 有唯一键，第二份只能进别名表
+      // （主表仍留在先入库的那条路径上，与「别名只在同一次扫描内记录」的旧行为一致）
+      recordAlias(ctx, 'media_video_alias', v.hash, hit.rel, v.rel, v.size);
+      continue;
+    }
     if (hit && hit.rel !== v.rel) {
-      // 命中内容哈希但路径变了：改名/移动，id 保持不变
+      // 命中内容哈希、旧文件已不在磁盘上：改名/移动，id 保持不变
       v.id = hit.id;
       v.movedFrom = hit.rel;
       state.videoByRel.delete(hit.rel);
@@ -744,30 +808,62 @@ function planVideos(videos, state, ctx) {
   return { rows, moves };
 }
 
+/**
+ * 相册内图片计划：认领旧行（更新/移动）、停泊已消失的行、判定同内容副本
+ *
+ * <p>三条规则，顺序不能换：</p>
+ * <ol>
+ *   <li><b>同路径优先</b>：hash 命中且旧行 rel_path 与磁盘一致 → 认领它（可能只是 seq 变了）；</li>
+ *   <li><b>旧文件没了 → 移动</b>：hash 命中但旧行路径不在本次扫描集合里，说明文件被改名/移动，
+ *       把那一行改到新路径与序号上（id 不变、不新增行、不留幽灵行）；</li>
+ *   <li><b>旧文件还在 → 副本</b>：同相册两张不同路径的同内容图，主表各占一行（相册张数与磁盘
+ *       一致），另把这条路径写进 media_photo_alias，管理端将来能按别名做去重。</li>
+ * </ol>
+ *
+ * <p>「停泊」（parks）：库里在本册、但本次扫描没在磁盘上找到的行，一律挪到
+ * {@code seq + PARK_BASE}。不挪的话 {@code (album_id, seq)} 唯一键会被残留行占着——
+ * 那正是 a006 出现「幽灵行」+ 新图插不进去的机制。行本身留着（missing=1），
+ * 由收尾的 missing 同步打标记，{@code --prune-missing --yes} 才真删。</p>
+ */
 function planPhotos(albums, state, ctx) {
   const stats = ctx.stats;
   const rows = [];
   const moves = [];
+  const parks = [];
   const claimed = new Set();
   // 册内同内容副本：只在「同一本相册」里才算重复（同一张图出现在不同相册是合法的，
   // 那是内容复用而不是重复文件）；主表照旧各占一行，册内张数与磁盘保持一致
   const seenInAlbum = new Map();
   for (const a of albums) {
+    for (const r of (state.photoByAlbum.get(a.id) || [])) {
+      if (r.seq >= PARK_BASE) continue;   // 上一次已经停泊过，别再往上加
+      if (ctx.present.photo.has(r.rel)) continue; // 文件还在：等它自己的那张图来认领
+      parks.push(r);
+    }
     a.photos.forEach((p, seq) => {
       p.seq = seq;
-      if (p.hash) {
-        const key = a.id + '\u0000' + p.hash;
-        const keep = seenInAlbum.get(key);
-        if (keep === undefined) seenInAlbum.set(key, p.rel);
-        else recordAlias(ctx, 'media_photo_alias', p.hash, keep, p.rel, p.bytes);
-      }
+      const key = a.id + '\u0000' + (p.hash || '');
       let prior = null;
+      let aliasKeep = null;
       if (p.hash) {
-        const cands = state.photoByHash.get(p.hash) || [];
-        prior = cands.find((r) => r.rel === p.rel && !claimed.has(r.id)) ||
-          cands.find((r) => !claimed.has(r.id)) || null;
+        const cands = (state.photoByHash.get(p.hash) || []).filter(
+          (r) => !claimed.has(r.id) &&
+            (ctx.o.rootId === null || r.rootId === null || r.rootId === ctx.o.rootId));
+        prior = cands.find((r) => r.rel === p.rel) || null;
+        if (!prior) {
+          const gone = cands.find((r) => !ctx.present.photo.has(r.rel));
+          if (gone) prior = gone;
+          else if (seenInAlbum.has(key)) aliasKeep = seenInAlbum.get(key);
+          else {
+            const same = cands.find((r) => r.albumId === a.id);
+            if (same) aliasKeep = same.rel;
+          }
+        }
       }
+      if (!seenInAlbum.has(key)) seenInAlbum.set(key, p.rel);
       if (!prior) {
+        // 新增行：只有「同册同内容、两份都在磁盘上」才写别名（跨册同内容是合法复用，不算重复）
+        if (aliasKeep) recordAlias(ctx, 'media_photo_alias', p.hash, aliasKeep, p.rel, p.bytes);
         rows.push({ albumId: a.id, seq, photo: p });
         stats.insert += 1;
         return;
@@ -784,13 +880,14 @@ function planPhotos(albums, state, ctx) {
       }
     });
   }
-  return { rows, moves };
+  return { rows, moves, parks };
 }
 
 function planImport(scan, state, o) {
   const stats = { insert: 0, move: 0, update: 0, dup: 0, skip: scan.skipped, alias: 0 };
   const dupList = [];
-  const ctx = { list: [], dupList, stats, o };
+  const present = scan.present || { photo: new Set(), video: new Set() };
+  const ctx = { list: [], dupList, stats, o, present };
   const claimed = new Set();
   const nextNo = { v: state.maxAlbumNo };
   const albums = [];
@@ -837,6 +934,7 @@ function planImport(scan, state, o) {
     movedVideos: videoPlan.moves,
     photoRows: photoPlan.rows,
     movedPhotos: photoPlan.moves,
+    parkedPhotos: photoPlan.parks,
     aliasList: ctx.list,
     dupList,
     stats,
@@ -844,6 +942,25 @@ function planImport(scan, state, o) {
 }
 
 // ---------------------------------------------------------------- 生成 SQL
+
+/**
+ * 缺失标记两列（missing / last_seen）的名字片段：老库还没执行 doc/media_missing.sql 时
+ * 一律退化成空串，生成的 SQL 与改动前逐字相同，不会因为缺列让整次扫描失败。
+ */
+function missingCols(o, withValues) {
+  if (!o.missingEnabled) return '';
+  return withValues ? ',last_seen,missing' : '';
+}
+
+function missingValues(o, withValues) {
+  if (!o.missingEnabled) return '';
+  return withValues ? ',NOW(),0' : '';
+}
+
+/** ON DUPLICATE KEY UPDATE 里「磁盘上又看到它了」的两列 */
+function missingTouch(o) {
+  return o.missingEnabled ? ',missing=0,last_seen=NOW()' : '';
+}
 
 function buildSql(model, o) {
   const lines = [
@@ -869,6 +986,12 @@ function buildSql(model, o) {
       lines.push("UPDATE media_video SET rel_path = CONCAT('~mv~', id) WHERE id IN (" + part.join(',') + ');');
     }
   }
+  // 1-b) 已消失的行先停泊出去：册内序号槽位要腾给真实文件，行留着（收尾会打 missing=1）
+  if (model.parkedPhotos && model.parkedPhotos.length) {
+    for (const part of chunks(model.parkedPhotos.map((r) => sqlInt(r.id)), 500)) {
+      lines.push('UPDATE media_photo SET seq = seq + ' + PARK_BASE + ' WHERE id IN (' + part.join(',') + ');');
+    }
+  }
   if (model.movedPhotos.length) {
     for (const part of chunks(model.movedPhotos.map((m) => sqlInt(m.photo.id)), 500)) {
       // 先把要移动的行挪到临时位置（album_id='' + 负 seq），否则册内序号轮换会撞 uk_photo_album_seq
@@ -880,15 +1003,16 @@ function buildSql(model, o) {
   const videoRows = model.videoRows.map((v) => '(' + [
     sqlStr(v.id), sqlStr(v.folder), sqlStr(v.rel), sqlStr(v.title), sqlInt(v.size),
     'NULL', 'NULL', 'NULL', 'NULL', sqlInt(v.browserOk), sqlStr(posterPathOf(v.id, v.hash)), '0',
-    sqlDateTime(v.mtimeMs), sqlStr(v.hash), sqlRoot(o.rootId),
+    sqlDateTime(v.mtimeMs), sqlStr(v.hash), sqlRoot(o.rootId) + missingValues(o, true),
   ].join(',') + ')');
   for (const part of chunks(videoRows, o.batch)) {
-    lines.push('INSERT INTO media_video (id,folder,rel_path,title,size,dur,w,h,vcodec,browser_ok,poster_path,hidden,mtime,content_hash,root_id) VALUES ' +
+    lines.push('INSERT INTO media_video (id,folder,rel_path,title,size,dur,w,h,vcodec,browser_ok,poster_path,hidden,mtime,content_hash,root_id' +
+      missingCols(o, true) + ') VALUES ' +
       part.join(',') +
       // dur/w/h/vcodec 不覆盖：本脚本不跑 ffprobe，别把别的工具填好的元数据清空
       ' AS n ON DUPLICATE KEY UPDATE folder=n.folder,rel_path=n.rel_path,title=n.title,' +
       'size=n.size,browser_ok=n.browser_ok,poster_path=n.poster_path,mtime=n.mtime,' +
-      'content_hash=n.content_hash,root_id=n.root_id;');
+      'content_hash=n.content_hash,root_id=n.root_id' + missingTouch(o) + ';');
   }
 
   // 3) 视频改名/移动：UPDATE 同一行，id 保持不变
@@ -898,7 +1022,7 @@ function buildSql(model, o) {
       ',size=' + sqlInt(v.size) + ',browser_ok=' + sqlInt(v.browserOk) +
       ',poster_path=' + sqlStr(posterPathOf(v.id, v.hash)) +
       ',mtime=' + sqlDateTime(v.mtimeMs) + ',content_hash=' + sqlStr(v.hash) +
-      ',root_id=' + sqlRoot(o.rootId) +
+      ',root_id=' + sqlRoot(o.rootId) + (o.missingEnabled ? ',missing=0,last_seen=NOW()' : '') +
       ' WHERE id=' + sqlStr(v.id) + ';');
   }
 
@@ -918,13 +1042,14 @@ function buildSql(model, o) {
   // 5) 图片 upsert（content_hash 一并写入）
   const photoRows = model.photoRows.map((r) => '(' + [
     sqlStr(r.albumId), sqlInt(r.seq), sqlStr(r.photo.rel), sqlInt(r.photo.bytes), 'NULL', 'NULL',
-    sqlInt(r.photo.isBig), '0', sqlStr(r.photo.hash), sqlRoot(o.rootId),
+    sqlInt(r.photo.isBig), '0', sqlStr(r.photo.hash), sqlRoot(o.rootId) + missingValues(o, true),
   ].join(',') + ')');
   for (const part of chunks(photoRows, o.batch)) {
-    lines.push('INSERT INTO media_photo (album_id,seq,rel_path,bytes,w,h,is_big,hidden,content_hash,root_id) VALUES ' + part.join(',') +
+    lines.push('INSERT INTO media_photo (album_id,seq,rel_path,bytes,w,h,is_big,hidden,content_hash,root_id' +
+      missingCols(o, true) + ') VALUES ' + part.join(',') +
       // w/h 不覆盖：本脚本不探测图片尺寸，别把别的工具填好的值清空
       ' AS n ON DUPLICATE KEY UPDATE rel_path=n.rel_path,bytes=n.bytes,is_big=n.is_big,' +
-      'content_hash=n.content_hash,root_id=n.root_id;');
+      'content_hash=n.content_hash,root_id=n.root_id' + missingTouch(o) + ';');
   }
 
   // 6) 图片改名/移动：UPDATE 同一行，并按新目录更新 album_id/seq
@@ -932,14 +1057,15 @@ function buildSql(model, o) {
     lines.push('UPDATE media_photo SET album_id=' + sqlStr(m.albumId) + ',seq=' + sqlInt(m.seq) +
       ',rel_path=' + sqlStr(m.photo.rel) + ',bytes=' + sqlInt(m.photo.bytes) +
       ',is_big=' + sqlInt(m.photo.isBig) + ',content_hash=' + sqlStr(m.photo.hash) +
-      ',root_id=' + sqlRoot(o.rootId) +
+      ',root_id=' + sqlRoot(o.rootId) + (o.missingEnabled ? ',missing=0,last_seen=NOW()' : '') +
       ' WHERE id=' + sqlInt(m.photo.id) + ';');
   }
 
-  // 7) 目录里删过图：把每本相册 seq >= 当前张数 的残留行清掉，否则相册会越重扫越多
+  // 7) 目录里删过图：把每本相册 seq >= 当前张数 的历史残留清掉，否则相册会越重扫越多。
+  //    seq >= PARK_BASE 的是已停泊的缺失行（要留着给管理端清理），绝不能在这里删掉。
   for (const a of model.albums) {
     lines.push('DELETE FROM media_photo WHERE album_id = ' + sqlStr(a.id) +
-      ' AND seq >= ' + sqlInt(a.photoCount) + ';');
+      ' AND seq >= ' + sqlInt(a.photoCount) + ' AND seq < ' + PARK_BASE + ';');
   }
   // 孤儿图（相册已被删掉）：保证「每张图都能找到相册」恒成立
   lines.push('DELETE p FROM media_photo p LEFT JOIN media_album a ON a.id = p.album_id WHERE a.id IS NULL;');
@@ -1155,11 +1281,217 @@ function runFixPosterPath(o) {
   return 0;
 }
 
+// ---------------------------------------------------------------- 缺失文件（missing）
+
+/**
+ * missing / last_seen 两列是否就位（doc/media_missing.sql）；没建就只 WARN：
+ * 老库照样能扫，只是不标记缺失、不执行 --prune-missing。
+ */
+function missingReady(o, mysqlExe, password) {
+  const rows = queryRows(o, mysqlExe, password,
+    "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'missing' " +
+    "AND table_name IN ('media_photo', 'media_video');");
+  const n = rows.length && rows[0].length ? Number(rows[0][0]) : 0;
+  if (n === 2) return true;
+  warn('media_photo / media_video 还没有 missing 列（先执行 doc/media_missing.sql）：' +
+    '本次不标记缺失文件、--prune-missing 也不生效');
+  return false;
+}
+
+/**
+ * 本次扫描的「库根范围」条件
+ *
+ * <p>多库根下绝不能拿 A 根的磁盘视角去标 B 根的行：显式 --root-id 时只认该根；
+ * 默认根（media_root 里 kind=root 的第一行）额外把 root_id IS NULL 的存量行算进来，
+ * 与后端「NULL = 默认根」的约定一致。</p>
+ */
+function rootScope(o) {
+  if (o.rootId === null) return 'root_id IS NULL';
+  if (o.rootIdIsDefault) return '(root_id = ' + sqlInt(o.rootId) + ' OR root_id IS NULL)';
+  return 'root_id = ' + sqlInt(o.rootId);
+}
+
+/** 落在 --exclude 目录里的行不参与缺失判定（本次遍历根本没进那些目录） */
+function excludedRel(rel, excludeSet) {
+  if (!rel) return true;
+  for (const seg of String(rel).split('/')) {
+    if (excludeSet.has(seg.toLowerCase())) return true;
+  }
+  return false;
+}
+
+/** 写库前的缺失状态快照：{photo:[{id,rel,missing}], video:[...]}（用来算 revived） */
+function loadMissingSnapshot(o, mysqlExe, password) {
+  const out = { photo: [], video: [] };
+  const scope = rootScope(o);
+  for (const kind of ['photo', 'video']) {
+    const table = kind === 'photo' ? 'media_photo' : 'media_video';
+    let last = '0';
+    for (;;) {
+      const rows = queryRows(o, mysqlExe, password,
+        'SELECT id, rel_path, missing FROM ' + table + ' WHERE ' + scope +
+        ' AND id > ' + sqlStr(last) + ' ORDER BY id LIMIT ' + sqlInt(PAGE) + ';');
+      if (!rows.length) break;
+      for (const [id, rel, miss] of rows) {
+        out[kind].push({ id, rel, missing: Number(miss) === 1 });
+        last = id;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 收尾：把「本次扫描看到的 rel_path」与库内行比对
+ *
+ * <ul>
+ *   <li>库里有、磁盘上没有 -> missing=1（last_seen 保持最后一次看到的时间，不刷新）；</li>
+ *   <li>磁盘上又有 -> missing=0 + last_seen=NOW()（复活）；</li>
+ *   <li>磁盘上还在 -> 由 upsert 的 missing=0 / last_seen=NOW() 顺手刷新，这里不重复写。</li>
+ * </ul>
+ *
+ * <p>默认只标记不删；要清掉幽灵行得用 --prune-missing --yes。</p>
+ */
+function applyMissing(o, mysqlExe, password, present, snapshot) {
+  const out = { missing: 0, revived: 0, marked: 0 };
+  if (!snapshot) return out;
+  const scope = rootScope(o);
+  // 判定必须用「写库之后」的 rel_path：本次扫描可能把旧行移动到了新路径（改名/复活），
+  // 拿写库前的路径去比对，会把刚移动好的行误标成缺失。
+  const after = loadMissingSnapshot(o, mysqlExe, password);
+  const beforeById = new Map();
+  for (const kind of ['photo', 'video']) {
+    for (const r of (snapshot[kind] || [])) beforeById.set(kind + ':' + r.id, r);
+  }
+  for (const kind of ['photo', 'video']) {
+    const table = kind === 'photo' ? 'media_photo' : 'media_video';
+    const rows = after[kind] || [];
+    const mark = [];
+    const revive = [];
+    let still = 0;
+    for (const r of rows) {
+      if (excludedRel(r.rel, o.excludeSet)) continue;
+      const wasMissing = (beforeById.get(kind + ':' + r.id) || {}).missing === true;
+      if (present[kind].has(r.rel)) {
+        // 复活：上一次是缺失、这次磁盘上又有了（正常路径下 upsert/移动已把 missing 清 0）
+        if (wasMissing) out.revived += 1;
+        if (r.missing) revive.push(r);
+      } else if (r.missing) {
+        still += 1;
+      } else {
+        mark.push(r);
+      }
+    }
+    const stmts = [];
+    for (const part of chunks(mark.map((r) => sqlStr(r.id)), o.batch)) {
+      stmts.push('UPDATE ' + table + ' SET missing = 1 WHERE missing = 0 AND ' + scope +
+        ' AND id IN (' + part.join(',') + ');');
+    }
+    for (const part of chunks(revive.map((r) => sqlStr(r.id)), o.batch)) {
+      stmts.push('UPDATE ' + table + ' SET missing = 0, last_seen = NOW() WHERE missing = 1' +
+        ' AND id IN (' + part.join(',') + ');');
+    }
+    if (stmts.length) {
+      const res = runMysql(o, mysqlExe, password,
+        'START TRANSACTION;\n' + stmts.join('\n') + '\nCOMMIT;\n');
+      if (res.status !== 0) {
+        warn('缺失标记同步失败（' + table + '）：' + (res.stderr || '').trim());
+        continue;
+      }
+    }
+    out.marked += mark.length;
+    out.missing += still + mark.length;
+    if (mark.length || revive.length) {
+      log('MISSING ' + table + ' 新标记=' + mark.length + ' 复活=' + revive.length +
+        ' 仍缺失=' + (still + mark.length));
+    }
+  }
+  return out;
+}
+
+/** 库里存在这些表（视频附属行清理前先确认，老库可能还没建） */
+function existingTables(o, mysqlExe, password, names) {
+  const list = names.map((n) => sqlStr(n)).join(',');
+  const rows = queryRows(o, mysqlExe, password,
+    'SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() ' +
+    'AND table_name IN (' + list + ');');
+  const set = new Set();
+  for (const r of rows) if (r.length) set.add(r[0]);
+  return set;
+}
+
+/**
+ * --prune-missing：把 missing=1 的行真删（磁盘上本来就没有文件，回收站无从谈起）
+ *
+ * <p>删除前打印 TOP 10 与总数；不带 --yes 只打印不删。视频的附属行（标签 / 演员 / 标记）
+ * 一并清掉，避免留下指向已删视频的孤儿行。</p>
+ */
+function pruneMissingRows(o, mysqlExe, password) {
+  const scope = rootScope(o);
+  const out = { photo: 0, video: 0, deleted: 0 };
+  for (const kind of ['photo', 'video']) {
+    const table = kind === 'photo' ? 'media_photo' : 'media_video';
+    const totalRows = queryRows(o, mysqlExe, password,
+      'SELECT COUNT(*) FROM ' + table + ' WHERE ' + scope + ' AND missing = 1;');
+    const total = totalRows.length && totalRows[0].length ? Number(totalRows[0][0]) : 0;
+    if (!total) {
+      log('PRUNE ' + table + '=0');
+      continue;
+    }
+    const top = queryRows(o, mysqlExe, password,
+      "SELECT id, rel_path, IFNULL(last_seen, '') FROM " + table + ' WHERE ' + scope +
+      ' AND missing = 1 ORDER BY rel_path LIMIT 10;');
+    log('PRUNE ' + table + '=' + total + '（TOP ' + Math.min(10, total) + '）');
+    for (const [id, rel, seen] of top) {
+      log('  MISSING ' + kind + ' id=' + id + ' rel=' + rel + (seen ? ' last-seen=' + seen : ''));
+    }
+    if (!o.yes) {
+      log('  --prune-missing 未带 --yes：只列出、不删除（确认无误后加 --yes）');
+      continue;
+    }
+    const idRows = queryRows(o, mysqlExe, password,
+      'SELECT id FROM ' + table + ' WHERE ' + scope + ' AND missing = 1;');
+    const ids = idRows.map((r) => (r.length ? r[0] : null)).filter(Boolean);
+    const stmts = [];
+    if (kind === 'video' && ids.length) {
+      const ready = existingTables(o, mysqlExe, password,
+        ['media_video_tag', 'media_video_actor', 'media_video_marker']);
+      for (const dep of ['media_video_tag', 'media_video_actor', 'media_video_marker']) {
+        if (!ready.has(dep)) continue;
+        for (const part of chunks(ids.map((x) => sqlStr(x)), o.batch)) {
+          stmts.push('DELETE FROM ' + dep + ' WHERE video_id IN (' + part.join(',') + ');');
+        }
+      }
+    }
+    stmts.push('DELETE FROM ' + table + ' WHERE ' + scope + ' AND missing = 1;');
+    const res = runMysql(o, mysqlExe, password,
+      'START TRANSACTION;\n' + stmts.join('\n') + '\nCOMMIT;\n');
+    if (res.status !== 0) {
+      warn('清理缺失行失败（' + table + '）：' + (res.stderr || '').trim());
+      continue;
+    }
+    const after = queryRows(o, mysqlExe, password,
+      'SELECT COUNT(*) FROM ' + table + ' WHERE ' + scope + ' AND missing = 1;');
+    const left = after.length && after[0].length ? Number(after[0][0]) : 0;
+    const removed = Math.max(0, total - left);
+    out[kind] = removed;
+    out.deleted += removed;
+    log('PRUNE ' + table + ' removed=' + removed);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------- 主流程
 
-function statsLine(stats) {
+/**
+ * 汇总行（管理端按 key=value 逐项取值，只加键、不改既有键）
+ *
+ * @param miss {missing, revived} 缺失同步结果；未写库（dry-run / dump-sql）时传 null，两键给 '-'
+ */
+function statsLine(stats, miss) {
   return '新插入=' + stats.insert + ' 移动=' + stats.move + ' 更新=' + stats.update +
-    ' 重复=' + stats.dup + ' 跳过=' + stats.skip + ' 别名=' + stats.alias;
+    ' 重复=' + stats.dup + ' 跳过=' + stats.skip + ' 别名=' + stats.alias +
+    ' missing=' + (miss ? miss.missing : '-') + ' revived=' + (miss ? miss.revived : '-');
 }
 
 function printDups(dupList) {
@@ -1204,9 +1536,13 @@ function main() {
     state = o.truncate ? emptyState() : loadState(o, mysqlExe, password);
     o.rootId = resolveRootId(o, mysqlExe, password);
     o.aliasEnabled = aliasTablesReady(o, mysqlExe, password);
+    // 缺失标记两列没建时整段降级：生成的 SQL 与改动前逐字相同
+    o.missingEnabled = o.truncate ? false : missingReady(o, mysqlExe, password);
   } else {
-    // dry-run / dump-sql 不连库：按「别名表已建」生成 SQL（执行前请确认已 source media_dup_alias.sql）
+    // dry-run / dump-sql 不连库：按「别名表 / missing 列已建」生成 SQL
+    // （执行前请确认已 source media_dup_alias.sql 与 doc/media_missing.sql）
     o.aliasEnabled = true;
+    o.missingEnabled = true;
   }
 
   const scan = scanDisk(root, o);
@@ -1239,12 +1575,17 @@ function main() {
     if (all.length - 1 > 20) log('  | …还有 ' + (all.length - 1 - 20) + ' 行，见文件');
   }
   if (o.dryRun || o.dumpSql) {
-    log(statsLine(model.stats));
+    log(statsLine(model.stats, null));
+    if (o.missingEnabled) {
+      log('（未写库：missing / revived 只在真实运行时同步，dump 出来的 SQL 不含这段收尾）');
+    }
     printDups(model.dupList);
     printAliases(model.aliasList);
     return 0;
   }
 
+  // 写库前先记下 missing 现状：复活（revived）要跟「上一次的状态」比才算得出来
+  const missSnap = o.missingEnabled ? loadMissingSnapshot(o, mysqlExe, password) : null;
   const sql = buildSql(model, o);
   const r = runMysql(o, mysqlExe, password, sql);
   if (r.status !== 0) {
@@ -1253,12 +1594,24 @@ function main() {
   }
   log('== 写库完成 ' + o.db + '@' + o.host + ':' + o.port + '（' + scan.videos.length + ' 视频 / ' +
     model.albums.length + ' 相册 / ' + photoCount + ' 图）');
+  // 收尾：库里有、磁盘没有 -> missing=1；磁盘又有了 -> missing=0（复活）
+  const missOut = o.missingEnabled
+    ? applyMissing(o, mysqlExe, password, scan.present, missSnap)
+    : { missing: 0, revived: 0 };
   log(queryCounts(o, mysqlExe, password));
-  log(statsLine(model.stats));
+  log(statsLine(model.stats, missOut));
   log('相册 复用=' + model.albums.filter((a) => a.reused).length +
     ' 新建=' + model.albums.filter((a) => !a.reused).length);
   printDups(model.dupList);
   printAliases(model.aliasList);
+  if (o.pruneMissing) {
+    if (!o.missingEnabled) {
+      warn('--prune-missing 未执行：missing 列还没建（先 source doc/media_missing.sql）');
+    } else {
+      const pruned = pruneMissingRows(o, mysqlExe, password);
+      log('清理缺失行 deleted=' + pruned.deleted + '（photo=' + pruned.photo + ' video=' + pruned.video + '）');
+    }
+  }
   log('== 下一步：node build-thumbs.js --root=' + root + ' --thumbs=<缩略图根>');
   return 0;
 }

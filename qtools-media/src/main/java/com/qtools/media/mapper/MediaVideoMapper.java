@@ -16,8 +16,12 @@ import com.qtools.media.domain.MediaVideoTag;
  */
 public interface MediaVideoMapper
 {
-    /** 查询全部未隐藏视频，按分类/标题升序 */
-    List<MediaVideo> selectVideoList();
+    /**
+     * 查询全部未隐藏视频，按分类/标题升序
+     *
+     * @param includeMissing 默认 true（缺失行照旧带出，前端自行过滤）；false 时服务端加 missing = 0
+     */
+    List<MediaVideo> selectVideoList(@Param("includeMissing") Boolean includeMissing);
 
     /** 按 id 查询单个未隐藏视频 */
     MediaVideo selectVideoById(String id);

@@ -87,25 +87,33 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     @Autowired
     private IMediaFileService mediaFileService;
 
-    private volatile MediaIndexSnapshot snapshot;
+    /** 快照缓存：两种 includeMissing 取值各存一份（默认 true 的那份才是老行为） */
+    private final Map<Boolean, MediaIndexSnapshot> snapshots = new java.util.concurrent.ConcurrentHashMap<>();
 
     @Override
     public MediaIndexSnapshot indexSnapshot()
     {
-        MediaIndexSnapshot cached = snapshot;
+        return indexSnapshot(true);
+    }
+
+    @Override
+    public MediaIndexSnapshot indexSnapshot(boolean includeMissing)
+    {
+        Boolean key = Boolean.valueOf(includeMissing);
+        MediaIndexSnapshot cached = snapshots.get(key);
         if (cached != null && System.currentTimeMillis() - cached.getBuiltAt() < CACHE_TTL_MS)
         {
             return cached;
         }
         synchronized (this)
         {
-            cached = snapshot;
+            cached = snapshots.get(key);
             if (cached != null && System.currentTimeMillis() - cached.getBuiltAt() < CACHE_TTL_MS)
             {
                 return cached;
             }
             long start = System.currentTimeMillis();
-            Map<String, Object> data = buildIndex();
+            Map<String, Object> data = buildIndex(includeMissing);
             byte[] body;
             try
             {
@@ -117,9 +125,9 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             }
             MediaIndexSnapshot fresh = new MediaIndexSnapshot(body, "\"idx-" + digest(body) + "\"",
                     System.currentTimeMillis());
-            snapshot = fresh;
-            log.info("媒体索引重建完成 size={}B cost={}ms etag={}", body.length, System.currentTimeMillis() - start,
-                    fresh.getEtag());
+            snapshots.put(key, fresh);
+            log.info("媒体索引重建完成 includeMissing={} size={}B cost={}ms etag={}", includeMissing, body.length,
+                    System.currentTimeMillis() - start, fresh.getEtag());
             return fresh;
         }
     }
@@ -148,6 +156,12 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     @Override
     public Map<String, Object> selectAlbumDetail(String id)
     {
+        return selectAlbumDetail(id, true);
+    }
+
+    @Override
+    public Map<String, Object> selectAlbumDetail(String id, boolean includeMissing)
+    {
         MediaAlbum album = mediaAlbumMapper.selectAlbumById(id);
         if (album == null)
         {
@@ -155,7 +169,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         }
         Map<Long, String> personNames = loadPersonNames();
         List<Map<String, Object>> photos = new ArrayList<>();
-        for (MediaPhoto photo : mediaPhotoMapper.selectPhotoListByAlbumId(id))
+        for (MediaPhoto photo : mediaPhotoMapper.selectPhotoListByAlbumId(id, Boolean.valueOf(includeMissing)))
         {
             photos.add(toPhotoNode(photo));
         }
@@ -165,14 +179,15 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     @Override
     public void invalidateSnapshot()
     {
-        snapshot = null;
+        snapshots.clear();
     }
 
     // ------------------------------------------------------------------ 构建
 
-    private Map<String, Object> buildIndex()
+    private Map<String, Object> buildIndex(boolean includeMissing)
     {
-        List<MediaVideo> videos = mediaVideoMapper.selectVideoList();
+        Boolean keepMissing = Boolean.valueOf(includeMissing);
+        List<MediaVideo> videos = mediaVideoMapper.selectVideoList(keepMissing);
         Map<String, List<String[]>> tagsByVideo = new HashMap<>();
         Set<String> facets = new LinkedHashSet<>();
         for (MediaVideoTag tag : mediaVideoMapper.selectTagList())
@@ -208,7 +223,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         List<MediaAlbum> albums = mediaAlbumMapper.selectAlbumList();
         Map<String, List<Map<String, Object>>> photosByAlbum = new HashMap<>();
         int photoCount = 0;
-        for (MediaPhoto photo : mediaPhotoMapper.selectPhotoList())
+        for (MediaPhoto photo : mediaPhotoMapper.selectPhotoList(keepMissing))
         {
             photosByAlbum.computeIfAbsent(photo.getAlbumId(), k -> new ArrayList<>()).add(toPhotoNode(photo));
             photoCount++;
@@ -369,12 +384,24 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         return node;
     }
 
+    /**
+     * 相册内一张图：{@code rel / i / big / hash}
+     *
+     * <p>{@code hash} = media_photo.content_hash（P4 起缩略图按内容寻址 p/&lt;hash&gt;.jpg）。
+     * 前端可以拿它直接拼 {@code /api/media/thumb/p/<albumId>/<hash>}，也可以继续用
+     * {@code /thumb/p/<albumId>/<i>}——服务端两种都会先找 {@code p/<hash>.jpg} 再回退老命名。
+     * 哈希未回填时<b>整键不输出</b>（老库索引体积一个字节都不涨）。</p>
+     */
     private Map<String, Object> toPhotoNode(MediaPhoto photo)
     {
         Map<String, Object> node = new LinkedHashMap<>();
         node.put("rel", photo.getRelPath());
         node.put("i", photo.getSeq());
         node.put("big", isTrue(photo.getIsBig()));
+        if (StringUtils.isNotEmpty(photo.getContentHash()))
+        {
+            node.put("hash", photo.getContentHash());
+        }
         return node;
     }
 

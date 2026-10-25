@@ -1,5 +1,7 @@
 package com.qtools.media.domain;
 
+import java.util.Date;
+
 /**
  * 媒体图片 media_photo
  *
@@ -40,6 +42,18 @@ public class MediaPhoto
 
     /** 是否隐藏（1/0）；仅管理端查询会填充 */
     private Integer hidden;
+
+    /**
+     * 文件是否已消失（1=缺失 / 0=正常）
+     *
+     * <p>由 {@code doc/media_missing.sql} 加的列，{@code doc/media-import/scan-media.js} 在每次
+     * 真实扫描的收尾阶段维护：库里有、磁盘上没有的行置 1，磁盘上又出现（复活）置回 0。
+     * 用户端与索引默认仍然带出这些行（{@code includeMissing=true}），由前端自行过滤。</p>
+     */
+    private Integer missing;
+
+    /** 最后一次在磁盘上看到该文件的扫描时间（缺失行即「最后 seen」） */
+    private Date lastSeen;
 
     public Long getId()
     {
@@ -149,5 +163,25 @@ public class MediaPhoto
     public void setHidden(Integer hidden)
     {
         this.hidden = hidden;
+    }
+
+    public Integer getMissing()
+    {
+        return missing;
+    }
+
+    public void setMissing(Integer missing)
+    {
+        this.missing = missing;
+    }
+
+    public Date getLastSeen()
+    {
+        return lastSeen;
+    }
+
+    public void setLastSeen(Date lastSeen)
+    {
+        this.lastSeen = lastSeen;
     }
 }
