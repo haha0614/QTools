@@ -145,11 +145,29 @@ public class MediaPlaylistServiceImpl implements IMediaPlaylistService
     @Override
     public Map<String, Object> addItem(String ownerKey, Long id, String videoId)
     {
+        return addItems(ownerKey, id, java.util.Arrays.asList(videoId));
+    }
+
+    @Override
+    public Map<String, Object> addItems(String ownerKey, Long id, List<String> videoIds)
+    {
         MediaPlaylist playlist = requireReadable(ownerKey, id);
-        String video = requireVideoId(videoId);
-        boolean added = false;
-        if (mediaPlaylistItemMapper.countByPlaylistAndVideo(playlist.getId(), video) == 0)
+        // 保序去重：一次请求里给了同一个 id 两遍不该撞唯一键
+        LinkedHashSet<String> unique = new LinkedHashSet<>();
+        for (String raw : videoIds)
         {
+            unique.add(requireVideoId(raw));
+        }
+        List<String> addedIds = new ArrayList<>();
+        List<String> skippedIds = new ArrayList<>();
+        for (String video : unique)
+        {
+            if (mediaPlaylistItemMapper.countByPlaylistAndVideo(playlist.getId(), video) > 0)
+            {
+                // 幂等：同一视频重复加入是 no-op，不是 409（前端把它当「已加入」，不是失败）
+                skippedIds.add(video);
+                continue;
+            }
             Integer maxSeq = mediaPlaylistItemMapper.selectMaxSeq(playlist.getId());
             int seq = maxSeq == null ? 0 : maxSeq.intValue() + 1;
             if (seq >= MAX_ITEMS)
@@ -157,11 +175,16 @@ public class MediaPlaylistServiceImpl implements IMediaPlaylistService
                 throw MediaException.conflict("播放列表条目已达上限 " + MAX_ITEMS);
             }
             insertItem(playlist.getId(), video, seq);
+            addedIds.add(video);
+        }
+        if (!addedIds.isEmpty())
+        {
             mediaPlaylistMapper.touchById(playlist.getId());
-            added = true;
         }
         Map<String, Object> view = detailView(playlist);
-        view.put("added", added);
+        view.put("added", !addedIds.isEmpty());
+        view.put("addedIds", addedIds);
+        view.put("skippedIds", skippedIds);
         return view;
     }
 

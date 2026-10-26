@@ -91,6 +91,20 @@ public class MediaVideo
      */
     private Integer rating;
 
+    /**
+     * 作品简介 / 剧情梗概（P5.38，长文本，保留换行；{@code null} = 没有简介）
+     *
+     * <p>由 {@code media_video.synopsis}（TEXT NULL，见 {@code doc/media_synopsis.sql}）承载。
+     * 与 {@link #rating} 一样是<b>人工属性</b>：扫描脚本从不写这一列，重建索引不会冲掉；
+     * 写入只走站端 {@code PUT /api/media/video/{id}/synopsis} 与管理端
+     * {@code PUT /api/media/admin/videos/{id}/synopsis}（上限 8000 字符，纯空白归一化成 null）。</p>
+     *
+     * <p>为什么列表查询（{@link com.qtools.media.mapper.MediaVideoMapper#selectVideoList}）
+     * <b>不取</b>这一列：索引体量按「全部视频」计，一条 8KB 正文乘几万 = 几十 MB，
+     * 而索引里的条目从不输出 synopsis；只有单片详情 / 简介接口才按需读它。</p>
+     */
+    private String synopsis;
+
     public String getId()
     {
         return id;
@@ -279,6 +293,16 @@ public class MediaVideo
     public void setRating(Integer rating)
     {
         this.rating = rating;
+    }
+
+    public String getSynopsis()
+    {
+        return synopsis;
+    }
+
+    public void setSynopsis(String synopsis)
+    {
+        this.synopsis = synopsis;
     }
 
     public Integer getMissing()

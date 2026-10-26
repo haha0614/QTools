@@ -79,6 +79,9 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
     /** 字典标签在 media_video_tag 里固定的 facet 值（扫描脚本从不用它） */
     private static final String FACET_TAG = "标签";
 
+    /** 作品简介长度上限（字符数，不是字节：CJK / emoji 各算 1 个字；列是 TEXT，装得下） */
+    private static final int SYNOPSIS_MAX = 8000;
+
     @Autowired
     private MediaOrganizeMapper mediaOrganizeMapper;
 
@@ -353,6 +356,89 @@ public class MediaOrganizeServiceImpl implements IMediaOrganizeService
             invalidateIndex();
         }
         return metaNode(video);
+    }
+
+    // ------------------------------------------------------------------ 作品简介（P5.38）
+
+    @Override
+    public Map<String, Object> videoSynopsis(String videoId)
+    {
+        MediaVideo video = requireVideo(videoId);
+        return synopsisNode(video.getId(), trimToNull(mediaOrganizeMapper.selectSynopsisById(video.getId())));
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> updateVideoSynopsis(String videoId, String synopsis)
+    {
+        MediaVideo video = requireVideo(videoId);
+        String clean = normalizeSynopsis(synopsis);
+        mediaOrganizeMapper.updateSynopsis(video.getId(), clean);
+        // 索引里已经有该片的条目：简介虽然不进索引，但同一部片的数据必须同一个快照口径
+        invalidateIndex();
+        log.info("视频 {} 作品简介已更新：{} 字符（0 = 清空）", video.getId(),
+                Integer.valueOf(clean == null ? 0 : clean.codePointCount(0, clean.length())));
+        return synopsisNode(video.getId(), clean);
+    }
+
+    /**
+     * 简介规范化：trim 首尾空白（含换行 / 全角空格），纯空白 → null（= 清空），
+     * 内部换行原样保留；按 {@link String#codePointCount} 计字符，超过 {@link #SYNOPSIS_MAX} 抛 400。
+     */
+    private static String normalizeSynopsis(String raw)
+    {
+        if (raw == null)
+        {
+            return null;
+        }
+        String text = stripSpaces(raw);
+        if (text.isEmpty())
+        {
+            return null;
+        }
+        int chars = text.codePointCount(0, text.length());
+        if (chars > SYNOPSIS_MAX)
+        {
+            throw MediaException.badRequest("简介最多 " + SYNOPSIS_MAX + " 字符，本次 " + chars + " 字符");
+        }
+        return text;
+    }
+
+    /**
+     * 去首尾空白：{@code Character.isWhitespace} 之外再收 {@code isSpaceChar}
+     *
+     * <p>为什么不直接用 {@link String#strip()}：{@code strip()} 只认 {@code isWhitespace}，
+     * 而 U+00A0（不换行空格）/ U+2007 这类 {@code Zs} 字符不算 whitespace —— 复制粘贴来的正文
+     * 首尾常带它们，用 strip() 会留一个「看不见的字符」，于是「纯空白视为清空」这条契约失效
+     * （库里多出一行只含 NBSP 的简介，前端渲染成空白块）。这里两种判定取并集。</p>
+     */
+    private static String stripSpaces(String value)
+    {
+        int start = 0;
+        int end = value.length();
+        while (start < end && isBlankChar(value.charAt(start)))
+        {
+            start++;
+        }
+        while (end > start && isBlankChar(value.charAt(end - 1)))
+        {
+            end--;
+        }
+        return value.substring(start, end);
+    }
+
+    private static boolean isBlankChar(char c)
+    {
+        return Character.isWhitespace(c) || Character.isSpaceChar(c);
+    }
+
+    /** 简介回包：{@code {id, synopsis}}（null = 没有简介，不是空串） */
+    private static Map<String, Object> synopsisNode(String videoId, String synopsis)
+    {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", videoId);
+        out.put("synopsis", synopsis);
+        return out;
     }
 
     @Override

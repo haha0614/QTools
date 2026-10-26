@@ -91,6 +91,19 @@ public interface MediaOrganizeMapper
     /** 批量覆盖评分（同一分值）；rating 为 null = 批量清空 */
     int batchUpdateRating(@Param("ids") List<String> ids, @Param("rating") Integer rating);
 
+    // ------------------------------------------------------------------ 作品简介（P5.38）
+
+    /**
+     * 单片作品简介（{@code synopsis} 列；<b>不过滤 hidden</b>，与服务层 requireVideo 口径一致）
+     *
+     * <p>为什么不复用 {@code MediaVideoMapper.selectVideoById}：那条 SQL 带 {@code hidden = 0}，
+     * 简介的读接口要和管理端一样能读到软删行的正文（管理员改完再删也不该读不到自己写的字）。</p>
+     */
+    String selectSynopsisById(@Param("id") String id);
+
+    /** 覆盖写入简介；{@code synopsis} 传 null = 清空（纯空白在服务层已归一化成 null） */
+    int updateSynopsis(@Param("id") String id, @Param("synopsis") String synopsis);
+
     // ------------------------------------------------------------------ 标记
 
     List<MediaVideoMarker> selectMarkersByVideoId(@Param("videoId") String videoId);

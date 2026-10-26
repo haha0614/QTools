@@ -100,6 +100,29 @@ public final class MediaBodyParser
         }
     }
 
+    /**
+     * 长文本（作品简介 / 剧情梗概，P5.38）：只做类型检查，<b>不 trim、不折叠换行</b>
+     *
+     * <p>与 {@link #stringValue} 的区别：那个是「短标记」口径（trim + 空串归一化成 null），
+     * 会把多行正文的首尾换行悄悄吃掉；简介的长度 / 空白 / 上限校验全部在服务层一处完成，
+     * 这里只负责挡住「传了对象 / 数组」这种前端 bug（400，而不是把 toString 当正文存进去）。</p>
+     *
+     * @param field 字段名（错误提示用）
+     * @return 原样字符串；显式 null 原样返回（= 清空）
+     */
+    public static String textValue(Object value, String field)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        if (!(value instanceof String))
+        {
+            throw MediaException.badRequest(field + " 必须是字符串");
+        }
+        return (String) value;
+    }
+
     public static String stringValue(Object value)
     {
         if (value == null)

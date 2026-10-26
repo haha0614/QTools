@@ -24,6 +24,7 @@ import static com.qtools.media.support.MediaBodyParser.metaPatch;
 import static com.qtools.media.support.MediaBodyParser.parseObject;
 import static com.qtools.media.support.MediaBodyParser.rolesValue;
 import static com.qtools.media.support.MediaBodyParser.stringValue;
+import static com.qtools.media.support.MediaBodyParser.textValue;
 
 /**
  * 媒体站「站端编辑」接口（前缀 /api/media，全部免登录）
@@ -56,6 +57,7 @@ import static com.qtools.media.support.MediaBodyParser.stringValue;
  *   <li>{@code PUT /media/video/{id}/meta} 单条元数据补丁</li>
  *   <li>{@code PUT /media/video/{id}/persons} 演员与角色全量替换（P5.3-A）</li>
  *   <li>{@code POST /media/videos/batch-meta} 批量补丁</li>
+ *   <li>{@code PUT /media/video/{id}/synopsis} 作品简介 / 剧情梗概（P5.38）</li>
  * </ul>
  * <p>人物只读四件套（清单 / 详情 / 名下视频 / 名下相册）仍在 {@link MediaPersonController}，
  * 那里类级说明写着「只读」——所以人物<b>写</b>接口故意放在本类，与闸门同处一个文件。</p>
@@ -93,6 +95,19 @@ public class MediaEditController
     public List<Map<String, Object>> tags()
     {
         return mediaOrganizeService.tagList();
+    }
+
+    /**
+     * 站端读作品简介：{@code {id, synopsis}}（{@code synopsis} 为 null = 暂无简介）
+     *
+     * <p>读接口<b>不看策略</b>（与 {@code GET /edit-policy}、{@code GET /tags} 同档）：
+     * off 档站端也是「只读」而不是「什么都不给看」，信息栏要能显示已有简介。
+     * 换行原样返回，前端用 {@code white-space: pre-wrap} 渲染。</p>
+     */
+    @GetMapping("/video/{id}/synopsis")
+    public Map<String, Object> videoSynopsis(@PathVariable("id") String id)
+    {
+        return mediaOrganizeService.videoSynopsis(id);
     }
 
     // ------------------------------------------------------------------ 写（策略 = full 才放行）
@@ -190,6 +205,30 @@ public class MediaEditController
         }
         return personBindingNode(id, mediaPersonService.replaceVideoPersons(id, personIds,
                 rolesValue(body.get("roles"), "roles")));
+    }
+
+    /**
+     * 站端写作品简介：body {@code {synopsis}}（null 或空串 = 清空）→ {@code {id, synopsis}}
+     *
+     * <p>业务全部复用 {@link IMediaOrganizeService#updateVideoSynopsis(String, String)}：长度上限 8000
+     * <b>字符</b>（超限 400）、纯空白归一化成 NULL、换行保留、写完 {@code invalidateSnapshot()}。
+     * 闸门在第一行：非 full 档位下连「body 解析」都不会发生，公网匿名访客拿不到参数校验细节。</p>
+     *
+     * <p>为什么单独一个 {@code /synopsis} 接口而不是塞进 {@code PUT /video/{id}/meta}：
+     * meta 是「评分 / 标签 / 标记」的补丁口径（每次都会回整份元数据），简介是 8KB 级正文，
+     * 两件事的读频率、体积、失败重试语义都不一样；拆开后 meta 的回包体量与老前端行为一字不变。</p>
+     */
+    @PutMapping("/video/{id}/synopsis")
+    public Map<String, Object> updateVideoSynopsis(@PathVariable("id") String id,
+            @RequestBody(required = false) String rawBody)
+    {
+        mediaEditPolicyService.requireWritable();
+        Map<String, Object> body = parseObject(rawBody, true);
+        if (!body.containsKey("synopsis"))
+        {
+            throw MediaException.badRequest("synopsis 必填（null 或空串 = 清空）");
+        }
+        return mediaOrganizeService.updateVideoSynopsis(id, textValue(body.get("synopsis"), "synopsis"));
     }
 
     /**

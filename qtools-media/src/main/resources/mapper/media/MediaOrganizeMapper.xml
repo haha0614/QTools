@@ -167,6 +167,18 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
     </update>
 
+    <!-- ================================================================ 作品简介（P5.38） -->
+
+    <!-- 不过滤 hidden：与 requireVideo（mediaAdminMapper.selectVideoAnyById）同一口径 -->
+    <select id="selectSynopsisById" resultType="java.lang.String">
+        select synopsis from media_video where id = #{id} limit 1
+    </select>
+
+    <!-- 覆盖式写入；null = 清空（纯空白在服务层归一化成 null） -->
+    <update id="updateSynopsis">
+        update media_video set synopsis = #{synopsis} where id = #{id}
+    </update>
+
     <!-- ================================================================ 标记 -->
 
     <!-- 标记按 pos 升序（同 pos 按 id）；end_pos 为 NULL 的行 = 单点标记（老数据全是这种） -->

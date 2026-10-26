@@ -461,6 +461,14 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         {
             node.put("studios", studios);
         }
+        // 作品简介（P5.38）：非空才输出，与 rating / persons / studios 同一约定。
+        // 列表查询不 select synopsis（见 MediaVideoMapper.xml 的 videoColumns），
+        // 所以 /api/media/index 的条目永远不会带这个键 —— 体积不变；
+        // 只有单片详情（GET /api/media/video/{id}）会带上，信息栏首屏一次请求即可渲染。
+        if (video.getSynopsis() != null && !video.getSynopsis().isEmpty())
+        {
+            node.put("synopsis", video.getSynopsis());
+        }
         node.put("poster", video.getPosterPath());
         node.put("doc", video.getDocPath());
         node.put("sub", video.getSubPath());

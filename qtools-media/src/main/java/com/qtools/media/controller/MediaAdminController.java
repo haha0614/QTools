@@ -59,6 +59,7 @@ import static com.qtools.media.support.MediaBodyParser.parseObject;
 import static com.qtools.media.support.MediaBodyParser.stringValue;
 import static com.qtools.media.support.MediaBodyParser.stringsValue;
 import static com.qtools.media.support.MediaBodyParser.studioPatch;
+import static com.qtools.media.support.MediaBodyParser.textValue;
 
 /**
  * 管理端媒体库接口（前缀 /api/media/admin）
@@ -783,6 +784,44 @@ public class MediaAdminController extends BaseController
     public Map<String, Object> batchMeta(@RequestBody(required = false) String rawBody)
     {
         return mediaOrganizeService.batchMeta(metaPatch(parseObject(rawBody, true), true));
+    }
+
+    /**
+     * 单片作品简介（P5.38）：{@code {id, synopsis}}，{@code synopsis} 为 null = 暂无简介
+     *
+     * <p>站端有同名的匿名读接口 {@code GET /api/media/video/{id}/synopsis}；
+     * 管理端这份给「后台逐条核对文案」用（可读软删行：读接口不过滤 hidden）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/video/{id}/synopsis")
+    public Map<String, Object> videoSynopsis(@PathVariable("id") String id)
+    {
+        return mediaOrganizeService.videoSynopsis(id);
+    }
+
+    /**
+     * 写单片作品简介（P5.38）：body {@code {synopsis}}（null 或空串 = 清空）→ {@code {id, synopsis}}
+     *
+     * <p>与站端 {@code PUT /api/media/video/{id}/synopsis} 同能力、<b>不分档位</b>：管理端本来就是
+     * 管理员在改，编辑策略（off / local / full）管的是「站端访客能不能写」。
+     * 路径刻意用复数 {@code /videos/{id}/synopsis}，与既有的 {@code PUT /videos/{id}/persons}、
+     * {@code PUT /videos/{id}/studios} 同一写法。</p>
+     *
+     * <p>校验（全部在服务层）：长度 ≤ 8000 字符（超限 400）、纯空白归一化成 NULL、换行保留；
+     * 写完 {@code invalidateSnapshot()}，站端索引最多 60s 的缓存也不会拖住这次修改。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-作品简介", businessType = BusinessType.UPDATE)
+    @PutMapping("/videos/{id}/synopsis")
+    public Map<String, Object> updateVideoSynopsis(@PathVariable("id") String id,
+            @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        if (!body.containsKey("synopsis"))
+        {
+            throw MediaException.badRequest("synopsis 必填（null 或空串 = 清空）");
+        }
+        return mediaOrganizeService.updateVideoSynopsis(id, textValue(body.get("synopsis"), "synopsis"));
     }
 
     // ------------------------------------------------------------------ 站端编辑策略

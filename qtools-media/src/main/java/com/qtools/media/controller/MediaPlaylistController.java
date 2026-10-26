@@ -106,7 +106,11 @@ public class MediaPlaylistController
                 stringValue(body.get("name")), stringsValue(body.get("videoIds"), "videoIds"));
     }
 
-    /** 追加一条：body {@code {videoId}}；已在列表里就 no-op（{@code added=false}） */
+    /**
+     * 追加：body {@code {videoIds:[...]}}（批量）或 {@code {videoId:"..."}}（单条，P5-C 老契约）
+     *
+     * <p>已在列表里的视频一律 no-op（{@code added=false} / 进 {@code skippedIds}），重复加入回 200 不是 409。</p>
+     */
     @PostMapping({ "/playlists/{id}/items", "/playlists/{id}/videos", "/playlist/{id}/items",
             "/playlist/{id}/videos" })
     public Map<String, Object> addItem(HttpServletRequest request, HttpServletResponse response,
@@ -114,8 +118,29 @@ public class MediaPlaylistController
     {
         mediaEditPolicyService.requireWritable();
         Map<String, Object> body = parseObject(rawBody, true);
-        return mediaPlaylistService.addItem(mediaOwnerService.resolve(request, response).getOwnerKey(), longId(id),
-                stringValue(body.get("videoId")));
+        return mediaPlaylistService.addItems(mediaOwnerService.resolve(request, response).getOwnerKey(), longId(id),
+                appendVideoIds(body));
+    }
+
+    /**
+     * 追加接口的两种 body 写法都收：{@code videoIds} 数组优先，退回 {@code videoId} 单值
+     *
+     * <p>P5.41 前只认 {@code videoId}：前端（P5-C）一直发 {@code {videoIds:[…]}}，于是每条「加入播放列表」
+     * 都被判成 400「videoId 不能为空」。两种都收之后，前端一次请求就能批量加，老前端也不用改。</p>
+     */
+    private static List<String> appendVideoIds(Map<String, Object> body)
+    {
+        List<String> batch = stringsValue(body.get("videoIds"), "videoIds");
+        if (batch != null && !batch.isEmpty())
+        {
+            return batch;
+        }
+        String single = stringValue(body.get("videoId"));
+        if (single != null)
+        {
+            return List.of(single);
+        }
+        throw MediaException.badRequest("videoId / videoIds 至少给一个：{videoId:\"...\"} 或 {videoIds:[...]}");
     }
 
     /**

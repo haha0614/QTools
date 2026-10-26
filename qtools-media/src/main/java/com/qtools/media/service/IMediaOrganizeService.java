@@ -62,6 +62,25 @@ public interface IMediaOrganizeService
     Map<String, Object> updateVideoMeta(String videoId, MediaMetaPatch patch);
 
     /**
+     * 单片作品简介 / 剧情梗概（P5.38）：{@code {id, synopsis}}
+     *
+     * <p>{@code synopsis} 为 null = 没有简介（**不是**空串：服务层把纯空白归一化成 null）。
+     * 换行原样返回；视频不存在 404。读接口<b>不看编辑策略</b>：off 档站端仍要能看到已有简介。</p>
+     */
+    Map<String, Object> videoSynopsis(String videoId);
+
+    /**
+     * 写入作品简介（P5.38）：{@code {id, synopsis}}，返回落库后的规范化值
+     *
+     * <p>校验：去首尾空白后按<b>字符</b>计数（{@link String#codePointCount}，CJK / emoji 都算 1 个字），
+     * 超过 8000 字符 400；纯空白（含全角空格 / 换行）视为<b>清空</b>，落库 NULL。
+     * 换行<b>保留</b> —— 梗概是多行正文，前端用 {@code white-space: pre-wrap} 渲染。
+     * 写完 {@code invalidateSnapshot()}：索引里已经有该片的条目（标签 / 人物 / 评分），
+     * 虽然索引条目不输出 synopsis，但「同一个视频的数据在同一个快照里」这条不变量要保持。</p>
+     */
+    Map<String, Object> updateVideoSynopsis(String videoId, String synopsis);
+
+    /**
      * 新增<b>单个</b>标记（管理端 {@code POST /api/media/admin/video/{id}/markers}）
      *
      * <p>与 {@link #updateVideoMeta} 的 {@code markers} 全量替换相反，这里只追加一条，

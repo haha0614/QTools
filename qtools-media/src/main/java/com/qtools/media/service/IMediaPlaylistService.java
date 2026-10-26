@@ -33,6 +33,15 @@ public interface IMediaPlaylistService
     Map<String, Object> addItem(String ownerKey, Long id, String videoId);
 
     /**
+     * 批量追加（P5.41）：逐个按 {@code (playlist_id, video_id)} 幂等，返回详情 +
+     * {@code added}（至少进了一条）/ {@code addedIds} / {@code skippedIds}（本来就在）。
+     *
+     * <p>「已经在里面」不算失败：重复加入同一批视频必须回 200 而不是 409，
+     * 前端据此区分「真失败」与「结果已经达成」。</p>
+     */
+    Map<String, Object> addItems(String ownerKey, Long id, List<String> videoIds);
+
+    /**
      * 删除一条并把后面的条目前移
      *
      * <p><b>幂等</b>：该视频本来不在列表里时返回 {@code removed:0}（200），不抛 404——

@@ -29,6 +29,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="mtime"      column="mtime"       />
         <!-- M3-A 组织能力：人工评分 0-100（P5-A 扩容；null = 未评分），索引条目按需输出 -->
         <result property="rating"     column="rating"      />
+        <!-- P5.38 作品简介 / 剧情梗概（doc/media_synopsis.sql）：TEXT，>6 行前端折叠；
+             只有单片详情与简介接口取这一列，列表 / 索引查询刻意不带（见 selectVideoVo 注释） -->
+        <result property="synopsis"   column="synopsis"    />
         <!-- 缺失文件（doc/media_missing.sql）：1=扫描时磁盘上不存在 -->
         <result property="missing"    column="missing"     />
         <result property="lastSeen"   column="last_seen"   />
@@ -50,9 +53,19 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         （hash 优先、老字段回退，见 doc/媒体库可移植性方案.md），
         复用 selectVideoById 就不再额外查一次库。这两列不出现在任何接口出参里。
     -->
+    <!--
+        列清单单独一段：列表 / 索引查询（selectVideoVo）与单片查询（selectVideoById）共用前面这段，
+        但**只有单片查询**再追加 synopsis（P5.38）。理由：synopsis 是 TEXT 正文，
+        列表一次要出几万行，把它一起 select 出来等于每行多读一次 off-page 存储，
+        而索引条目从不输出它 —— 所以列清单拆开，谁需要谁追加。
+    -->
+    <sql id="videoColumns">
+        id, content_hash, root_id, folder, rel_path, title, size, dur, w, h, vcodec, fps, browser_ok,
+        poster_path, doc_path, sub_path, mtime, rating, missing, last_seen
+    </sql>
+
     <sql id="selectVideoVo">
-        select id, content_hash, root_id, folder, rel_path, title, size, dur, w, h, vcodec, fps, browser_ok,
-               poster_path, doc_path, sub_path, mtime, rating, missing, last_seen
+        select <include refid="videoColumns"/>
         from media_video
     </sql>
 
@@ -66,8 +79,10 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         order by folder asc, title asc, id asc
     </select>
 
+    <!-- 单片：额外带 synopsis（P5.38，详情接口 / 信息栏首屏直接用，不再单独打一次简介请求） -->
     <select id="selectVideoById" parameterType="String" resultMap="MediaVideoResult">
-        <include refid="selectVideoVo"/>
+        select <include refid="videoColumns"/>, synopsis
+        from media_video
         where id = #{id} and hidden = 0
     </select>
 
