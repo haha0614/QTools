@@ -30,6 +30,17 @@ public final class MediaFrameCommand
     /** mjpeg 质量（2 = 最好 / 31 = 最差）；5 在 480 宽下约 20-60KB，够看清画面 */
     public static final int JPEG_QUALITY = 5;
 
+    /**
+     * 请求宽度下限（P5.20）：低于 480 的画面铺满舞台已经明显糊了，没有使用场景
+     */
+    public static final int MIN_WIDTH = 480;
+
+    /**
+     * 请求宽度上限（P5.20）：换流覆盖层要铺满整个舞台，1280 与常见舞台 CSS 宽度同一量级；
+     * 再大只是多花 ffmpeg 时间与带宽，画质提升肉眼不可见
+     */
+    public static final int MAX_WIDTH = 1280;
+
     private MediaFrameCommand()
     {
     }
@@ -58,6 +69,20 @@ public final class MediaFrameCommand
      */
     public static List<String> build(String ffmpeg, Path src, String ssArg)
     {
+        return build(ffmpeg, src, ssArg, FRAME_WIDTH);
+    }
+
+    /**
+     * 构造取帧命令（P5.20：输出宽度可指定）
+     *
+     * <p>为什么要宽度：同一个接口有两种用途 —— hover / 拖动跟随层只要 160×90 的卡片（480 足够），
+     * 而换流覆盖层要铺满整个舞台，480 宽放大上去就是用户看到的「低清」。
+     * 前端按舞台 CSS 宽度要 960-1280，这里只做区间夹取，不信任调用方。</p>
+     *
+     * @param width 输出宽度（{@link #clampWidth(int)} 夹到 [480, 1280]）
+     */
+    public static List<String> build(String ffmpeg, Path src, String ssArg, int width)
+    {
         List<String> cmd = new ArrayList<>(20);
         cmd.add(ffmpeg);
         cmd.add("-hide_banner");
@@ -76,13 +101,28 @@ public final class MediaFrameCommand
         cmd.add("-an");
         cmd.add("-sn");
         cmd.add("-vf");
-        cmd.add("scale=" + FRAME_WIDTH + ":-2");
+        cmd.add("scale=" + clampWidth(width) + ":-2");
         cmd.add("-q:v");
         cmd.add(Integer.toString(JPEG_QUALITY));
         cmd.add("-f");
         cmd.add("mjpeg");
         cmd.add("pipe:1");
         return cmd;
+    }
+
+    /**
+     * 请求宽度 → 实际输出宽度：{@code <= 0} 退回默认 480，其余夹到 [{@link #MIN_WIDTH}, {@link #MAX_WIDTH}]
+     *
+     * <p>{@code <= 0} 才是「没传」，越界的正数则夹取而不是报错 —— 宽度是画质偏好，不是查询条件，
+     * 拒绝请求对调用方没有好处（与 t 越界必须 400 的口径不同）。</p>
+     */
+    public static int clampWidth(int width)
+    {
+        if (width <= 0)
+        {
+            return FRAME_WIDTH;
+        }
+        return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, width));
     }
 
     /**

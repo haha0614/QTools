@@ -195,6 +195,12 @@ public class MediaFrameServiceImpl implements IMediaFrameService
     @Override
     public byte[] frameAt(String videoId, double sec)
     {
+        return frameAt(videoId, sec, MediaFrameCommand.FRAME_WIDTH);
+    }
+
+    @Override
+    public byte[] frameAt(String videoId, double sec, int width)
+    {
         if (videoId == null || !SAFE_ID.matcher(videoId).matches())
         {
             throw MediaException.forbidden();
@@ -211,7 +217,8 @@ public class MediaFrameServiceImpl implements IMediaFrameService
         }
         Path source = mediaFileService.resolveMedia(video.getRelPath(), video.getRootId());
         // P5.18：不读缓存也不写缓存 —— 精确落点每次都可能不同，落盘就是无上限增长
-        return decode(videoId, source, MediaFrameCommand.ssArgOf(sec));
+        // P5.20：宽度只影响 ffmpeg 的 scale，与缓存语义无关（这一路本来也不缓存）
+        return decode(videoId, source, MediaFrameCommand.ssArgOf(sec), MediaFrameCommand.clampWidth(width));
     }
 
     /**
@@ -232,10 +239,21 @@ public class MediaFrameServiceImpl implements IMediaFrameService
      */
     private byte[] decode(String videoId, Path source, String ssArg)
     {
+        return decode(videoId, source, ssArg, MediaFrameCommand.FRAME_WIDTH);
+    }
+
+    /**
+     * 真正调 ffmpeg 解一帧（P5.20：{@code width} 是输出宽度，已由 {@link MediaFrameCommand#clampWidth} 夹好）
+     *
+     * @param ssArg {@code -ss} 实参，同时作为日志里的位置读数
+     * @param width 输出宽度（jpeg 的 scale 目标宽，高度自适应偶数）
+     */
+    private byte[] decode(String videoId, Path source, String ssArg, int width)
+    {
         int sec = (int) Math.floor(Math.max(0, parseSs(ssArg)));
         acquire(videoId, sec);
         long begin = System.currentTimeMillis();
-        List<String> command = MediaFrameCommand.build(mediaProperties.getFfmpeg().trim(), source, ssArg);
+        List<String> command = MediaFrameCommand.build(mediaProperties.getFfmpeg().trim(), source, ssArg, width);
         Process process = null;
         try
         {

@@ -55,4 +55,15 @@ public interface IMediaFrameService
      * @throws com.qtools.media.exception.MediaException 403 / 404 / 429 / 503（与 frame 同口径）
      */
     byte[] frameAt(String videoId, double sec);
+
+    /**
+     * 取**精确时刻**的帧，并指定输出宽度（P5.20）
+     *
+     * <p>宽度是为「换流覆盖层铺满舞台」准备的：那个场景下 480 宽放大就是低清，
+     * 前端按舞台 CSS 宽度要 960-1280。其余语义（不落缓存 / 并发名额 / 失败码）与
+     * {@link #frameAt(String, double)} 完全一致。</p>
+     *
+     * @param width 输出宽度；{@code <= 0} 退回默认 480，越界夹到 [480, 1280]
+     */
+    byte[] frameAt(String videoId, double sec, int width);
 }

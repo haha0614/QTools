@@ -160,12 +160,19 @@ public class MediaFileController
      * 写成片尾那一秒的缓存（占盘且对调用方撒谎），而越界本身就是调用方的 bug。
      * 唯一例外是 {@code t == dur}：它夹到 {@code dur-1}（{@code -ss dur} 已越过最后一帧，ffmpeg 不出片）。</p>
      *
+     * <p><b>P5.20 新增 {@code w}（输出宽度）</b>：同一个接口有两种用途 —— hover / 拖动跟随层是
+     * 160×90 的卡片（480 足够），换流覆盖层要铺满整个舞台（480 放大就是用户在反馈里说的「低清」）。
+     * 前端按舞台 CSS 宽度要 960-1280。宽度只影响 ffmpeg 的 {@code scale}，不参与任何缓存键：
+     * 精确取帧那一支本来就不落盘，整秒那一支的缓存键仍是 {@code <秒>.jpg}（传了 w 也忽略，见下）。</p>
+     *
      * @param id 视频 id（{@code sha1(rel)[:12]}）
      * @param t  目标时刻（秒，可带小数；同一秒内的小数命中同一份缓存）
+     * @param w  输出宽度（可空；整数像素，{@code <= 0} 或缺失按 480，越界夹到 [480, 1280]）
      */
     @GetMapping("/frame/{id}")
     public ResponseEntity<byte[]> frame(@PathVariable("id") String id,
-            @RequestParam(value = "t", required = false) String t)
+            @RequestParam(value = "t", required = false) String t,
+            @RequestParam(value = "w", required = false) String w)
     {
         double raw = parseSecond(t);
         int dur = mediaFrameService.durationOf(id);
@@ -177,7 +184,7 @@ public class MediaFileController
         // 整秒（hover / 拖动跟随层）仍走原来的「按秒永久缓存」口径，行为与请求 URL 都不变。
         if (isPrecise(raw))
         {
-            byte[] exact = mediaFrameService.frameAt(id, raw);
+            byte[] exact = mediaFrameService.frameAt(id, raw, parseWidth(w));
             return ResponseEntity.ok()
                     .contentType(MediaType.IMAGE_JPEG)
                     // 不缓存：同一 id 的精确落点没有「内容寻址」性质，缓存会无上限增长
@@ -195,6 +202,29 @@ public class MediaFileController
                 .header("X-Content-Type-Options", "nosniff")
                 .contentLength(bytes.length)
                 .body(bytes);
+    }
+
+    /**
+     * 输出宽度：缺失 / 非数字 / 非正数一律按 0（= 服务端默认 480）；正数原样交给服务层夹取
+     *
+     * <p>为什么不在这里夹：区间常量只有 {@code MediaFrameCommand} 一处（前后端与文档都引用它），
+     * 这里再夹一次就会出现两个真相。</p>
+     */
+    private static int parseWidth(String w)
+    {
+        if (w == null || w.trim().isEmpty())
+        {
+            return 0;
+        }
+        try
+        {
+            int value = Integer.parseInt(w.trim());
+            return value > 0 ? value : 0;
+        }
+        catch (NumberFormatException e)
+        {
+            return 0;
+        }
     }
 
     /** t 是否带小数（= 精确取帧）。1e-6 秒以下是浮点噪声，仍按整秒口径走缓存 */
