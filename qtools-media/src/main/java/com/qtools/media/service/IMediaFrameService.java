@@ -38,4 +38,21 @@ public interface IMediaFrameService
      *         503 ffmpeg 不可用
      */
     byte[] frame(String videoId, int sec);
+
+    /**
+     * 取**精确时刻**的帧（jpeg 字节，P5.18）
+     *
+     * <p>与 {@link #frame(String, int)} 的两点差别：</p>
+     * <ol>
+     *   <li>{@code -ss} 带小数，落点就是请求的那一刻（不是「这一秒的第一帧」）；</li>
+     *   <li><b>不落盘缓存</b>：精确落点每次都可能不同，落盘就是无上限的磁盘增长。
+     *       调用方只有「换流前那张覆盖图」，一次 seek 一张，量级与 seek 次数同级。</li>
+     * </ol>
+     *
+     * @param videoId 视频 id（{@code sha1(rel)[:12]}）
+     * @param sec     目标时刻（秒，可含小数；负数按 0 处理）
+     * @return jpeg 字节（非空）
+     * @throws com.qtools.media.exception.MediaException 403 / 404 / 429 / 503（与 frame 同口径）
+     */
+    byte[] frameAt(String videoId, double sec);
 }

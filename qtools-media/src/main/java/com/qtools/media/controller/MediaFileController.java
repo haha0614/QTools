@@ -173,6 +173,19 @@ public class MediaFileController
         {
             throw MediaException.badRequest("t 越界：应在 [0, " + dur + "] 秒内");
         }
+        // P5.18：带小数的 t = 精确取帧（换流覆盖层用），不落盘缓存 —— 落点每次都可能不同。
+        // 整秒（hover / 拖动跟随层）仍走原来的「按秒永久缓存」口径，行为与请求 URL 都不变。
+        if (isPrecise(raw))
+        {
+            byte[] exact = mediaFrameService.frameAt(id, raw);
+            return ResponseEntity.ok()
+                    .contentType(MediaType.IMAGE_JPEG)
+                    // 不缓存：同一 id 的精确落点没有「内容寻址」性质，缓存会无上限增长
+                    .header(HttpHeaders.CACHE_CONTROL, "no-store")
+                    .header("X-Content-Type-Options", "nosniff")
+                    .contentLength(exact.length)
+                    .body(exact);
+        }
         int sec = MediaFrameCommand.secondOf(raw, dur);
         byte[] bytes = mediaFrameService.frame(id, sec);
         return ResponseEntity.ok()
@@ -182,6 +195,12 @@ public class MediaFileController
                 .header("X-Content-Type-Options", "nosniff")
                 .contentLength(bytes.length)
                 .body(bytes);
+    }
+
+    /** t 是否带小数（= 精确取帧）。1e-6 秒以下是浮点噪声，仍按整秒口径走缓存 */
+    private static boolean isPrecise(double raw)
+    {
+        return Math.abs(raw - Math.rint(raw)) > 1e-6;
     }
 
     /** 取帧参数 t：缺失 / 非数字 / 负数一律 400（越界判定留给 duration 已知时再做） */

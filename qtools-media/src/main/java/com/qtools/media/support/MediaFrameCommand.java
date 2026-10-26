@@ -1,5 +1,6 @@
 package com.qtools.media.support;
 
+import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -43,6 +44,20 @@ public final class MediaFrameCommand
      */
     public static List<String> build(String ffmpeg, Path src, int sec)
     {
+        return build(ffmpeg, src, Integer.toString(Math.max(0, sec)));
+    }
+
+    /**
+     * 构造取帧命令（P5.18：{@code -ss} 允许小数）
+     *
+     * <p>为什么需要小数：换流前盖在画面上的那张帧必须就是**用户点的那个位置**。整秒取帧给的是
+     * 「这一秒的第一帧」，用户会先看到整秒位置、再看到真正落点（「先跳到整秒位置再跳到点击位置」）。
+     * ffmpeg 的输入定位（{@code -ss} 在 {@code -i} 之前）默认 accurate_seek，小数秒会被精确定位到帧。</p>
+     *
+     * @param ssArg {@code -ss} 的实参（整数形态与旧版逐字一致："3" / "3.4" / "6.267"）
+     */
+    public static List<String> build(String ffmpeg, Path src, String ssArg)
+    {
         List<String> cmd = new ArrayList<>(20);
         cmd.add(ffmpeg);
         cmd.add("-hide_banner");
@@ -52,7 +67,7 @@ public final class MediaFrameCommand
         cmd.add("-nostdin");
         // 关键帧定位：-ss 必须在 -i 之前（输入定位），见类注释
         cmd.add("-ss");
-        cmd.add(Integer.toString(Math.max(0, sec)));
+        cmd.add(ssArg == null || ssArg.trim().isEmpty() ? "0" : ssArg.trim());
         cmd.add("-i");
         cmd.add(src.toString());
         cmd.add("-frames:v");
@@ -68,6 +83,25 @@ public final class MediaFrameCommand
         cmd.add("mjpeg");
         cmd.add("pipe:1");
         return cmd;
+    }
+
+    /**
+     * 请求时刻 → {@code -ss} 的实参（P5.18：保留到毫秒，整数形态与旧版逐字一致）
+     *
+     * <p>与 {@link #secondOf} 的分工：整秒取帧（hover / 拖动跟随层）走 {@code secondOf} + 落盘缓存，
+     * 只有「精确落点」（换流覆盖层）才用这里的小数形态，且不落缓存。</p>
+     *
+     * @param t 请求时刻（秒）
+     * @return "3"（整数）/ "3.4" / "6.267"（毫秒级，半帧 16.7ms @30fps 远大于 1ms）
+     */
+    public static String ssArgOf(double t)
+    {
+        double s = Math.max(0, Math.round(t * 1000d) / 1000d);
+        if (s == Math.rint(s))
+        {
+            return Long.toString((long) s);
+        }
+        return BigDecimal.valueOf(s).stripTrailingZeros().toPlainString();
     }
 
     /**

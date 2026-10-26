@@ -192,6 +192,28 @@ public class MediaFrameServiceImpl implements IMediaFrameService
         }
     }
 
+    @Override
+    public byte[] frameAt(String videoId, double sec)
+    {
+        if (videoId == null || !SAFE_ID.matcher(videoId).matches())
+        {
+            throw MediaException.forbidden();
+        }
+        MediaVideo video = selectVideo(videoId);
+        if (video == null || StringUtils.isEmpty(video.getRelPath()))
+        {
+            throw MediaException.notFound();
+        }
+        if (!isAvailable())
+        {
+            log.warn("精确取帧失败 id={} t={}：ffmpeg 未配置或不存在（qtools.media.ffmpeg）", videoId, sec);
+            throw new MediaException(503, "ffmpeg 不可用，无法取帧（请配置 qtools.media.ffmpeg / QTOOLS_MEDIA_FFMPEG）");
+        }
+        Path source = mediaFileService.resolveMedia(video.getRelPath(), video.getRootId());
+        // P5.18：不读缓存也不写缓存 —— 精确落点每次都可能不同，落盘就是无上限增长
+        return decode(videoId, source, MediaFrameCommand.ssArgOf(sec));
+    }
+
     /**
      * 真正调 ffmpeg 解一帧
      *
@@ -200,9 +222,20 @@ public class MediaFrameServiceImpl implements IMediaFrameService
      */
     private byte[] decode(String videoId, Path source, int sec)
     {
+        return decode(videoId, source, Integer.toString(Math.max(0, sec)));
+    }
+
+    /**
+     * 真正调 ffmpeg 解一帧（P5.18：{@code ssArg} 可以是小数，用于精确取帧）
+     *
+     * @param ssArg {@code -ss} 实参，同时作为日志里的位置读数
+     */
+    private byte[] decode(String videoId, Path source, String ssArg)
+    {
+        int sec = (int) Math.floor(Math.max(0, parseSs(ssArg)));
         acquire(videoId, sec);
         long begin = System.currentTimeMillis();
-        List<String> command = MediaFrameCommand.build(mediaProperties.getFfmpeg().trim(), source, sec);
+        List<String> command = MediaFrameCommand.build(mediaProperties.getFfmpeg().trim(), source, ssArg);
         Process process = null;
         try
         {
@@ -249,6 +282,19 @@ public class MediaFrameServiceImpl implements IMediaFrameService
         {
             destroy(process);
             release();
+        }
+    }
+
+    /** {@code -ss} 实参 → 秒（只用于日志与并发名额的可读标识，失败一律按 0 处理） */
+    private static double parseSs(String ssArg)
+    {
+        try
+        {
+            return Double.parseDouble(ssArg);
+        }
+        catch (NumberFormatException | NullPointerException e)
+        {
+            return 0;
         }
     }
 
