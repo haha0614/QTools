@@ -1,5 +1,7 @@
 package com.qtools.media.support;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -75,11 +77,11 @@ public final class MediaTranscodeCommand
      * @param cq          恒定质量因子（nvenc {@code -cq} / qsv {@code -global_quality}；软件仍用 -crf 语义外的码率控制）
      * @param profile     清晰度档位（尺寸与三档码率）
      * @param file        输入文件绝对路径
-     * @param start       起播秒数（&gt;= 0）
+     * @param start       起播秒数（&gt;= 0，允许小数；P5.17 起支持帧级落点）
      * @return 参数列表（{@code ProcessBuilder} 原样使用，不经过 shell）
      */
     public static List<String> build(String ffmpeg, String encoder, String nvencPreset, int cq, Profile profile,
-            Path file, int start)
+            Path file, double start)
     {
         String enc = normalizeEncoder(encoder);
         List<String> command = new ArrayList<>();
@@ -87,9 +89,11 @@ public final class MediaTranscodeCommand
         command.add("-hide_banner");
         command.add("-loglevel");
         command.add("error");
-        // -ss 放在 -i 之前：输入侧快速 seek，避免从头解码
+        // -ss 放在 -i 之前：输入侧快速 seek，避免从头解码。
+        // P5.17：秒值允许小数（帧级落点）。ffmpeg 默认 accurate_seek，输入侧 -ss 会从
+        // 前一个关键帧解码并丢弃到该时间点，所以 3.4 真的从 3.400s 出流，不是从 3.000s。
         command.add("-ss");
-        command.add(String.valueOf(Math.max(0, start)));
+        command.add(formatStart(start));
         command.add("-i");
         command.add(file.toString());
         command.add("-map");
@@ -158,6 +162,23 @@ public final class MediaTranscodeCommand
         command.add("mp4");
         command.add("pipe:1");
         return command;
+    }
+
+    /**
+     * {@code -ss} 的秒值文本（P5.17）
+     *
+     * <p>保留 6 位小数（微秒）并去掉末尾的 0：帧栅格上的时间点（如 30fps 的第 188 帧 = 6.266666…）
+     * 用 3 位小数会偏 0.4ms，超出「松手落点误差 &lt; 1e-3 秒」的验收口径；同时整数档位仍输出
+     * {@code "3"}，与 P5.16 之前逐字一致（向后兼容，老客户端不受影响）。</p>
+     */
+    public static String formatStart(double start)
+    {
+        double value = start;
+        if (!Double.isFinite(value) || value < 0)
+        {
+            value = 0;
+        }
+        return BigDecimal.valueOf(value).setScale(6, RoundingMode.HALF_UP).stripTrailingZeros().toPlainString();
     }
 
     /** min(iw,…) 保证小片源不放大；force_divisible_by=2 满足 yuv420p 偶数尺寸 */

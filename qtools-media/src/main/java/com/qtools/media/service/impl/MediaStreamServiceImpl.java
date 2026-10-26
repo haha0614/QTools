@@ -153,7 +153,8 @@ public class MediaStreamServiceImpl implements IMediaStreamService
         {
             throw MediaException.badRequest("bad q");
         }
-        int start = parseStart(t);
+        // P5.17：起播点允许小数秒（帧级落点），ffmpeg 用精确 -ss；缺省/非法值仍是 0
+        double start = parseStartSec(t);
         // 越权/不存在要在占用名额之前判掉
         Path file = mediaFileService.resolveMedia(p);
 
@@ -207,7 +208,8 @@ public class MediaStreamServiceImpl implements IMediaStreamService
         {
             destroy(started == null ? null : started.process);
             release();
-            log.info("媒体转码结束 q={} t={} file={} enc={} sent={}KB end={} cost={}ms", q, start, p,
+            log.info("媒体转码结束 q={} t={} file={} enc={} sent={}KB end={} cost={}ms", q,
+                    MediaTranscodeCommand.formatStart(start), p,
                     started == null ? "-" : started.encoder, sent / 1024, endReason,
                     System.currentTimeMillis() - begin);
         }
@@ -223,7 +225,7 @@ public class MediaStreamServiceImpl implements IMediaStreamService
      * 直接走软件（不必每个请求都失败一次），再拿软件参数重跑一遍。软件再失败就是真的失败，
      * 异常原样上抛（504 / 500），不无限重试。</p>
      */
-    private Started startAndFirstByte(Path file, MediaTranscodeCommand.Profile profile, int start) throws IOException
+    private Started startAndFirstByte(Path file, MediaTranscodeCommand.Profile profile, double start) throws IOException
     {
         String encoder = mediaTranscodeProbe.effective();
         Process process = startProcess(file, profile, start, encoder);
@@ -244,7 +246,7 @@ public class MediaStreamServiceImpl implements IMediaStreamService
     }
 
     /** 回退分支：非硬件编码器直接把原异常抛回去；硬件才降级重试一次 */
-    private Started retrySoftware(Path file, MediaTranscodeCommand.Profile profile, int start, String encoder,
+    private Started retrySoftware(Path file, MediaTranscodeCommand.Profile profile, double start, String encoder,
             Exception cause) throws IOException
     {
         if (!MediaTranscodeCommand.isHardware(encoder))
@@ -286,7 +288,7 @@ public class MediaStreamServiceImpl implements IMediaStreamService
         throw new IOException(cause);
     }
 
-    private Process startProcess(Path file, MediaTranscodeCommand.Profile profile, int start, String encoder)
+    private Process startProcess(Path file, MediaTranscodeCommand.Profile profile, double start, String encoder)
             throws IOException
     {
         ProcessBuilder builder = new ProcessBuilder(buildCommand(file, profile, start, encoder));
@@ -407,14 +409,24 @@ public class MediaStreamServiceImpl implements IMediaStreamService
      * 拼命令：整条命令的构造在 {@link MediaTranscodeCommand}（硬件/软件的唯一分叉点集中在那里，
      * 好处是能离线逐字打印核验）。本方法只负责把配置里的编码器与档位喂进去。
      */
-    private List<String> buildCommand(Path file, MediaTranscodeCommand.Profile profile, int start, String encoder)
+    private List<String> buildCommand(Path file, MediaTranscodeCommand.Profile profile, double start, String encoder)
     {
         return MediaTranscodeCommand.build(mediaProperties.getFfmpeg(), encoder,
                 mediaProperties.getTranscode().getPreset(), mediaProperties.getTranscode().getCq(), profile, file,
                 start);
     }
 
-    private static int parseStart(String t)
+    /**
+     * 解析 {@code t} 起播秒（P5.17：小数秒）
+     *
+     * <p>P5.16 之前这里 {@code (int) Math.floor(value)} 把小数直接丢掉 —— 前端按帧栅格算出的
+     * 3.4s 到后端变成 3.000s，再叠加转码流 seekable 只有 [0,0]（浏览器没法在流内补 seek），
+     * 于是「松手停在最近的整秒」。现在原样保留到微秒，交给 {@link MediaTranscodeCommand#formatStart}。</p>
+     *
+     * <p>兼容性：{@code t=3}（老前端）→ 3.0 → {@code -ss 3}，与改动前逐字一致；
+     * 空 / 非数字 / 负数 / 非有限值一律 0。</p>
+     */
+    private static double parseStartSec(String t)
     {
         if (StringUtils.isEmpty(t))
         {
@@ -427,7 +439,7 @@ public class MediaStreamServiceImpl implements IMediaStreamService
             {
                 return 0;
             }
-            return (int) Math.floor(value);
+            return Math.round(value * 1_000_000d) / 1_000_000d;
         }
         catch (NumberFormatException e)
         {
