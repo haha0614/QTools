@@ -69,6 +69,38 @@ public interface IMediaPersonService
     Map<String, Object> updateAvatar(Long id, String path);
 
     /**
+     * 站端手动指定人物头像（{@code PUT /api/media/person/{id}/avatar}，body {@code {kind, ref}}，P5.48）
+     *
+     * <p>只存<b>来源标识</b>，不落二进制。两种来源：</p>
+     * <ul>
+     *   <li>{@code kind = "photo"}：{@code ref = "<albumId>:<seq>"}，必须是<b>该人物名下</b>相册里的一张图
+     *       （服务层用 {@code media_photo(album_id, seq)} + 相册归属一条查询校验，不在名下 → 400）；
+     *       用自然键而不是 {@code media_photo.id}：重扫会重插行、自增 id 会变，头像会静默指到别的图</li>
+     *   <li>{@code kind = "url"}：{@code ref} 必须是 {@code http://} / {@code https://} / {@code data:image/}
+     *       开头的地址，长度 <= 512（列宽）；其它协议（{@code javascript:} / {@code file:} 等）一律 400</li>
+     * </ul>
+     *
+     * <p>回包是<b>解析好最终 URL</b> 的整个人物节点：{@code {..., avatarKind, avatarRef, avatarUrl}}。
+     * {@code avatarUrl} 由后端拼（photo → {@code /api/media/thumb/p/<albumId>/<pad4(seq)>}，
+     * url → 原串），前端直接用，不再自己拼缩略图。</p>
+     *
+     * @param kind photo / url（大小写不敏感，其它值 400）
+     * @param ref  来源标识（空 400；photo 型解析失败 400）
+     * @return 落库后的人物节点（含 avatarKind / avatarRef / avatarUrl）
+     */
+    Map<String, Object> setAvatar(Long id, String kind, String ref);
+
+    /**
+     * 站端清除手动头像（{@code DELETE /api/media/person/{id}/avatar}，P5.48）
+     *
+     * <p>两列一起置 NULL，{@code avatarUrl} 回落到历史 {@code avatar_path}（如为空则是 null），
+     * 前端据此**回退三级自动**（相册首图 → 视频封面 → 首字占位）。</p>
+     *
+     * @return 落库后的人物节点（avatarKind / avatarRef / avatarUrl 均已清空为 null）
+     */
+    Map<String, Object> clearAvatar(Long id);
+
+    /**
      * 全量替换某视频的人物与角色
      * （管理端 {@code PUT /api/media/admin/videos/{id}/persons}、站端 {@code PUT /api/media/video/{id}/persons}）
      *
@@ -125,10 +157,23 @@ public interface IMediaPersonService
 
     // ------------------------------------------------------------------ 站端（只读）
 
-    /** 站端人物清单 {@code [{id,name,alias,useCount}]}，useCount 降序 */
+    /**
+     * 站端人物清单 {@code [{id,name,alias,useCount,avatarKind,avatarRef,avatarUrl}]}，useCount 降序
+     *
+     * <p>P5.48 起清单也带手动头像三件套：人物墙一次拿全，不必为首屏头像逐人再查一次详情。</p>
+     */
     List<Map<String, Object>> personBriefList();
 
-    /** 站端人物详情 {@code {id,name,alias,note,avatarPath,gender,birthday,useCount,videoCount,albumCount}} */
+    /**
+     * 站端人物详情
+     * {@code {id,name,alias,note,avatarPath,avatarKind,avatarRef,avatarUrl,gender,birthday,useCount,videoCount,albumCount}}
+     * + P5-A 的 14 个资料字段
+     * {@code measurements,careerStart,careerEnd,tattoos,piercings,ethnicity,hairColor,eyeColor,heightCm,weightKg,fakeBoobs,nationality,twitter,instagram}
+     * （P5.52；空值整键不输出，见 {@code MediaPersonServiceImpl#personNode}）
+     *
+     * <p>{@code avatarUrl} 是<b>后端解析好的最终 URL</b>（手动头像优先、其次历史 avatar_path）；
+     * 为 null 表示「没有显式头像」，前端继续三级自动回退（相册首图 → 视频封面 → 首字占位）。</p>
+     */
     Map<String, Object> personDetail(Long id);
 
     /** 站端某人物名下视频分页 {@code {rows,total,page,size}} */

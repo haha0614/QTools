@@ -96,6 +96,47 @@ qtools:
     exportArgs: '--mysql=${qtools.home:E:/111/project/QTools}/tools/mysql/bin/mysql.exe --root=E:/111/视频 --port=3307 --secret=${qtools.home:E:/111/project/QTools}/QTools/qtools-admin/src/main/resources/secret.yml'
     exportPath: '${qtools.home:E:/111/project/QTools}/data/media/export'
     exportTimeoutMinutes: 60
+    # ---------------- 作品简介自动生成（P5.47）：模板（纯规则）+ 可选本地模型 ----------------
+    # 模板生成：无开关，纯后端拼句（POST /api/media/admin/videos/{id}/synopsis/template），毫秒级、必然可用。
+    # 本地模型：**默认关闭**。打开后站端「⚡ 自动生成」默认走模型；模型不可用（503 / 超时）时前端
+    #          自动回退模板并在信息栏提示「本地模型未就绪（Ollama 未启动？）」。
+    # 两种后端：provider=ollama（/api/generate）或 openai（OpenAI 兼容端点：LM Studio / llama.cpp / vLLM）。
+    # 提示词固定（见 SynopsisPrompt.SYSTEM）：P5.53 起主素材是**字幕节选 / 画面描述**（元数据只作一句体裁背景），
+    #   提示词硬禁「罗列字段 / 照抄标题 / 写文件名」，素材不足时输出 sentinel「信息不足」→ 接口回 insufficient:true。
+    llm:
+      # 总开关：false 时 /synopsis/llm 与 mode=llm 的批量任务都回 503（前端不显示任何 AI 字样）
+      enabled: false
+      # ollama | openai（写 openai* 都按 OpenAI 兼容端点处理，其余按 ollama）
+      provider: ollama
+      # 留空 = 按 provider 取默认：
+      #   ollama → http://127.0.0.1:11434/api/generate
+      #   openai → http://127.0.0.1:8080/v1/chat/completions
+      baseUrl: 'http://127.0.0.1:11434/api/generate'
+      # 模型名：小模型即可（简介只有 2-3 句）；qwen2.5:1.5b / llama3.2:3b 都够
+      model: 'qwen2.5:1.5b'
+      # 仅 openai provider 需要；本地端点一般留空（留空 = 不发 Authorization 头）
+      apiKey: ''
+      # 单次生成的读超时（毫秒，小于 1000 按 1000 计）：首次加载模型较慢，别设太小
+      timeoutMs: 20000
+      # ---------------- P5.53：内容梗概的素材链（字幕 → 画面 → 音频转写） ----------------
+      # 字幕节选预算（qtools.media.llm.subtitle.*）：上限 2000 字（SubtitleExcerpt.HEAD_CHARS），
+      # 默认 1200 字 —— 实测 1.5B 在 2000 字上会逐句转写台词，1200 字才给摘要。
+      subtitle:
+        headChars: 1200
+        tailChars: 200
+      # 画面理解（无字幕时的主路径）：需要先 ollama pull qwen2.5vl:3b（约 3.2GB）
+      vision:
+        enabled: false
+        model: 'qwen2.5vl:3b'
+        frames: 5
+        width: 512
+        timeoutMs: 60000
+      # 音频转写：本机未安装 whisper.cpp，只保留配置（P5.53 交付 3 只有设计与配置项）
+      transcribe:
+        enabled: false
+        whisperPath: ''
+        model: 'ggml-base.bin'
+        timeoutMs: 120000
     # 允许的跨域来源，逗号分隔；* 仅用于本地开发
     allowOrigins: '*'
     # ---------------- 自动扫描（文件监听）：两层模型 ----------------

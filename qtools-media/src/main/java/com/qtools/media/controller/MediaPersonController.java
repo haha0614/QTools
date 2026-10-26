@@ -39,14 +39,30 @@ public class MediaPersonController
     @Autowired
     private IMediaPersonService mediaPersonService;
 
-    /** 人物清单（供用户端人物页与筛选器）：{@code [{id,name,alias,useCount}]}，useCount 降序 */
+    /**
+     * 人物清单（供用户端人物页与筛选器）：{@code [{id,name,alias,useCount,avatarKind,avatarRef,avatarUrl}]}，useCount 降序
+     *
+     * <p>刻意<b>不带</b> P5-A 的 14 个资料字段：人物墙本来就要逐人拉详情（计数 videoCount / albumCount
+     * 只在详情里回填），把资料列塞进清单只会让这份「索引级」响应变胖而省不下任何一个请求。</p>
+     */
     @GetMapping("/persons")
     public List<Map<String, Object>> persons()
     {
         return mediaPersonService.personBriefList();
     }
 
-    /** 人物详情：{@code {id,name,alias,note,avatarPath,gender,birthday,useCount,videoCount,albumCount}} */
+    /**
+     * 人物详情（P5.52 补齐资料字段 + 手动头像）
+     *
+     * <p>{@code {id,name,alias,note,avatarPath,avatarKind,avatarRef,avatarUrl,gender,birthday,
+     * useCount,videoCount,albumCount}} + P5-A 的 14 个资料字段
+     * {@code measurements, careerStart, careerEnd, tattoos, piercings, ethnicity, hairColor,
+     * eyeColor, heightCm, weightKg, fakeBoobs, nationality, twitter, instagram}}。</p>
+     *
+     * <p>空值口径：<b>整键不输出</b>（不是回 null）—— 库内这些列绝大多数为 NULL，回 null 只会把
+     * payload 撑胖并让前端逐个判空；{@code avatarUrl} 例外，它恒输出（null = 没有显式头像，
+     * 前端继续三级自动回退）。键名 = Java 侧驼峰，与 {@code media_person} 的下划线列一一对应。</p>
+     */
     @GetMapping("/person/{id}")
     public Map<String, Object> person(@PathVariable("id") Long id)
     {

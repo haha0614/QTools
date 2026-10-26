@@ -467,6 +467,436 @@ public class MediaProperties
         }
     }
 
+    // ------------------------------------------------------------------ 作品简介生成（P5.47）
+
+    /**
+     * 本地模型（作品简介生成）配置：{@code qtools.media.llm.*}
+     *
+     * <p>默认 {@code enabled=false}：这一项是**可选**能力，没装 Ollama 的部署不该因为媒体库启动
+     * 就多出一个连不上的按钮，也不该在启动时探测网络。</p>
+     */
+    private Llm llm = new Llm();
+
+    public Llm getLlm()
+    {
+        return llm;
+    }
+
+    public void setLlm(Llm llm)
+    {
+        this.llm = llm;
+    }
+
+    /**
+     * 本地模型配置（两个后端：Ollama 原生 /api/generate 与 OpenAI 兼容 /v1/chat/completions）
+     *
+     * <table border="1">
+     *   <caption>键（qtools.media.llm.*）/ 默认值 / 语义</caption>
+     *   <tr><th>键</th><th>默认</th><th>语义</th></tr>
+     *   <tr><td>enabled</td><td>false</td><td>总开关；false 时 {@code /synopsis/llm} 回 503「本地模型未启用」</td></tr>
+     *   <tr><td>provider</td><td>ollama</td><td>{@code ollama} | {@code openai}（OpenAI 兼容本地端点，如 LM Studio / llama.cpp / vLLM）</td></tr>
+     *   <tr><td>baseUrl</td><td>空</td><td>空 = 按 provider 取默认：ollama → {@code http://127.0.0.1:11434/api/generate}，
+     *       openai → {@code http://127.0.0.1:8080/v1/chat/completions}</td></tr>
+     *   <tr><td>model</td><td>qwen2.5:1.5b</td><td>模型名（ollama 的 tag 或 OpenAI 兼容端点的 model 字段）</td></tr>
+     *   <tr><td>apiKey</td><td>空</td><td>仅 openai provider：非空时带 {@code Authorization: Bearer}；本地端点一般留空</td></tr>
+     *   <tr><td>timeoutMs</td><td>20000</td><td>单次生成的读超时；小于 1000 按 1000 计（连接超时取它与 2000 的较小值）</td></tr>
+     * </table>
+     */
+    public static class Llm
+    {
+        /** 总开关：默认关闭（没装本地模型的部署不该看到「AI 生成」） */
+        private boolean enabled = false;
+
+        /** 后端类型：ollama | openai */
+        private String provider = "ollama";
+
+        /** 端点地址；留空 = 按 provider 取默认 */
+        private String baseUrl = "";
+
+        /** 模型名 */
+        private String model = "qwen2.5:1.5b";
+
+        /** 仅 openai 兼容端点需要的密钥（本地端点一般留空） */
+        private String apiKey = "";
+
+        /** 单次生成的读超时（毫秒） */
+        private int timeoutMs = 20000;
+
+        /**
+         * 字幕节选的「开头」字数（{@code qtools.media.llm.subtitle.headChars}）
+         *
+         * <p>上限是 {@link com.qtools.media.support.SubtitleExcerpt#HEAD_CHARS}（2000 字，规范口径），
+         * 默认取 1200：实测 qwen2.5:1.5b 在 2000 字上会滑向「逐句转写台词」，
+         * 1200 字时才开始给摘要（见 p553-evidence/tune3-*.log）。</p>
+         */
+        private int subtitleHeadChars = 1200;
+
+        /** 字幕节选的「结尾」字数（{@code qtools.media.llm.subtitle.tailChars}） */
+        private int subtitleTailChars = 200;
+
+        /** 画面理解（{@code qtools.media.llm.vision.*}）：无字幕时的第二素材来源，默认关闭 */
+        private Vision vision = new Vision();
+
+        /** 音频转写（{@code qtools.media.llm.transcribe.*}）：最后一路，默认关闭 */
+        private Transcribe transcribe = new Transcribe();
+
+        public boolean isEnabled()
+        {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled)
+        {
+            this.enabled = enabled;
+        }
+
+        public String getProvider()
+        {
+            return provider;
+        }
+
+        public void setProvider(String provider)
+        {
+            this.provider = provider;
+        }
+
+        public String getBaseUrl()
+        {
+            return baseUrl;
+        }
+
+        public void setBaseUrl(String baseUrl)
+        {
+            this.baseUrl = baseUrl;
+        }
+
+        public String getModel()
+        {
+            return model;
+        }
+
+        public void setModel(String model)
+        {
+            this.model = model;
+        }
+
+        public String getApiKey()
+        {
+            return apiKey;
+        }
+
+        public void setApiKey(String apiKey)
+        {
+            this.apiKey = apiKey;
+        }
+
+        public int getTimeoutMs()
+        {
+            return timeoutMs;
+        }
+
+        public void setTimeoutMs(int timeoutMs)
+        {
+            this.timeoutMs = timeoutMs;
+        }
+
+        public int getSubtitleHeadChars()
+        {
+            return subtitleHeadChars;
+        }
+
+        public void setSubtitleHeadChars(int subtitleHeadChars)
+        {
+            this.subtitleHeadChars = subtitleHeadChars;
+        }
+
+        public int getSubtitleTailChars()
+        {
+            return subtitleTailChars;
+        }
+
+        public void setSubtitleTailChars(int subtitleTailChars)
+        {
+            this.subtitleTailChars = subtitleTailChars;
+        }
+
+        /** 实际开头字数：夹到 [300, {@link com.qtools.media.support.SubtitleExcerpt#HEAD_CHARS}] */
+        public int getEffectiveSubtitleHeadChars()
+        {
+            int cap = com.qtools.media.support.SubtitleExcerpt.HEAD_CHARS;
+            if (subtitleHeadChars < 300)
+            {
+                return 300;
+            }
+            return Math.min(subtitleHeadChars, cap);
+        }
+
+        /** 实际结尾字数：夹到 [0, {@link com.qtools.media.support.SubtitleExcerpt#TAIL_CHARS}] */
+        public int getEffectiveSubtitleTailChars()
+        {
+            int cap = com.qtools.media.support.SubtitleExcerpt.TAIL_CHARS;
+            if (subtitleTailChars <= 0)
+            {
+                return 0;
+            }
+            return Math.min(subtitleTailChars, cap);
+        }
+
+        public Vision getVision()
+        {
+            return vision == null ? new Vision() : vision;
+        }
+
+        public void setVision(Vision vision)
+        {
+            this.vision = vision;
+        }
+
+        public Transcribe getTranscribe()
+        {
+            return transcribe == null ? new Transcribe() : transcribe;
+        }
+
+        public void setTranscribe(Transcribe transcribe)
+        {
+            this.transcribe = transcribe;
+        }
+
+        /** 归一化后的 provider：只有明确写 openai / openai-compatible 才走兼容端点，其余按 ollama */
+        public String getEffectiveProvider()
+        {
+            String v = provider == null ? "" : provider.trim().toLowerCase();
+            if (v.startsWith("openai") || "compatible".equals(v))
+            {
+                return "openai";
+            }
+            return "ollama";
+        }
+
+        /** 实际请求地址：显式 baseUrl 优先，否则按 provider 取本机默认 */
+        public String getEffectiveBaseUrl()
+        {
+            String v = baseUrl == null ? "" : baseUrl.trim();
+            if (!v.isEmpty())
+            {
+                return v;
+            }
+            return "openai".equals(getEffectiveProvider())
+                    ? "http://127.0.0.1:8080/v1/chat/completions"
+                    : "http://127.0.0.1:11434/api/generate";
+        }
+
+        /** 实际模型名：空白时回落到默认小模型 */
+        public String getEffectiveModel()
+        {
+            String v = model == null ? "" : model.trim();
+            return v.isEmpty() ? "qwen2.5:1.5b" : v;
+        }
+
+        /** 实际读超时：小于 1000 按 1000 计（否则一个 0 会让 HttpClient 直接抛参数异常） */
+        public int getEffectiveTimeoutMs()
+        {
+            return timeoutMs < 1000 ? 1000 : timeoutMs;
+        }
+    }
+
+    /**
+     * 画面理解配置（P5.53 追加）：{@code qtools.media.llm.vision.*}
+     *
+     * <p>库里一半以上的片子没有对白也没有字幕（ASMR / 桌面壁纸 / 写真 / 舞蹈），只靠字幕会覆盖不到。
+     * 这一路用 ffmpeg 抽 4-6 帧，交给**视觉模型**逐帧写一句描述，再由文本模型合成梗概。</p>
+     *
+     * <table border="1">
+     *   <caption>键（qtools.media.llm.vision.*）/ 默认值 / 语义</caption>
+     *   <tr><th>键</th><th>默认</th><td>&nbsp;</td></tr>
+     *   <tr><td>enabled</td><td>false</td><td>总开关；false 时无字幕的片子直接回 insufficient，不抽帧不调模型</td></tr>
+     *   <tr><td>model</td><td>qwen2.5vl:3b</td><td>视觉模型名（ollama 里的多模态 tag；需先 {@code ollama pull}）</td></tr>
+     *   <tr><td>frames</td><td>5</td><td>抽几帧（2-10 之间夹取；帧越多越费时间，5 帧覆盖开头/中段/结尾）</td></tr>
+     *   <tr><td>width</td><td>512</td><td>缩放后的宽度（高度自适应；512 够看清人物/场景，单帧约 30-60KB）</td></tr>
+     *   <tr><td>timeoutMs</td><td>60000</td><td>单帧一次视觉推理的读超时；3B 视觉模型在 8GB 显存上首帧要 20-30s</td></tr>
+     * </table>
+     */
+    public static class Vision
+    {
+        /** 总开关：默认关闭（视觉模型需另外下载约 3GB，不该由一个按钮触发） */
+        private boolean enabled = false;
+
+        /** 视觉模型名 */
+        private String model = "qwen2.5vl:3b";
+
+        /** 抽帧数量 */
+        private int frames = 5;
+
+        /** 输出宽度（像素） */
+        private int width = 512;
+
+        /** 单帧推理读超时（毫秒） */
+        private int timeoutMs = 60000;
+
+        public boolean isEnabled()
+        {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled)
+        {
+            this.enabled = enabled;
+        }
+
+        public String getModel()
+        {
+            return model;
+        }
+
+        public void setModel(String model)
+        {
+            this.model = model;
+        }
+
+        public int getFrames()
+        {
+            return frames;
+        }
+
+        public void setFrames(int frames)
+        {
+            this.frames = frames;
+        }
+
+        public int getWidth()
+        {
+            return width;
+        }
+
+        public void setWidth(int width)
+        {
+            this.width = width;
+        }
+
+        public int getTimeoutMs()
+        {
+            return timeoutMs;
+        }
+
+        public void setTimeoutMs(int timeoutMs)
+        {
+            this.timeoutMs = timeoutMs;
+        }
+
+        /** 实际抽帧数：夹到 [2, 10]（1 帧看不出发展，10 帧以上对 3B 模型没有增益） */
+        public int getEffectiveFrames()
+        {
+            if (frames < 2)
+            {
+                return 2;
+            }
+            return Math.min(frames, 10);
+        }
+
+        /** 实际宽度：夹到 [256, 1024] */
+        public int getEffectiveWidth()
+        {
+            if (width < 256)
+            {
+                return 256;
+            }
+            return Math.min(width, 1024);
+        }
+
+        /** 实际读超时：小于 5000 按 5000 计（视觉首帧加载动辄 20s） */
+        public int getEffectiveTimeoutMs()
+        {
+            return timeoutMs < 5000 ? 5000 : timeoutMs;
+        }
+
+        /** 实际模型名：空白时回落到默认 3B 视觉模型 */
+        public String getEffectiveModel()
+        {
+            String v = model == null ? "" : model.trim();
+            return v.isEmpty() ? "qwen2.5vl:3b" : v;
+        }
+    }
+
+    /**
+     * 音频转写配置（P5.53 交付 3）：{@code qtools.media.llm.transcribe.*}
+     *
+     * <p><b>本机未装 whisper.cpp（{@code where whisper-cli} 无结果），因此这一路只落地配置与设计，
+     * 不实现调用</b>：默认 {@code enabled=false}，开启后服务层会把它当作「不可用来源」跳过，
+     * 并在 insufficient 的 reason 里说明原因。</p>
+     *
+     * <table border="1">
+     *   <caption>键（qtools.media.llm.transcribe.*）/ 默认值 / 语义</caption>
+     *   <tr><td>enabled</td><td>false</td><td>总开关</td></tr>
+     *   <tr><td>whisperPath</td><td>空</td><td>whisper.cpp 的 {@code whisper-cli} 可执行文件路径；空 = 用 PATH 里的</td></tr>
+     *   <tr><td>model</td><td>ggml-base.bin</td><td>whisper.cpp 模型文件名 / 路径</td></tr>
+     *   <tr><td>timeoutMs</td><td>120000</td><td>单条转写限时（默认 120s，超时即放弃这一条）</td></tr>
+     * </table>
+     */
+    public static class Transcribe
+    {
+        /** 总开关：默认关闭（本机没有 whisper.cpp） */
+        private boolean enabled = false;
+
+        /** whisper-cli 路径；空 = 交给 PATH */
+        private String whisperPath = "";
+
+        /** whisper.cpp 模型 */
+        private String model = "ggml-base.bin";
+
+        /** 单条转写限时（毫秒） */
+        private int timeoutMs = 120000;
+
+        public boolean isEnabled()
+        {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled)
+        {
+            this.enabled = enabled;
+        }
+
+        public String getWhisperPath()
+        {
+            return whisperPath;
+        }
+
+        public void setWhisperPath(String whisperPath)
+        {
+            this.whisperPath = whisperPath;
+        }
+
+        public String getModel()
+        {
+            return model;
+        }
+
+        public void setModel(String model)
+        {
+            this.model = model;
+        }
+
+        public int getTimeoutMs()
+        {
+            return timeoutMs;
+        }
+
+        public void setTimeoutMs(int timeoutMs)
+        {
+            this.timeoutMs = timeoutMs;
+        }
+
+        /** 实际限时：夹到 [10000, 600000] */
+        public int getEffectiveTimeoutMs()
+        {
+            if (timeoutMs < 10000)
+            {
+                return 10000;
+            }
+            return Math.min(timeoutMs, 600000);
+        }
+    }
+
     public String getTrashPath()
     {
         return trashPath;

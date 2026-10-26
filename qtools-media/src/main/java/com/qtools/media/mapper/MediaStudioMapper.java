@@ -76,4 +76,7 @@ public interface MediaStudioMapper
 
     /** 详情用：某视频的工作室名（按名称升序） */
     List<String> selectStudioNamesByVideoId(@Param("videoId") String videoId);
+
+    /** 站端元信息 / 单片详情用：某视频的工作室节点（[{id,name}]，hidden 的工作室不输出） */
+    List<Map<String, Object>> selectStudioNodesByVideoId(@Param("videoId") String videoId);
 }

@@ -76,6 +76,25 @@ public class MediaIndexController
         return mediaIndexService.selectVideoDetail(id);
     }
 
+    /**
+     * 单片元信息（P5.50，匿名只读）：{@code {id,rating,tags,persons,studios,markers,fps,dur}}
+     *
+     * <p>为什么需要它：信息栏的标记列表以前只有管理端 {@code GET /admin/video/{id}/meta}
+     * 能读（要 media:admin 权限），站端匿名访客一律 401，于是标记在站上等于废掉，
+     * 前端只能固定降级成「标记需要管理员身份读取」。本接口把同一份元信息放到免登录的
+     * {@code /media/**} 下。</p>
+     *
+     * <p>只读，<b>不受编辑策略（off/local/full）影响</b>；不输出任何管理端专属列
+     * （missing / mtime / 相对路径 / 哈希 / 扫描状态）。视频不存在或 {@code hidden = 1}
+     * 一律 404 —— 与 {@code GET /media/video/{id}} 完全同口径，不泄露「这有个隐藏片」。</p>
+     */
+    @GetMapping("/video/{id}/meta")
+    public Map<String, Object> videoMeta(@PathVariable("id") String id)
+    {
+        log.debug("查询视频元信息 id={}", id);
+        return mediaIndexService.selectVideoMeta(id);
+    }
+
     /** 单册详情（含 photos，seq 升序；photos[].hash = content_hash，供前端拼内容寻址缩略图） */
     @GetMapping("/album/{id}")
     public Map<String, Object> album(@PathVariable("id") String id,

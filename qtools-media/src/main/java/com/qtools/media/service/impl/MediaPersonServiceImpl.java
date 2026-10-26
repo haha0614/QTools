@@ -82,6 +82,23 @@ public class MediaPersonServiceImpl implements IMediaPersonService
     /** 与 media_person.avatar_path VARCHAR(400) 对齐 */
     private static final int AVATAR_MAX = 400;
 
+    // ---- P5.48 手动头像（doc/media_person_avatar.sql） ----
+
+    /** 手动头像来源：人物名下相册里的一张图（ref = {@code "<albumId>:<seq>"}） */
+    private static final String AVATAR_KIND_PHOTO = "photo";
+
+    /** 手动头像来源：外部图片地址（ref = http(s) / data:image） */
+    private static final String AVATAR_KIND_URL = "url";
+
+    /** 与 media_person.avatar_ref VARCHAR(512) 对齐 */
+    private static final int AVATAR_REF_MAX = 512;
+
+    /** 与 media_album.id VARCHAR(16) 对齐 */
+    private static final int ALBUM_ID_MAX = 16;
+
+    /** 缩略图 URL 前缀：与前端 useMediaApi.photoThumbUrl 同一套规则（/api/media/thumb/p/<albumId>/<pad4(seq)>） */
+    private static final String AVATAR_THUMB_PREFIX = "/api/media/thumb/p/";
+
     /** 与 media_video_actor.role VARCHAR(32) 对齐 */
     private static final int ROLE_MAX = 32;
 
@@ -256,6 +273,44 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         return personNode(mediaPersonMapper.selectPersonDetail(id));
     }
 
+    // ------------------------------------------------------------------ 站端：手动头像（P5.48）
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> setAvatar(Long id, String kind, String ref)
+    {
+        requirePerson(id);
+        String cleanKind = checkAvatarKind(kind);
+        String cleanRef = checkAvatarRef(cleanKind, ref);
+        if (AVATAR_KIND_PHOTO.equals(cleanKind))
+        {
+            // 「从该人物名下的图片里挑」要在服务端兜住：前端给的 albumId 是可见值，
+            // 但匿名接口不能相信它 —— 换成别人相册里的一张图，头像就挂上去了。
+            int colon = cleanRef.indexOf(':');
+            String albumId = cleanRef.substring(0, colon);
+            int seq = Integer.parseInt(cleanRef.substring(colon + 1));
+            if (mediaPersonMapper.countPersonPhotoOwned(id, albumId, seq) == 0)
+            {
+                throw MediaException.badRequest("该图片不在这个人物名下: " + cleanRef);
+            }
+        }
+        mediaPersonMapper.updatePersonAvatarRef(id, cleanKind, cleanRef);
+        invalidateIndex();
+        log.info("设置人物手动头像 id={} kind={} ref={}", id, cleanKind, cleanRef);
+        return personNode(mediaPersonMapper.selectPersonDetail(id));
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> clearAvatar(Long id)
+    {
+        requirePerson(id);
+        mediaPersonMapper.updatePersonAvatarRef(id, null, null);
+        invalidateIndex();
+        log.info("清除人物手动头像 id={}（回退三级自动）", id);
+        return personNode(mediaPersonMapper.selectPersonDetail(id));
+    }
+
     // ------------------------------------------------------------------ 管理端：绑定
 
     @Override
@@ -425,6 +480,10 @@ public class MediaPersonServiceImpl implements IMediaPersonService
             node.put("name", person.getName());
             node.put("alias", person.getAlias());
             node.put("useCount", person.getUseCount() == null ? 0 : person.getUseCount());
+            // P5.48：人物墙首屏就要头像，清单里直接把解析好的 URL 带上（否则 N 个人物 N 个详情请求）
+            node.put("avatarKind", person.getAvatarKind());
+            node.put("avatarRef", person.getAvatarRef());
+            node.put("avatarUrl", avatarUrlOf(person.getAvatarKind(), person.getAvatarRef(), person.getAvatarPath()));
             out.add(node);
         }
         return out;
@@ -474,6 +533,10 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         node.put("alias", person.getAlias());
         node.put("note", person.getNote());
         node.put("avatarPath", person.getAvatarPath());
+        // P5.48：手动头像三件套 —— kind / ref 是「存了什么」，avatarUrl 是「后端解析好的最终地址」
+        node.put("avatarKind", person.getAvatarKind());
+        node.put("avatarRef", person.getAvatarRef());
+        node.put("avatarUrl", avatarUrlOf(person.getAvatarKind(), person.getAvatarRef(), person.getAvatarPath()));
         node.put("gender", person.getGender());
         node.put("birthday", formatDate(person.getBirthday()));
         node.put("useCount", person.getUseCount() == null ? 0 : person.getUseCount());
@@ -736,6 +799,147 @@ public class MediaPersonServiceImpl implements IMediaPersonService
             throw MediaException.badRequest("path 必须是 http(s) URL 或站内绝对路径（以 / 开头）: " + path);
         }
         return path;
+    }
+
+    // ------------------------------------------------------------------ P5.48 手动头像：校验 / 解析
+
+    /** 只接受 photo / url（大小写不敏感）；其它一律 400 —— 不猜、不静默改写成 url */
+    private static String checkAvatarKind(String raw)
+    {
+        String kind = raw == null ? "" : raw.trim().toLowerCase(java.util.Locale.ROOT);
+        if (!AVATAR_KIND_PHOTO.equals(kind) && !AVATAR_KIND_URL.equals(kind))
+        {
+            throw MediaException.badRequest("kind 只接受 " + AVATAR_KIND_PHOTO + " / " + AVATAR_KIND_URL
+                    + "，本次: " + (raw == null ? "null" : raw));
+        }
+        return kind;
+    }
+
+    /**
+     * 归一 avatar ref（photo → {@code "<albumId>:<seq>"}，url → 原串）
+     *
+     * <p>photo 型这次只做<b>格式</b>校验（albumId 1-16 字符、seq 非负整数），
+     * 「这张图在不在该人物名下」由调用方查库确认 —— 那是业务判断，不是格式判断。</p>
+     */
+    private static String checkAvatarRef(String kind, String raw)
+    {
+        String ref = raw == null ? "" : raw.trim();
+        if (ref.isEmpty())
+        {
+            throw MediaException.badRequest("ref 必填（清除手动头像请用 DELETE /api/media/person/{id}/avatar）");
+        }
+        if (AVATAR_KIND_URL.equals(kind))
+        {
+            String lower = ref.toLowerCase(java.util.Locale.ROOT);
+            // 只放 http / https / data:image：javascript: 与 file: 会被 <img src> 或后续展示场景当真，
+            // 一个匿名写接口不该把它存进库再原样吐给所有人。
+            boolean ok = lower.startsWith("http://") || lower.startsWith("https://")
+                    || lower.startsWith("data:image/");
+            if (!ok)
+            {
+                throw MediaException.badRequest("ref 只接受 http:// / https:// / data:image/ 开头的地址: " + ref);
+            }
+            if (ref.length() > AVATAR_REF_MAX)
+            {
+                throw MediaException.badRequest("ref 最长 " + AVATAR_REF_MAX + " 个字符（data: 内联图片请改用图片地址）");
+            }
+            return ref;
+        }
+        int colon = ref.indexOf(':');
+        if (colon <= 0 || colon == ref.length() - 1)
+        {
+            throw MediaException.badRequest("photo 型 ref 格式为 <albumId>:<seq>（如 a164:0），本次: " + ref);
+        }
+        String albumId = ref.substring(0, colon).trim();
+        if (albumId.isEmpty() || albumId.length() > ALBUM_ID_MAX)
+        {
+            throw MediaException.badRequest("ref 里的 albumId 长度必须是 1-" + ALBUM_ID_MAX + ": " + albumId);
+        }
+        int seq;
+        try
+        {
+            seq = Integer.parseInt(ref.substring(colon + 1).trim());
+        }
+        catch (NumberFormatException e)
+        {
+            throw MediaException.badRequest("ref 里的 seq 必须是整数: " + ref);
+        }
+        if (seq < 0)
+        {
+            throw MediaException.badRequest("ref 里的 seq 不能为负: " + ref);
+        }
+        return albumId + ":" + seq;
+    }
+
+    /**
+     * 解析「最终头像 URL」——<b>后端解析，前端不拼</b>（P5.48 契约）
+     *
+     * <p>顺序：手动（avatar_kind + avatar_ref）→ 历史 avatar_path → {@code null}。
+     * {@code null} 的语义是「没有显式头像」，前端继续三级自动回退（相册首图 → 视频封面 → 首字占位）。
+     * 库里若有脏值（kind 非法 / photo 型 ref 不成形），这里一律当「没设手动头像」处理，
+     * 不抛异常 —— 一个坏行不该让整个人物列表读不出来。</p>
+     */
+    private static String avatarUrlOf(String kind, String ref, String avatarPath)
+    {
+        String cleanKind = kind == null ? "" : kind.trim().toLowerCase(java.util.Locale.ROOT);
+        String cleanRef = ref == null ? "" : ref.trim();
+        if (!cleanRef.isEmpty())
+        {
+            if (AVATAR_KIND_URL.equals(cleanKind))
+            {
+                return cleanRef;
+            }
+            if (AVATAR_KIND_PHOTO.equals(cleanKind))
+            {
+                int colon = cleanRef.indexOf(':');
+                if (colon > 0 && colon < cleanRef.length() - 1)
+                {
+                    String albumId = cleanRef.substring(0, colon).trim();
+                    try
+                    {
+                        int seq = Integer.parseInt(cleanRef.substring(colon + 1).trim());
+                        if (!albumId.isEmpty() && seq >= 0)
+                        {
+                            return photoThumbUrl(albumId, seq);
+                        }
+                    }
+                    catch (NumberFormatException ignored)
+                    {
+                        // 脏行：当没设手动头像，落到 avatar_path
+                    }
+                }
+            }
+        }
+        return siteUrl(avatarPath);
+    }
+
+    /** 站内缩略图 URL：{@code /api/media/thumb/p/<albumId>/<pad4(seq)>}（与前端 photoThumbUrl 完全同一条规则） */
+    private static String photoThumbUrl(String albumId, int seq)
+    {
+        StringBuilder url = new StringBuilder(AVATAR_THUMB_PREFIX).append(albumId).append('/');
+        String digits = String.valueOf(seq);
+        for (int i = digits.length(); i < 4; i++)
+        {
+            url.append('0');
+        }
+        return url.append(digits).toString();
+    }
+
+    /** 历史 avatar_path 归一：http(s) / '//' / 已带 '/' 原样用，其余当成站点根相对（与前端 normalizeAvatarPath 同规则） */
+    private static String siteUrl(String raw)
+    {
+        String path = trimToNull(raw);
+        if (path == null)
+        {
+            return null;
+        }
+        String lower = path.toLowerCase(java.util.Locale.ROOT);
+        if (lower.startsWith("http://") || lower.startsWith("https://") || path.startsWith("//")
+                || path.startsWith("/"))
+        {
+            return path;
+        }
+        return "/" + path;
     }
 
     private static String limit(String value, int max, String field)

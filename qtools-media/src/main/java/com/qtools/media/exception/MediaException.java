@@ -53,4 +53,15 @@ public class MediaException extends RuntimeException
     {
         return new MediaException(429, message);
     }
+
+    /**
+     * 503：依赖的外部能力**暂时**不可用（P5.47 本地模型未启动 / 未启用 / 超时）
+     *
+     * <p>与 {@link #conflict(String)} 的区别：409 是「当前状态冲突，用户自己关掉别的任务再来」，
+     * 503 是「这台机器的某个依赖没就绪」，前端据此显示「本地模型未就绪（Ollama 未启动？）」。</p>
+     */
+    public static MediaException serviceUnavailable(String message)
+    {
+        return new MediaException(503, message);
+    }
 }

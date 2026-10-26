@@ -143,8 +143,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
           and exists (select 1 from media_video_studio vs where vs.video_id = v.id and vs.studio_id = #{studioId})
     </select>
 
+    <!-- P5.50：多带 s.id —— 索引 videos[].studios 从「名称数组」升级成 [{id,name}] 节点 -->
     <select id="selectVideoStudioList" resultType="java.util.LinkedHashMap">
-        select vs.video_id as videoId, s.name as name
+        select vs.video_id as videoId, s.id as id, s.name as name
         from media_video_studio vs
         inner join media_studio s on s.id = vs.studio_id
         where s.hidden = 0
@@ -157,6 +158,15 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         inner join media_studio s on s.id = vs.studio_id
         where vs.video_id = #{videoId} and s.hidden = 0
         order by s.name asc
+    </select>
+
+    <!-- 单片详情 / 站端元信息：{id,name} 节点（管理端的 selectVideoStudios 还带 alias，站端不需要） -->
+    <select id="selectStudioNodesByVideoId" resultType="java.util.LinkedHashMap">
+        select s.id as id, s.name as name
+        from media_video_studio vs
+        inner join media_studio s on s.id = vs.studio_id
+        where vs.video_id = #{videoId} and s.hidden = 0
+        order by s.name asc, s.id asc
     </select>
 
 </mapper>

@@ -23,11 +23,14 @@ import com.qtools.media.domain.MediaAlbum;
 import com.qtools.media.domain.MediaIndexSnapshot;
 import com.qtools.media.domain.MediaPerson;
 import com.qtools.media.domain.MediaPhoto;
+import com.qtools.media.domain.MediaTag;
 import com.qtools.media.domain.MediaVideo;
 import com.qtools.media.domain.MediaVideoActor;
+import com.qtools.media.domain.MediaVideoMarker;
 import com.qtools.media.domain.MediaVideoTag;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaAlbumMapper;
+import com.qtools.media.mapper.MediaOrganizeMapper;
 import com.qtools.media.mapper.MediaPersonMapper;
 import com.qtools.media.mapper.MediaStudioMapper;
 import com.qtools.media.mapper.MediaPhotoMapper;
@@ -81,9 +84,13 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     @Autowired
     private MediaPersonMapper mediaPersonMapper;
 
-    /** 工作室（P5-A）：索引 videos[].studios 只需要「视频 → 工作室名」一批轻查询 */
+    /** 工作室（P5.50）：索引 videos[].studios 与站端元信息共用「视频 → 工作室节点」查询 */
     @Autowired
     private MediaStudioMapper mediaStudioMapper;
+
+    /** 组织属性只读（P5.50）：站端匿名元信息要读字典标签与时间点标记（标记没有任何索引侧副本） */
+    @Autowired
+    private MediaOrganizeMapper mediaOrganizeMapper;
 
     @Autowired
     private MediaProperties mediaProperties;
@@ -155,7 +162,93 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         {
             actors.add(actor.getName());
         }
-        return toVideoNode(video, tags, actors, videoPersons(id), mediaStudioMapper.selectStudioNamesByVideoId(id));
+        return toVideoNode(video, tags, actors, videoPersons(id),
+                studioNodes(mediaStudioMapper.selectStudioNodesByVideoId(id)));
+    }
+
+    /**
+     * 站端匿名读视频元信息（P5.50）：{@code {id,rating,tags,persons,studios,markers,fps,dur}}
+     *
+     * <p>5 条查询全部走主键 / {@code video_id} 索引（video 行、字典标签、标记、人物绑定、工作室绑定），
+     * 没有全表扫描也没有逐条反查。标记是<b>可变数据</b>，所以这里刻意不读索引快照缓存：
+     * 站端刚打完点就得能看到它，而快照有 60s TTL。写入路径本来就会 {@code invalidateSnapshot()}，
+     * 元信息这条实时读与它口径一致（索引缓存只服务 /media/index 那种大对象）。</p>
+     *
+     * <p>数组字段（tags / persons / studios / markers）<b>恒输出</b>（无内容就是空数组），
+     * 便于站端一次性拿齐形状；{@code fps} / {@code dur} 为 null 时整键不输出（老库未探测）；
+     * {@code rating} 恒输出，{@code null} = 未评分（与 {@code PUT /media/video/{id}/meta} 同形）。</p>
+     */
+    @Override
+    public Map<String, Object> selectVideoMeta(String id)
+    {
+        String videoId = StringUtils.isEmpty(id) ? null : id.trim();
+        if (videoId == null)
+        {
+            throw MediaException.notFound();
+        }
+        // selectVideoById 自带 hidden = 0：软删（hidden=1）与不存在同口径 → 404
+        MediaVideo video = mediaVideoMapper.selectVideoById(videoId);
+        if (video == null)
+        {
+            throw MediaException.notFound();
+        }
+
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("id", video.getId());
+        node.put("rating", video.getRating());
+
+        List<Map<String, Object>> tags = new ArrayList<>();
+        for (MediaTag tag : mediaOrganizeMapper.selectTagsByVideoId(videoId))
+        {
+            Map<String, Object> tagNode = new LinkedHashMap<>();
+            tagNode.put("id", tag.getId());
+            tagNode.put("name", tag.getName());
+            tagNode.put("color", tag.getColor());
+            tags.add(tagNode);
+        }
+        node.put("tags", tags);
+
+        List<Map<String, Object>> persons = new ArrayList<>();
+        for (Map<String, Object> row : mediaPersonMapper.selectPersonActorsByVideoId(videoId))
+        {
+            Map<String, Object> person = new LinkedHashMap<>();
+            person.put("id", row.get("personId"));
+            person.put("name", row.get("name"));
+            String role = stringOf(row.get("role"));
+            if (role != null)
+            {
+                person.put("role", role);
+            }
+            persons.add(person);
+        }
+        node.put("persons", persons);
+
+        List<Map<String, Object>> studios = studioNodes(mediaStudioMapper.selectStudioNodesByVideoId(videoId));
+        node.put("studios", studios == null ? List.of() : studios);
+
+        List<Map<String, Object>> markers = new ArrayList<>();
+        for (MediaVideoMarker marker : mediaOrganizeMapper.selectMarkersByVideoId(videoId))
+        {
+            Map<String, Object> mark = new LinkedHashMap<>();
+            mark.put("id", marker.getId());
+            mark.put("pos", marker.getPos());
+            // 单点标记回 null（不省略键）：站端据此区分「点」与「区间」，与管理端 meta 完全一致
+            mark.put("endPos", marker.getEndPos());
+            mark.put("label", marker.getLabel());
+            mark.put("color", marker.getColor());
+            markers.add(mark);
+        }
+        node.put("markers", markers);
+
+        if (video.getFps() != null)
+        {
+            node.put("fps", video.getFps());
+        }
+        if (video.getDur() != null)
+        {
+            node.put("dur", video.getDur());
+        }
+        return node;
     }
 
     @Override
@@ -218,17 +311,18 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             }
             personsByVideo.computeIfAbsent(videoId, k -> new ArrayList<>()).add(personNode(row));
         }
-        // 工作室（P5-A）：一次取全部「视频 / 工作室名」对，逐条挂到 videos[]；hidden 的工作室不输出
-        Map<String, List<String>> studiosByVideo = new HashMap<>();
+        // 工作室（P5.50 起输出 {id,name} 节点，P5-A 只给名称数组）：一次取全部「视频 / 工作室」对，
+        // 逐条挂到 videos[]；hidden 的工作室不输出。仍是**一条**整表查询，没有 N+1。
+        Map<String, List<Map<String, Object>>> studiosByVideo = new HashMap<>();
         for (Map<String, Object> row : mediaStudioMapper.selectVideoStudioList())
         {
             String videoId = stringOf(row.get("videoId"));
-            String name = stringOf(row.get("name"));
-            if (videoId == null || name == null)
+            Map<String, Object> studio = studioNode(row);
+            if (videoId == null || studio == null)
             {
                 continue;
             }
-            studiosByVideo.computeIfAbsent(videoId, k -> new ArrayList<>()).add(name);
+            studiosByVideo.computeIfAbsent(videoId, k -> new ArrayList<>()).add(studio);
         }
         Map<String, List<String>> personNamesByAlbum = new HashMap<>();
         for (Map<String, Object> row : mediaPersonMapper.selectAlbumPersonList())
@@ -250,6 +344,12 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         Set<String> spriteKeys = mediaFileService.spriteKeys();
         Set<String> previewKeys = mediaFileService.previewKeys();
 
+        // P5.45：人物节点补「最近更新」用的人-时间表 —— 视频按**人名**、相册按**person_id** 收集 mtime，
+        // 因为 videos[].persons 里只有 name（索引侧从不输出 id 之外的人物列），而 albums[].personId 是现成的。
+        // 两张表都只保留最大值；不新增任何 SQL（videos / albums 本来就已经整表读进来了）。
+        Map<String, Date> videoMtimeByPerson = new HashMap<>();
+        Map<Long, Date> albumMtimeByPerson = new HashMap<>();
+
         List<Map<String, Object>> videoNodes = new ArrayList<>(videos.size());
         int posterCount = 0;
         for (MediaVideo video : videos)
@@ -263,6 +363,10 @@ public class MediaIndexServiceImpl implements IMediaIndexService
                     studiosByVideo.get(video.getId()));
             putDerived(node, video, spriteKeys, previewKeys);
             videoNodes.add(node);
+            for (Map<String, Object> bound : personsByVideo.getOrDefault(video.getId(), List.of()))
+            {
+                putLater(videoMtimeByPerson, stringOf(bound.get("name")), video.getMtime());
+            }
         }
 
         List<MediaAlbum> albums = mediaAlbumMapper.selectAlbumList();
@@ -285,6 +389,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             if (album.getPersonId() != null)
             {
                 albumsByPerson.computeIfAbsent(album.getPersonId(), k -> new ArrayList<>()).add(album);
+                putLater(albumMtimeByPerson, album.getPersonId(), album.getMtime());
             }
         }
 
@@ -306,6 +411,13 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             node.put("photos", photos);
             node.put("albums", albumIds);
             node.put("cover", own.isEmpty() ? null : own.get(0).getCoverPath());
+            // P5.45：最近更新 = 名下相册 / 视频的 mtime 最大值（epoch 毫秒，站端按本地时区格式化成 YYYY-MM-DD）。
+            // 两者都没有（空壳人物）时整键不输出 —— 前端据此不渲染「最近」行，不留空洞。
+            Date latest = later(albumMtimeByPerson.get(person.getId()), videoMtimeByPerson.get(person.getName()));
+            if (latest != null)
+            {
+                node.put("mtime", latest.getTime());
+            }
             personNodes.add(node);
             personCount++;
         }
@@ -335,6 +447,46 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         out.put("albums", albumNodes);
         out.put("people", personNodes);
         return out;
+    }
+
+    /**
+     * 单个工作室节点：{@code {id,name}}
+     *
+     * <p>管理端那份（{@code selectVideoStudios}）还带 alias 等编辑字段，站端一律不需要：
+     * 名字用于展示 / 筛选，id 用于详情与元信息对齐。</p>
+     *
+     * @return 名称为空时返回 null（调用方据此跳过该行）
+     */
+    private static Map<String, Object> studioNode(Map<String, Object> row)
+    {
+        String name = stringOf(row.get("name"));
+        if (name == null)
+        {
+            return null;
+        }
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("id", row.get("id"));
+        node.put("name", name);
+        return node;
+    }
+
+    /** 工作室节点列表；空 / 全无效时返回 null（沿用 videos[].studios「非空才输出」口径） */
+    private static List<Map<String, Object>> studioNodes(List<Map<String, Object>> rows)
+    {
+        if (rows == null || rows.isEmpty())
+        {
+            return null;
+        }
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (Map<String, Object> row : rows)
+        {
+            Map<String, Object> node = studioNode(row);
+            if (node != null)
+            {
+                out.add(node);
+            }
+        }
+        return out.isEmpty() ? null : out;
     }
 
     /** 单个人物绑定节点：{@code {id,name,role?}}（role 为 null 时整键不输出） */
@@ -408,7 +560,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     }
 
     private Map<String, Object> toVideoNode(MediaVideo video, List<String[]> tags, List<String> actors,
-            List<Map<String, Object>> persons, List<String> studios)
+            List<Map<String, Object>> persons, List<Map<String, Object>> studios)
     {
         Map<String, Object> node = new LinkedHashMap<>();
         node.put("id", video.getId());
@@ -456,7 +608,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         {
             node.put("persons", persons);
         }
-        // 工作室（P5-A）：同样非空才输出；值是工作室名（站端只按名字筛选 / 展示）
+        // 工作室：同样非空才输出；值是 {@code [{id,name}]}（站端按名字筛选 / 展示，id 留给详情与元信息对齐）
         if (studios != null && !studios.isEmpty())
         {
             node.put("studios", studios);
@@ -543,6 +695,34 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     }
 
     // ------------------------------------------------------------------ 工具
+
+    /** 两个时间取较晚的那个（任一侧为 null 就取另一侧；都 null → null） */
+    private static Date later(Date a, Date b)
+    {
+        if (a == null)
+        {
+            return b;
+        }
+        if (b == null)
+        {
+            return a;
+        }
+        return b.after(a) ? b : a;
+    }
+
+    /** 往「键 → 最大 mtime」表里记一条（键 / 值为 null 直接忽略，避免 merge 对 null 值抛 NPE） */
+    private static <K> void putLater(Map<K, Date> target, K key, Date value)
+    {
+        if (key == null || value == null)
+        {
+            return;
+        }
+        Date prev = target.get(key);
+        if (prev == null || value.after(prev))
+        {
+            target.put(key, value);
+        }
+    }
 
     private Date maxMtime()
     {

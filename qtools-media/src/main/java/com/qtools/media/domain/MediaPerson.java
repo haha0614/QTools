@@ -30,6 +30,25 @@ public class MediaPerson
     /** 头像路径（可空，<= 400；站内相对路径或 http(s) URL） */
     private String avatarPath;
 
+    /**
+     * 手动头像来源类型（P5.48，可空）：{@code photo} = 人物名下相册里的一张图 / {@code url} = 外部图片地址
+     *
+     * <p>与 {@link #avatarPath} 并存：老列照旧可读写（管理端 {@code POST /admin/persons/{id}/avatar}），
+     * 手动头像是<b>更高优先级</b>的一层，解析顺序见 {@code MediaPersonServiceImpl#avatarUrlOf}。</p>
+     */
+    private String avatarKind;
+
+    /**
+     * 手动头像来源标识（P5.48，可空，<= 512）：<b>不存二进制</b>
+     *
+     * <ul>
+     *   <li>{@code avatarKind = photo} → {@code "<albumId>:<seq>"}（如 {@code a164:0}）；
+     *       用自然键而不是 {@code media_photo.id}，重扫后 id 会变、自然键不会</li>
+     *   <li>{@code avatarKind = url} → {@code https://…} / {@code http://…} / {@code data:image/…}</li>
+     * </ul>
+     */
+    private String avatarRef;
+
     /** 性别（可空，<= 16；自由文本，建议 女 / 男 / 未知） */
     private String gender;
 
@@ -277,6 +296,26 @@ public class MediaPerson
     public void setAvatarPath(String avatarPath)
     {
         this.avatarPath = avatarPath;
+    }
+
+    public String getAvatarKind()
+    {
+        return avatarKind;
+    }
+
+    public void setAvatarKind(String avatarKind)
+    {
+        this.avatarKind = avatarKind;
+    }
+
+    public String getAvatarRef()
+    {
+        return avatarRef;
+    }
+
+    public void setAvatarRef(String avatarRef)
+    {
+        this.avatarRef = avatarRef;
     }
 
     public String getGender()

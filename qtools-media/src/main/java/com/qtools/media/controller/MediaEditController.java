@@ -7,6 +7,7 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -19,11 +20,14 @@ import com.qtools.media.exception.MediaException;
 import com.qtools.media.service.IMediaEditPolicyService;
 import com.qtools.media.service.IMediaOrganizeService;
 import com.qtools.media.service.IMediaPersonService;
+import com.qtools.media.service.IMediaSynopsisService;
+import static com.qtools.media.support.MediaBodyParser.booleanValue;
 import static com.qtools.media.support.MediaBodyParser.longsValue;
 import static com.qtools.media.support.MediaBodyParser.metaPatch;
 import static com.qtools.media.support.MediaBodyParser.parseObject;
 import static com.qtools.media.support.MediaBodyParser.rolesValue;
 import static com.qtools.media.support.MediaBodyParser.stringValue;
+import static com.qtools.media.support.MediaBodyParser.stringsValue;
 import static com.qtools.media.support.MediaBodyParser.textValue;
 
 /**
@@ -58,6 +62,8 @@ import static com.qtools.media.support.MediaBodyParser.textValue;
  *   <li>{@code PUT /media/video/{id}/persons} 演员与角色全量替换（P5.3-A）</li>
  *   <li>{@code POST /media/videos/batch-meta} 批量补丁</li>
  *   <li>{@code PUT /media/video/{id}/synopsis} 作品简介 / 剧情梗概（P5.38）</li>
+ *   <li>{@code PUT /media/person/{id}/avatar} 手动指定人物头像（P5.48）</li>
+ *   <li>{@code DELETE /media/person/{id}/avatar} 清除手动头像，回退三级自动（P5.48）</li>
  * </ul>
  * <p>人物只读四件套（清单 / 详情 / 名下视频 / 名下相册）仍在 {@link MediaPersonController}，
  * 那里类级说明写着「只读」——所以人物<b>写</b>接口故意放在本类，与闸门同处一个文件。</p>
@@ -80,6 +86,10 @@ public class MediaEditController
     /** 站端演员（人物）绑定与现场建人：业务实现全部在 {@link IMediaPersonService}，本类只加闸门（P5.3-A） */
     @Autowired
     private IMediaPersonService mediaPersonService;
+
+    /** 作品简介自动生成（P5.47）：站端只用一个「⚡ 自动生成」按钮，业务全部在服务层 */
+    @Autowired
+    private IMediaSynopsisService mediaSynopsisService;
 
     // ------------------------------------------------------------------ 读
 
@@ -208,6 +218,48 @@ public class MediaEditController
     }
 
     /**
+     * 站端手动指定人物头像（P5.48）：body {@code {kind, ref}} → 解析好最终 URL 的整个人物节点
+     *
+     * <p>{@code kind = "photo"} 时 {@code ref = "<albumId>:<seq>"}（必须是<b>该人物名下</b>相册里的图），
+     * {@code kind = "url"} 时 {@code ref} 是 {@code http(s)://} / {@code data:image/…} 地址。
+     * <b>不存二进制</b>：上传图片仍走项目既有的 {@code POST /common/upload}，拿到 URL 之后再用
+     * {@code kind = "url"} 挂上来。</p>
+     *
+     * <p>回包 {@code {..., avatarKind, avatarRef, avatarUrl}}：{@code avatarUrl} 由后端拼
+     * （photo → {@code /api/media/thumb/p/<albumId>/<pad4(seq)>}），前端直接用、不自己拼缩略图 URL。</p>
+     *
+     * <p>错误码：kind 非法 / ref 空 / ref 格式不对 / 图片不在该人物名下 → <b>400</b>；
+     * 人物不存在 → <b>404</b>；编辑策略非 full → <b>403</b>（闸门在第一行，先于 body 解析）。</p>
+     */
+    @PutMapping("/person/{id}/avatar")
+    public Map<String, Object> setPersonAvatar(@PathVariable("id") Long id,
+            @RequestBody(required = false) String rawBody)
+    {
+        mediaEditPolicyService.requireWritable();
+        Map<String, Object> body = parseObject(rawBody, true);
+        Map<String, Object> out = mediaPersonService.setAvatar(id, stringValue(body.get("kind")),
+                stringValue(body.get("ref")));
+        log.debug("站端设置人物头像 id={} kind={} ref={}", id, body.get("kind"), body.get("ref"));
+        return out;
+    }
+
+    /**
+     * 站端清除人物手动头像（P5.48）：{@code DELETE /media/person/{id}/avatar} → 回退三级自动
+     *
+     * <p>清的是 {@code avatar_kind / avatar_ref}（手动那层）；历史 {@code avatar_path} 不动
+     * （它属于管理端的「上传头像」通道，站端没有权限也没有理由去抹掉）。
+     * 人物不存在 → 404；编辑策略非 full → 403。</p>
+     */
+    @DeleteMapping("/person/{id}/avatar")
+    public Map<String, Object> clearPersonAvatar(@PathVariable("id") Long id)
+    {
+        mediaEditPolicyService.requireWritable();
+        Map<String, Object> out = mediaPersonService.clearAvatar(id);
+        log.debug("站端清除人物头像 id={}", id);
+        return out;
+    }
+
+    /**
      * 站端写作品简介：body {@code {synopsis}}（null 或空串 = 清空）→ {@code {id, synopsis}}
      *
      * <p>业务全部复用 {@link IMediaOrganizeService#updateVideoSynopsis(String, String)}：长度上限 8000
@@ -229,6 +281,79 @@ public class MediaEditController
             throw MediaException.badRequest("synopsis 必填（null 或空串 = 清空）");
         }
         return mediaOrganizeService.updateVideoSynopsis(id, textValue(body.get("synopsis"), "synopsis"));
+    }
+
+    // ------------------------------------------------------------------ 作品简介自动生成（P5.47）
+
+    /**
+     * 站端生成能力：{@code {template:{maxChars}, llm:{enabled,provider,model}}}（<b>读接口，不看策略</b>）
+     *
+     * <p>信息栏要按它决定「⚡ 自动生成」走本地模型还是模板；off 档也允许读——它只描述服务器能力，
+     * 不含任何视频内容，也不触发任何生成。</p>
+     */
+    @GetMapping("/synopsis/capabilities")
+    public Map<String, Object> synopsisCapabilities()
+    {
+        return mediaSynopsisService.capabilities();
+    }
+
+    /**
+     * 站端模板生成（预览，不落库）→ {@code {id, synopsis, chars, mode:"template"}}
+     *
+     * <p>闸门与其它写接口同档，但用的是 {@link #requireSynopsisUsable()}（只挡 off）：
+     * 「local 档」的语义是「只在浏览器本地改」，生成结果正好也是存本地的，堵掉它没有道理；
+     * off 档才是彻底关掉。</p>
+     */
+    @PostMapping("/video/{id}/synopsis/template")
+    public Map<String, Object> synopsisTemplate(@PathVariable("id") String id)
+    {
+        requireSynopsisUsable();
+        return mediaSynopsisService.template(id);
+    }
+
+    /**
+     * 站端本地模型生成（预览，不落库）→ {@code {id, synopsis, chars, mode:"llm", model, provider, ms}}
+     *
+     * <p>本地模型没启用 / 没启动 / 超时 → <b>503</b> + 明确文案，前端据此显示
+     * 「本地模型未就绪（Ollama 未启动？）」并自动回退到模板生成（不让用户空手）。</p>
+     */
+    @PostMapping("/video/{id}/synopsis/llm")
+    public Map<String, Object> synopsisLlm(@PathVariable("id") String id)
+    {
+        requireSynopsisUsable();
+        return mediaSynopsisService.llm(id);
+    }
+
+    /**
+     * 站端批量生成（视频库工具栏）：body {@code {videoIds:[...] | all:true, mode, overwrite}}
+     *
+     * <p>这条<b>会写库</b>（每条生成完立刻保存），所以闸门是 {@code requireWritable()}（只有 full 档放行），
+     * 与 {@code POST /media/videos/batch-meta} 同一档位——批量操作在站端一直是 full 专属。</p>
+     */
+    @PostMapping("/synopsis/generate")
+    public Map<String, Object> synopsisGenerate(@RequestBody(required = false) String rawBody)
+    {
+        mediaEditPolicyService.requireWritable();
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaSynopsisService.startBatch(stringsValue(body.get("videoIds"), "videoIds"),
+                booleanValue(body.get("all")), stringValue(body.get("mode")), booleanValue(body.get("overwrite")));
+    }
+
+    /** 站端批量任务进度：{@code {jobId,status,total,processed,generated,skipped,failed,items:[...]}}（只挡 off 档） */
+    @GetMapping("/synopsis/jobs/{jobId}")
+    public Map<String, Object> synopsisJob(@PathVariable("jobId") String jobId)
+    {
+        requireSynopsisUsable();
+        return mediaSynopsisService.job(jobId);
+    }
+
+    /** 简介生成的站端闸门：只有 off 档拒绝（预览不落库，local 档也要能用） */
+    private void requireSynopsisUsable()
+    {
+        if ("off".equals(mediaEditPolicyService.getLevel()))
+        {
+            throw MediaException.forbidden();
+        }
     }
 
     /**

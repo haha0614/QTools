@@ -53,6 +53,21 @@ public interface IMediaIndexService
     Map<String, Object> selectAlbumDetail(String id, boolean includeMissing);
 
     /**
+     * 站端匿名读视频元信息（P5.50）：{@code {id,rating,tags,persons,studios,markers,fps,dur}}
+     *
+     * <p>播放器信息栏原来只能靠管理端 {@code GET /admin/video/{id}/meta} 读标记，站端（匿名）
+     * 永远拿不到，标记功能在站上一律降级成一句「标记需要管理员身份读取」。本方法复用
+     * 索引侧的只读查询给站端一个匿名入口：<b>只读、不看编辑策略</b>。</p>
+     *
+     * <p>口径：{@code hidden = 1} 与不存在的 id 一样回 404（与 {@code GET /media/video/{id}} 同）；
+     * 只输出渲染用字段，管理端专属列（missing / mtime / 相对路径 / 哈希 / 扫描状态）一概不出。</p>
+     *
+     * @param id 视频 id
+     * @return 元信息节点；视频不存在或已 hidden 抛 404
+     */
+    Map<String, Object> selectVideoMeta(String id);
+
+    /**
      * 丢弃索引快照缓存
      *
      * <p>管理端改了 hidden / 人物归属或跑完扫描后调用：索引本身按 {@code hidden = 0} 过滤，

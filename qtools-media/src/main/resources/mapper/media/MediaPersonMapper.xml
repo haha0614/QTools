@@ -20,6 +20,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="alias"      column="alias"       />
         <result property="note"       column="note"        />
         <result property="avatarPath" column="avatar_path" />
+        <result property="avatarKind" column="avatar_kind" />
+        <result property="avatarRef"  column="avatar_ref"  />
         <result property="gender"     column="gender"      />
         <result property="birthday"   column="birthday"    />
         <result property="useCount"   column="use_count"   />
@@ -44,7 +46,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <!-- 人物行 + 两个只读计数（视频数按 media_video_actor 去重；相册数取两个来源的并集） -->
     <sql id="personColumns">
-        p.id, p.name, p.alias, p.note, p.avatar_path, p.gender, p.birthday, p.use_count, p.sort,
+        p.id, p.name, p.alias, p.note, p.avatar_path, p.avatar_kind, p.avatar_ref,
+        p.gender, p.birthday, p.use_count, p.sort,
         p.measurements, p.career_start, p.career_end, p.tattoos, p.piercings, p.ethnicity,
         p.hair_color, p.eye_color, p.height_cm, p.weight_kg, p.fake_boobs, p.nationality,
         p.twitter, p.instagram,
@@ -102,7 +105,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </select>
 
     <select id="selectPersonBriefList" resultMap="MediaPersonResult">
-        select p.id, p.name, p.alias, p.use_count
+        select p.id, p.name, p.alias, p.use_count, p.avatar_path, p.avatar_kind, p.avatar_ref
         from media_person p
         where p.hidden = 0
         order by p.use_count desc, p.sort asc, p.id asc
@@ -110,11 +113,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <insert id="insertPerson" parameterType="com.qtools.media.domain.MediaPerson"
             useGeneratedKeys="true" keyProperty="id">
-        insert into media_person (name, alias, note, avatar_path, gender, birthday, use_count,
+        insert into media_person (name, alias, note, avatar_path, avatar_kind, avatar_ref,
+                                  gender, birthday, use_count,
                                   measurements, career_start, career_end, tattoos, piercings, ethnicity,
                                   hair_color, eye_color, height_cm, weight_kg, fake_boobs, nationality,
                                   twitter, instagram)
-        values (#{name}, #{alias}, #{note}, #{avatarPath}, #{gender}, #{birthday}, 0,
+        values (#{name}, #{alias}, #{note}, #{avatarPath}, #{avatarKind}, #{avatarRef},
+                #{gender}, #{birthday}, 0,
                 #{measurements}, #{careerStart}, #{careerEnd}, #{tattoos}, #{piercings}, #{ethnicity},
                 #{hairColor}, #{eyeColor}, #{heightCm}, #{weightKg}, #{fakeBoobs}, #{nationality},
                 #{twitter}, #{instagram})
@@ -143,6 +148,32 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     <update id="updatePersonAvatar">
         update media_person set avatar_path = #{avatarPath} where id = #{id}
     </update>
+
+    <!-- P5.48 手动头像：两列一起写（kind 决定 ref 怎么解释，单写一列就会出现「kind 说 photo、ref 是 URL」的半成品行） -->
+    <update id="updatePersonAvatarRef">
+        update media_person
+           set avatar_kind = #{avatarKind},
+               avatar_ref  = #{avatarRef}
+         where id = #{id}
+    </update>
+
+    <!--
+        P5.48 校验「这张图确实在这个人物名下」：media_photo(album_id, seq) 存在，
+        且该相册属于这个人物（media_album_person 多对多 ∪ media_album.person_id 单选镜像列，与人物页同一口径）。
+        不做 hidden 过滤：隐藏的图仍是有效来源（用户可能先在隐藏相册里挑好再显示），
+        这里只回答「存在 + 归属」，不做可见性判断。
+    -->
+    <select id="countPersonPhotoOwned" resultType="long">
+        select count(*) from media_photo ph
+        where ph.album_id = #{albumId} and ph.seq = #{seq}
+          and exists (
+              select 1 from media_album al
+              where al.id = ph.album_id
+                and (al.person_id = #{personId}
+                     or exists (select 1 from media_album_person ap
+                                 where ap.album_id = al.id and ap.person_id = #{personId}))
+          )
+    </select>
 
     <!-- P5-A 资料字段：一次覆盖 14 列（服务层已把未出现的字段合并成现值，null = 清空） -->
     <update id="updatePersonProfile">

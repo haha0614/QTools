@@ -62,6 +62,14 @@ public interface MediaPersonMapper
     /** 改头像；null = 清空 */
     int updatePersonAvatar(@Param("id") Long id, @Param("avatarPath") String avatarPath);
 
+    /** 改手动头像来源（P5.48）：两列一起写；null + null = 清除（回退三级自动） */
+    int updatePersonAvatarRef(@Param("id") Long id, @Param("avatarKind") String avatarKind,
+            @Param("avatarRef") String avatarRef);
+
+    /** 校验「该图片在该人物名下」：（albumId, seq）存在且相册属于这个人物（P5.48） */
+    long countPersonPhotoOwned(@Param("personId") Long personId, @Param("albumId") String albumId,
+            @Param("seq") int seq);
+
     /**
      * 覆盖式更新 P5-A 的 14 个资料字段（null = 清空该列）
      *

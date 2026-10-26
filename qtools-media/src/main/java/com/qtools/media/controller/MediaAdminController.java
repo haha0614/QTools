@@ -43,6 +43,7 @@ import com.qtools.media.service.IMediaPlaylistService;
 import com.qtools.media.service.IMediaSavedFilterService;
 import com.qtools.media.service.IMediaScanService;
 import com.qtools.media.service.IMediaStudioService;
+import com.qtools.media.service.IMediaSynopsisService;
 import com.qtools.media.service.IMediaWatchService;
 import static com.qtools.media.support.MediaBodyParser.booleanValue;
 import static com.qtools.media.support.MediaBodyParser.boolValue;
@@ -89,6 +90,10 @@ public class MediaAdminController extends BaseController
 
     @Autowired
     private IMediaOrganizeService mediaOrganizeService;
+
+    /** 作品简介自动生成（模板 / 本地模型 / 批量任务），P5.47 */
+    @Autowired
+    private IMediaSynopsisService mediaSynopsisService;
 
     /** 人物 / 演员体系（P3-A）：字典 CRUD + 视频/相册人物绑定 */
     @Autowired
@@ -822,6 +827,74 @@ public class MediaAdminController extends BaseController
             throw MediaException.badRequest("synopsis 必填（null 或空串 = 清空）");
         }
         return mediaOrganizeService.updateVideoSynopsis(id, textValue(body.get("synopsis"), "synopsis"));
+    }
+
+    // ------------------------------------------------------------------ 作品简介自动生成（P5.47）
+
+    /**
+     * 生成能力：{@code {template:{maxChars}, llm:{enabled,provider,model}}}
+     *
+     * <p>前端据此决定「⚡ 自动生成」默认走本地模型还是模板；不含 baseUrl / apiKey。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/synopsis/capabilities")
+    public Map<String, Object> synopsisCapabilities()
+    {
+        return mediaSynopsisService.capabilities();
+    }
+
+    /**
+     * 模板生成（P5.47 交付 1）：<b>预览，不落库</b> → {@code {id, synopsis, chars, mode:"template"}}
+     *
+     * <p>为什么是 POST 而不是 GET：它虽然不写库，但不是幂等读取——同一份素材以后可能换规则，
+     * 缓存住「生成结果」没有意义；POST 也让调用方没法被浏览器预取。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @PostMapping("/videos/{id}/synopsis/template")
+    public Map<String, Object> synopsisTemplate(@PathVariable("id") String id)
+    {
+        return mediaSynopsisService.template(id);
+    }
+
+    /**
+     * 本地模型生成（P5.47 交付 2，<b>预览，不落库</b>）→ {@code {id, synopsis, chars, mode:"llm", model, provider, ms}}
+     *
+     * <p>未启用 / Ollama 没起 / 超时 / 返回空 一律 503 + 明确文案（错误体仍是 {@code {"error":"..."}}），
+     * 前端据此显示「本地模型未就绪（Ollama 未启动？）」并自动回退到模板生成。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @PostMapping("/videos/{id}/synopsis/llm")
+    public Map<String, Object> synopsisLlm(@PathVariable("id") String id)
+    {
+        return mediaSynopsisService.llm(id);
+    }
+
+    /**
+     * 批量生成（P5.47 交付 2）：body {@code {videoIds:[...] | all:true, mode:"template"|"llm", overwrite:false}}
+     *
+     * <p>创建后台任务并立即返回任务节点；任务**逐个**处理，每完成一条立刻落库（生成一个替换一个），
+     * 进度与逐条结果用 {@code GET /synopsis/jobs/{jobId}} 查。
+     * {@code overwrite=false}（默认）时已有简介的视频直接跳过。</p>
+     *
+     * <p>{@code mode="llm"} 而本地模型没启用 → 503（而不是静默降级成模板：调用方显式要了模型，
+     * 悄悄换实现比失败更难排查）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-批量生成简介", businessType = BusinessType.UPDATE)
+    @PostMapping("/synopsis/generate")
+    public Map<String, Object> synopsisGenerate(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaSynopsisService.startBatch(stringsValue(body.get("videoIds"), "videoIds"),
+                booleanValue(body.get("all")), stringValue(body.get("mode")), booleanValue(body.get("overwrite")));
+    }
+
+    /** 批量任务进度与逐条结果：{@code {jobId,mode,status,total,processed,generated,skipped,failed,items:[...]}} */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/synopsis/jobs/{jobId}")
+    public Map<String, Object> synopsisJob(@PathVariable("jobId") String jobId)
+    {
+        return mediaSynopsisService.job(jobId);
     }
 
     // ------------------------------------------------------------------ 站端编辑策略
