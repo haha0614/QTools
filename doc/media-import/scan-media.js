@@ -25,6 +25,10 @@
  *         photo.seq = 册内文件名自然序（数字感知）从 0 递增
  *         photo.is_big = bytes >= --big-bytes（默认 2MB）
  *         album.photo_count / album.bytes 累加；cover_path = thumbs/p/<albumId>/0000.jpg
+ *         唯一性保证：相册身份只有 (dir_key,title) 一个键。换了 --album-mode 或改了标题推导，旧行既不会
+ *         被复用也不会被删——P5.43 起改为「不许静默并存」：本次没被任何分组认领、且册内 0 图、dir_key
+ *         又落在本次产物里的旧行，默认直接报错退出（不写库），加 --purge-unclaimed 才在同一事务里删掉；
+ *         存量清理见 doc/media_album_dedupe.sql（先预览再删、幂等）
  *   people 恒为 0：通用扫描不生成人物（media_album.person_id 留 NULL）
  *
  * 身份（可移植性，配合 doc/media_portability.sql）：
@@ -122,6 +126,10 @@ const HELP = `
   --album-mode=dir|prefix
                       相册划分：dir=一个目录一本册（默认）；
                       prefix=目录内再按文件名（去扩展名）开头 ^(\d{1,4})[_\-\s] 分组，每组一本册
+  --purge-unclaimed   把「本次没被任何分组认领 + 册内 0 图 + dir_key 在本次产物里」的旧相册行
+                      连同其人物关联行一起删掉（同一个事务内）。不加这个开关时，一旦发现这类
+                      旧行，脚本会直接报错退出、不写库——避免换模式/改标题推导后两套相册并存
+                      （等价的手工清理见 doc/media_album_dedupe.sql，可先预览再删）
   --backfill-hash     给库里 content_hash IS NULL 的行补哈希（按 --root + rel_path 读文件），
                       顺带补齐 media_album.dir_key；文件不存在只计数不删行
   --fix-poster-path   只更新 media_video.poster_path（不改其它列、不扫盘、不需要 --root）：
@@ -178,7 +186,7 @@ function parseArgs(argv) {
   const o = Object.assign({}, DEFAULTS, {
     root: null, mysql: null, secret: null, dumpSql: null, truncate: false, yes: false, dryRun: false,
     ignored: [], noHash: false, backfillHash: false, fixPosterPath: false, limit: null, rootId: null,
-    pruneMissing: false,
+    pruneMissing: false, purgeUnclaimed: false,
   });
   for (const a of argv) {
     if (a === '--truncate') o.truncate = true;
@@ -189,6 +197,7 @@ function parseArgs(argv) {
     else if (a === '--backfill-hash') o.backfillHash = true;
     else if (a === '--fix-poster-path') o.fixPosterPath = true;
     else if (a === '--prune-missing') o.pruneMissing = true;
+    else if (a === '--purge-unclaimed') o.purgeUnclaimed = true;
     else if (a.startsWith('--root=')) o.root = a.slice('--root='.length);
     else if (a.startsWith('--db=')) o.db = a.slice('--db='.length);
     else if (a.startsWith('--user=')) o.user = a.slice('--user='.length);
@@ -578,6 +587,15 @@ function scanDisk(root, o) {
     g.photos.sort((a, b) => naturalCompare(a.name, b.name));
     g.titleGuess = g.prefix ? prefixTitle(g.prefix, g.photos[0].base) : dirTitleOf(g.dirKey, rootTitle);
   }
+  // 前缀分册只在「目录里真的分成多册」时才有意义：某个目录本次只分出一册时，标题直接用
+  // 目录名——否则像 1 (1).jpg / 1 (2).jpg 这种文件名会把整本册命名成 "1 (1)"，
+  // 而它就是该目录唯一的内容，标题完全是噪音。同时让 dir / prefix 两种模式对这类目录
+  // 产出同一个标题，切模式不再造出两套相册行。
+  const groupsPerDir = new Map();
+  for (const g of list) groupsPerDir.set(g.dirKey, (groupsPerDir.get(g.dirKey) || 0) + 1);
+  for (const g of list) {
+    if (g.prefix && groupsPerDir.get(g.dirKey) === 1) g.titleGuess = dirTitleOf(g.dirKey, rootTitle);
+  }
   list.sort((a, b) => naturalCompare(a.dirKey, b.dirKey) ||
     naturalCompare(a.prefix === null ? '' : '#' + a.prefix, b.prefix === null ? '' : '#' + b.prefix));
 
@@ -928,8 +946,22 @@ function planImport(scan, state, o) {
 
   const videoPlan = planVideos(scan.videos, state, ctx);
   const photoPlan = planPhotos(albums, state, ctx);
+
+  // 本次「没被任何分组认领」的旧行：册内 0 图 + dir_key 落在本次产物里。
+  // 这就是换 --album-mode / 改标题推导后留下的空壳——老版本既不复用也不删，
+  // 于是同一套内容并存两条（一条有图、一条永远打不开），photo_count 还停在旧值。
+  const producedDirs = new Set(albums.map((a) => a.dirKey));
+  const staleAlbums = [];
+  for (const a of state.albumById.values()) {
+    if (claimed.has(a.id) || a.dirKeyNull || !producedDirs.has(a.dirKey)) continue;
+    const live = (state.photoByAlbum.get(a.id) || []).filter((r) => r.seq < PARK_BASE).length;
+    if (live > 0) continue;
+    staleAlbums.push({ id: a.id, dirKey: a.dirKey, title: a.title });
+  }
+
   return {
     albums,
+    staleAlbums,
     videoRows: videoPlan.rows,
     movedVideos: videoPlan.moves,
     photoRows: photoPlan.rows,
@@ -1069,6 +1101,20 @@ function buildSql(model, o) {
   }
   // 孤儿图（相册已被删掉）：保证「每张图都能找到相册」恒成立
   lines.push('DELETE p FROM media_photo p LEFT JOIN media_album a ON a.id = p.album_id WHERE a.id IS NULL;');
+
+  // 7-b) 本次没被认领的空壳旧行：不给 --purge-unclaimed 就只把计数归零（行留着，页头数字
+  //      至少不再翻倍），给了就真删——连同人物关联行，避免留下指向已删相册的孤儿行
+  for (const s of model.staleAlbums) {
+    if (o.purgeUnclaimed) {
+      if (o.albumPersonEnabled) {
+        lines.push('DELETE FROM media_album_person WHERE album_id = ' + sqlStr(s.id) + ';');
+      }
+      lines.push('DELETE FROM media_album WHERE id = ' + sqlStr(s.id) + ';');
+    } else {
+      lines.push('UPDATE media_album SET photo_count = 0, bytes = 0 WHERE id = ' + sqlStr(s.id) +
+        ' AND (photo_count <> 0 OR bytes <> 0);');
+    }
+  }
 
   // 8) 同内容副本 -> 别名表（本期只沉淀数据，后端不读）
   for (const table of ['media_video_alias', 'media_photo_alias']) {
@@ -1536,6 +1582,7 @@ function main() {
     state = o.truncate ? emptyState() : loadState(o, mysqlExe, password);
     o.rootId = resolveRootId(o, mysqlExe, password);
     o.aliasEnabled = aliasTablesReady(o, mysqlExe, password);
+    o.albumPersonEnabled = existingTables(o, mysqlExe, password, ['media_album_person']).has('media_album_person');
     // 缺失标记两列没建时整段降级：生成的 SQL 与改动前逐字相同
     o.missingEnabled = o.truncate ? false : missingReady(o, mysqlExe, password);
   } else {
@@ -1543,6 +1590,7 @@ function main() {
     // （执行前请确认已 source media_dup_alias.sql 与 doc/media_missing.sql）
     o.aliasEnabled = true;
     o.missingEnabled = true;
+    o.albumPersonEnabled = true;
   }
 
   const scan = scanDisk(root, o);
@@ -1561,6 +1609,25 @@ function main() {
   }
   if (model.albums.length > 20) log('  …还有 ' + (model.albums.length - 20) + ' 本相册');
   for (const w of scan.warnings) warn(w);
+
+  // 唯一性保证：相册身份只有 (dir_key,title)，标题一旦推导变了就会「同一套内容两本册」。
+  // 只要发现同目录的 0 图旧行，就别静默并存——默认报错退出，给开关才清理。
+  if (model.staleAlbums.length) {
+    warn('有 ' + model.staleAlbums.length + ' 本相册本次没被任何分组认领（册内 0 图、dir_key 在本次产物里）：' +
+      '同一目录的图已被别的相册整本认领，通常是换过 --album-mode 或改过标题推导留下的旧行');
+    for (const s of model.staleAlbums.slice(0, 10)) {
+      warn('  STALE album ' + s.id + ' dir="' + s.dirKey + '" title="' + s.title + '"');
+    }
+    if (model.staleAlbums.length > 10) warn('  …还有 ' + (model.staleAlbums.length - 10) + ' 本');
+    if (o.purgeUnclaimed) {
+      log('== --purge-unclaimed：同一事务内删除 ' + model.staleAlbums.length + ' 本空壳旧相册（含人物关联行）');
+    } else if (!(o.dryRun || o.dumpSql)) {
+      throw new Error('发现 ' + model.staleAlbums.length + ' 本「同 dir_key + 0 图」的旧相册行：' +
+        '本次扫描会在同一目录里再建/复用另一本，两套相册并存（旧版本就是这么留下永远打不开的空相册）。' +
+        '二选一后再跑：① 加 --purge-unclaimed，让本次扫描在同一事务里删掉这些空壳；' +
+        '② 先执行 doc/media_album_dedupe.sql（先预览再删、幂等）清理存量。本次未写库。');
+    }
+  }
 
   if (o.dryRun) {
     log('== dry-run：未写库（未读库内状态，相册/视频一律按新建处理）');

@@ -7,7 +7,7 @@
 
 | 脚本 | 做什么（一句话） | 关键参数 |
 | --- | --- | --- |
-| `scan-media.js` | 只读遍历媒体根，把目录结构（含内容哈希、多库根、重复副本别名）写进 `media_video` / `media_album` / `media_photo`（别名进 `media_*_alias`） | `--root=`（必填）、`--root-id=`、`--db= --user= --host= --port=`、`--secret=`、`--dry-run`、`--truncate --yes`、`--album-mode=`、`--backfill-hash` |
+| `scan-media.js` | 只读遍历媒体根，把目录结构（含内容哈希、多库根、重复副本别名）写进 `media_video` / `media_album` / `media_photo`（别名进 `media_*_alias`） | `--root=`（必填）、`--root-id=`、`--db= --user= --host= --port=`、`--secret=`、`--dry-run`、`--truncate --yes`、`--album-mode=`、`--purge-unclaimed`、`--backfill-hash` |
 | `build-thumbs.js` | 读库调 ffmpeg 生成视频封面 / 图片缩略图 / 大图预览，封面按 `content_hash` 内容寻址 | `--thumbs=`（必填）、`--root=`、`--ffmpeg=`、`--force`、`--no-fresh`、`--limit=` |
 | `enrich-meta.js` | 读库调 ffprobe 补齐 `media_video` 的 `dur/w/h/vcodec`（待补集合 = 四列任一 NULL） | `--root=`、`--ffprobe=`（或 `MS_FFPROBE`）、`--limit=`、`--dry-run`、`--force` |
 | `export-bundle.js` | 把一个库打成便携包目录（`manifest.json` + `media.sql.gz` + `user-state.json` + 可选 `thumbs/`） | `--root= --out=`（必填）、`--with-thumbs`、`--thumbs=`、`--with-stats`、`--dump=`、`--dry-run` |
@@ -112,6 +112,7 @@ node E:\111\project\QTools\QTools\doc\media-import\import-bundle.js --in='D:\bun
 | `--big-bytes=<n>` | `is_big=1` 的字节阈值，默认 `2097152`（2MB） |
 | `--exclude=<a,b>` | 按目录名排除（任意层级），默认 `_媒体站,trash,.git,node_modules,thumbs,pv` |
 | `--album-mode=dir|prefix` | 相册划分。`dir`（默认）= 一个目录一本册；`prefix` = 目录内再按文件名开头 `^(\d{1,4})[_\-\s]` 分组（兼容「001_xxx 一册一套」的旧库） |
+| `--purge-unclaimed` | 把「本次没被任何分组认领 + 册内 0 图 + `dir_key` 落在本次产物里」的旧相册行连同 `media_album_person` 关联行一起删掉（同一事务）。不加它时一旦发现这类旧行就**报错退出、不写库**——不允许两套相册静默并存（详见 4.3） |
 | `--no-hash` | 不算内容哈希：`content_hash` 写 NULL，同时关闭「改名/移动自动识别」 |
 | `--hash-bytes=<n>` | oshash 每段字节数，默认 `65536`（64KB） |
 | `--backfill-hash` | 老库升级用：给 `content_hash IS NULL` 的行补哈希（按 `--root` + `rel_path` 读文件），顺带补 `media_album.dir_key`；文件不存在只计数不删行 |
@@ -395,6 +396,34 @@ qtools:
    删除是**硬删**而不是进回收站：这些行指向的文件在磁盘上本来就不存在，回收站里没有源文件可搬，
    软删只会留下「hidden=1 但源不存在」的僵尸行。安全闸：删除语句恒带 `where missing = 1`，
    扫描又把文件找回来（`missing = 0`）的行永远删不掉；视频的标签 / 演员 / 标记行一并清掉。
+
+### 4.3 相册重复与 `--purge-unclaimed`（P5.43）
+
+相册的「身份」只有 **`(dir_key, title)`** 一个键：`title` 是按目录名 / 文件名前缀**推导**出来的。
+换 `--album-mode`、改过标题推导方式、或从旧站导入过的库里，同一个目录的同一套图会被推导成另一个
+标题 —— `findAlbum` 命中不上，扫描就**新分配**一本相册、并按 `content_hash` 把图片行整批搬过去，
+**旧相册行既不删、也不重算 `photo_count`**。用户端看到的就是：
+
+- 同一套内容两条：一条有图（新行），一条点开是空的（旧行）；
+- 页头「共 N 本相册 / M 张」取的是 `media_album` 的 `COUNT(*)` 与 `SUM(photo_count)`，
+  旧行的过期计数一起被算进去，M 会远大于 `media_photo` 的真实行数。
+
+现在脚本侧**不允许静默并存**：本次扫描没被任何分组认领、册内 0 图、`dir_key` 又落在本次产物里的
+旧行会被列出来（日志里的 `STALE album …`），默认直接报错退出（不写库）；确认后用开关清理：
+
+```bash
+# 先看（dry-run 不写库，报错信息里会列出旧行）
+node scan-media.js --root='D:\我的媒体' --album-mode=prefix --dry-run
+
+# 认了：同一事务里删掉这些空壳（连同 media_album_person 关联行）
+node scan-media.js --root='D:\我的媒体' --album-mode=prefix --purge-unclaimed
+```
+
+存量清理（不想跑扫描、或要「先预览再删」）用幂等 SQL `doc/media_album_dedupe.sql`：按「有没有图」
+判定真相册 / 幽灵行 / 死行，先把 `person_id` 与人物关联交接给保留行再删幽灵，最后按 `media_photo`
+实际行重算 `photo_count` / `bytes`；连跑两遍，第二遍全部 0 行变更。另外 `prefix` 模式在「某个目录
+本次只分出一册」时直接用目录名做标题（不再出现 `1 (1)` 这种文件名噪音），`dir` / `prefix` 对这类
+目录产出同一个标题，切模式不再造第二套行。
 
 5. **管理端接口**（`media:admin:list` / `media:admin:edit`）：
 
