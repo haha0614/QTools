@@ -828,8 +828,8 @@ $env:MYSQL_PWD = '<root 密码>'; node import.js
 
 | 源 | 目标 | 说明 |
 | --- | --- | --- |
-| `people[]` | `media_person` | `name` + `sort`（people 已按 count 降序，`sort` 即数组下标）；`未归类` 也建行 |
-| `albums[]` | `media_album` | `id` 沿用 `a001…a156`；`person` 用 `name` 查 `media_person.id`（标量子查询）；`dir/photo_count/bytes/cover_path/note`；`sort` 为数组下标；`mtime` 留 NULL |
+| `people[]` | `media_person` | `name` + `sort`（people 已按 count 降序，`sort` 即数组下标）。**P5.62 起占位名（`未归类` / `未识别` / `未知` / `空` / 空串）不建行**，见 `isPlaceholderPersonName()` |
+| `albums[]` | `media_album` | `id` 沿用 `a001…a156`；`person` 用 `name` 查 `media_person.id`（标量子查询），**占位名/空名落 `NULL`**（不造人物行，与 `scan-media.js`「通用扫描不生成人物」同口径）；`dir/photo_count/bytes/cover_path/note`；`sort` 为数组下标；`mtime` 留 NULL |
 | `albums[].photos[]` | `media_photo` | `album_id` + `seq`（取数组下标，与 `i` 校验一致）+ `rel_path` + `is_big`；`bytes=0`、`w/h=NULL`（源里没有） |
 | `videos[]` | `media_video` | `id/folder/rel_path/title/size/dur/w/h/vcodec/browser_ok/poster_path/doc_path/sub_path`；**`mtime` 取磁盘文件 mtime**（文件缺失则 NULL 并计入报告） |
 | `videos[].tags[]` | `media_video_tag` | `(video_id, facet, name)` |

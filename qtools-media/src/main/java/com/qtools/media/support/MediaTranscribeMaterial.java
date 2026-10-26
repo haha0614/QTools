@@ -62,8 +62,21 @@ public class MediaTranscribeMaterial
 {
     private static final Logger log = LoggerFactory.getLogger(MediaTranscribeMaterial.class);
 
-    /** 非语音标记：整段就是一个括号注释（[cough] / (music) / （拍手）） */
-    private static final Pattern NON_SPEECH = Pattern.compile("^[\\[\\(（【<][^\\]\\)）】>]*[\\]\\)）】>]$");
+    /** 整体被一层括号包住的片段（whisper 会把声音标记和**真实对白**都这样包） */
+    private static final Pattern BRACKETED = Pattern.compile("^[(（【\\[<](.*)[)）】\\]>]$");
+
+    /**
+     * 括号里的**声音标记**关键词（"music" / "cough" / "(music)" / "（拍手）" / "ドアの音" 之类）
+     *
+     * <p>为什么不能「只要括号包住就丢」：实测 whisper.cpp small 对中日对白普遍输出
+     * {@code （我現在要去洗澡了）}、{@code (老公你回來了)} —— 括号里是<b>真台词</b>。
+     * 早期版本把整段括号当噪声丢掉，300s 音频 74 段 533 字被清成 0 字，接口一路 insufficient。
+     * 所以只有命中关键词才当标记丢掉，其余剥掉括号保留。</p>
+     */
+    private static final Pattern MARKER = Pattern.compile("(?i)music|cough|laugh|applause|clap|silence|silent"
+            + "|noise|blank|tape of|paper rustl|door|footstep|sigh|breath|moan|cry|sob|scream|shout|whisper"
+            + "|音楽|拍手|笑い|咳|沈黙|無音|ノイズ|足音|ドア|ため息|効果音|泣き声|叫び声"
+            + "|音乐|拍手|笑声|掌声|沉默|噪音|门声|脚步|叹息|喘息|哭声|尖叫|叫声|音效|杂音");
 
     /** 同一句在全文里最多保留几次（whisper 幻觉复读的硬上限） */
     static final int REPEAT_LIMIT = 2;
@@ -776,7 +789,26 @@ public class MediaTranscribeMaterial
         for (SubtitleParser.Cue cue : raw)
         {
             String text = SynopsisText.clean(cue.text);
-            if (text.isEmpty() || NON_SPEECH.matcher(text).matches())
+            if (text.isEmpty())
+            {
+                continue;
+            }
+            java.util.regex.Matcher bracketed = BRACKETED.matcher(text);
+            if (bracketed.matches())
+            {
+                String inner = bracketed.group(1).trim();
+                if (inner.isEmpty() || MARKER.matcher(inner).find() || !hasReadableChars(inner))
+                {
+                    continue;
+                }
+                // 括号里是真对白：剥掉括号保留，别把内容一起丢了
+                text = SynopsisText.clean(inner);
+                if (text.isEmpty())
+                {
+                    continue;
+                }
+            }
+            else if (!hasReadableChars(text))
             {
                 continue;
             }
@@ -794,6 +826,23 @@ public class MediaTranscribeMaterial
             out.add(new SubtitleParser.Cue(cue.startMs, cue.endMs, text));
         }
         return out;
+    }
+
+    /** 有没有「人类可读」的字符（字母 / 假名 / 汉字 / 数字）：只剩符号或 ♪ 的片段不算正文 */
+    static boolean hasReadableChars(String text)
+    {
+        if (text == null)
+        {
+            return false;
+        }
+        for (int i = 0; i < text.length(); i++)
+        {
+            if (Character.isLetterOrDigit(text.charAt(i)))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String join(List<SubtitleParser.Cue> cues)

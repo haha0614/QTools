@@ -42,6 +42,24 @@ const TABLES = [
   'media_person',
 ];
 
+/**
+ * 不是人的「人物名」（P5.62）：相册没识别出人物时，上游 index.json 会写成这些名字。
+ *
+ * <p>写进 media_person 就会多出一个挂在人物墙 / 人物下拉里的假人物（历史上的「未归类」
+ * 113 号就是这么来的：2 本相册 118 张照片，没有一部视频）。所以这类名字一律**不建人物行**，
+ * media_album.person_id 落 NULL —— 与 scan-media.js「通用扫描不生成人物、person_id 留 NULL」
+ * 同一口径；用户端相册页仍会把这些相册按前端常量 UNGROUPED 分组成「未归类」展示，
+ * 那只是分组名，不是库里的人物行。</p>
+ *
+ * <p>存量清理见 doc/media_person_merge_uncategorized.sql（P5.62 已把 113 并到「素人」）。</p>
+ */
+const PLACEHOLDER_PERSON_NAMES = new Set(['未归类', '未识别', '未知', '空']);
+
+function isPlaceholderPersonName(name) {
+  const n = String(name === undefined || name === null ? '' : name).trim();
+  return !n || PLACEHOLDER_PERSON_NAMES.has(n);
+}
+
 // ---------------------------------------------------------------- 参数
 
 function parseArgs(argv) {
@@ -211,8 +229,18 @@ function buildSql(data, o) {
   lines.push('DELETE FROM media_video_actor;');
 
   // ---- people
-  const people = data.people.map((p) => String(p.name));
-  const albumPeople = [...new Set(data.albums.map((a) => String(a.person)))];
+  // 占位名（未归类 / 未知 / 空 …）不是人：不建人物行，相册 person_id 落 NULL（见 isPlaceholderPersonName）
+  const people = data.people.map((p) => String(p.name)).filter((name) => {
+    if (!isPlaceholderPersonName(name)) return true;
+    warn.push('data.people 里的 "' + name + '" 是占位名，已跳过（不建 media_person 行）');
+    return false;
+  });
+  const placeholderAlbums = data.albums.filter((a) => isPlaceholderPersonName(a.person));
+  for (const a of placeholderAlbums) {
+    warn.push('相册 ' + a.id + ' 的人物名 "' + a.person + '" 是占位名，person_id 落 NULL（不建人物行）');
+  }
+  const albumPeople = [...new Set(data.albums.map((a) => String(a.person)))]
+    .filter((name) => !isPlaceholderPersonName(name));
   for (const name of albumPeople) {
     if (!people.includes(name)) {
       people.push(name);
@@ -258,7 +286,10 @@ function buildSql(data, o) {
     stats.albumPhotoCountSum += count;
     return '(' + [
       sqlStr(a.id),
-      '(SELECT id FROM media_person WHERE name = ' + sqlStr(a.person) + ')',
+      // 占位名 -> NULL（不指向任何人物行，也不再造「未归类」这种容器人物）
+      isPlaceholderPersonName(a.person)
+        ? 'NULL'
+        : '(SELECT id FROM media_person WHERE name = ' + sqlStr(a.person) + ')',
       sqlStr(a.title),
       sqlStr(dir),
       sqlInt(count),
@@ -414,13 +445,19 @@ function verify(o, password, data, sqlStats) {
   add('albums 条数', albums === expectedAlbums, expectedAlbums, albums);
   add('photos 条数', photos === expectedPhotos, expectedPhotos, photos);
   add('photos 条数 = sum(album.photo_count)', aPhotoSum === photos, photos, aPhotoSum);
-  add('people 条数', people === (stat.people !== undefined ? stat.people : data.people.length),
-    stat.people !== undefined ? stat.people : data.people.length, people);
+  // 占位名不建行：期望条数以 buildSql 算出的 personRows 为准（stat.people），退化路径同样先剔占位名
+  const expectedPeople = stat.people !== undefined
+    ? stat.people
+    : data.people.map((p) => String(p.name)).filter((n) => !isPlaceholderPersonName(n)).length;
+  add('people 条数', people === expectedPeople, expectedPeople, people);
   add('video_tag 条数 > 0 且等于源', tags > 0 && tags === srcTags, srcTags, tags);
   add('video_actor 条数 > 0 且等于源', actors > 0 && actors === srcActors, srcActors, actors);
   add('sum(media_video.size) 对齐 index.json', vBytes === srcVideoBytes, srcVideoBytes, vBytes);
   add('sum(media_album.bytes) 对齐 index.json', aBytes === srcAlbumBytes, srcAlbumBytes, aBytes);
-  add('所有 album.person_id 非空', albumNoPerson === 0, 0, albumNoPerson);
+  // 占位名相册按设计落 NULL，所以「NULL 的相册数」应正好等于源里占位名相册数（正常为 0）
+  const expectedNoPerson = data.albums.filter((a) => isPlaceholderPersonName(a.person)).length;
+  add('album.person_id 为 NULL 的相册数 = 占位名相册数', albumNoPerson === expectedNoPerson,
+    expectedNoPerson, albumNoPerson);
   add('所有 photo.album_id 都能找到相册', orphanPhotos === 0, 0, orphanPhotos);
 
   // 抽样：20 张图

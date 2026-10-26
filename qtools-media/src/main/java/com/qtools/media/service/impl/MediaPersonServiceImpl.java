@@ -114,6 +114,19 @@ public class MediaPersonServiceImpl implements IMediaPersonService
      */
     private static final String AMATEUR_NAME = "素人";
 
+    /**
+     * 非真人「容器」人物名（P5.60）：**相册归档容器**，不是演员
+     *
+     * <p>{@code 未归类} 是相册没有归属人物时的兜底分组（用户端 PhotosPage 的 UNGROUPED、
+     * 管理端相册人物下拉的「（未归类 / 清空）」都用它），名下挂着真实相册，所以既不能删、
+     * 也不该被当成演员摆在人物墙上。与 {@link #AMATEUR_NAME}（兜底**人物**，有业务含义、要展示）
+     * 是两类东西：这里只放「容器」。</p>
+     */
+    private static final Set<String> PLACEHOLDER_NAMES = Set.of("未归类");
+
+    /** note 里的机器可读占位标记（P5.60）：名字被改掉之后仍认得出，与 {@link #PLACEHOLDER_NAMES} 同一判定 */
+    private static final String PLACEHOLDER_NOTE_MARK = "[placeholder]";
+
     private static final int PAGE_SIZE_DEFAULT = 20;
 
     private static final int PAGE_SIZE_MAX = 200;
@@ -287,9 +300,30 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         {
             // 「从该人物名下的图片里挑」要在服务端兜住：前端给的 albumId 是可见值，
             // 但匿名接口不能相信它 —— 换成别人相册里的一张图，头像就挂上去了。
-            int colon = cleanRef.indexOf(':');
-            String albumId = cleanRef.substring(0, colon);
-            int seq = Integer.parseInt(cleanRef.substring(colon + 1));
+            //
+            // P5.61：归属校验只看 <albumId>:<seq>，必须先把 "#crop=x,y,w,h" 尾巴切掉。
+            // 之前直接拿整条 ref 去 indexOf(':') + parseInt，遇到带裁剪的 ref
+            // （a164:4#crop=...）就 NumberFormatException —— 那就是「选完裁剪框提交必 500」
+            // 的真根因（logs/sys-error.log: java.lang.NumberFormatException: For input string:
+            // "0#crop=0.2917,0.2625,0.4208,0.3156" @ MediaPersonServiceImpl.java:292）。
+            String body = MediaAvatarCrop.bodyOf(cleanRef);
+            int colon = body == null ? -1 : body.indexOf(':');
+            if (colon <= 0 || colon == body.length() - 1)
+            {
+                // checkAvatarRef 已经保证成形；能走到这里说明归一化被改坏了，
+                // 但那也只是「参数不合法」，不许变成 500。
+                throw MediaException.badRequest("photo 型 ref 格式为 <albumId>:<seq>[#crop=x,y,w,h]，本次: " + cleanRef);
+            }
+            String albumId = body.substring(0, colon);
+            int seq;
+            try
+            {
+                seq = Integer.parseInt(body.substring(colon + 1));
+            }
+            catch (NumberFormatException e)
+            {
+                throw MediaException.badRequest("ref 里的 seq 必须是整数: " + cleanRef);
+            }
             if (mediaPersonMapper.countPersonPhotoOwned(id, albumId, seq) == 0)
             {
                 throw MediaException.badRequest("该图片不在这个人物名下: " + cleanRef);
@@ -485,6 +519,9 @@ public class MediaPersonServiceImpl implements IMediaPersonService
             node.put("avatarKind", person.getAvatarKind());
             node.put("avatarRef", person.getAvatarRef());
             node.put("avatarUrl", avatarUrlOf(person.getAvatarKind(), person.getAvatarRef(), person.getAvatarPath()));
+            // P5.60：人物墙要能认出「不是人」的条目（如「未归类」相册容器）并过滤掉；
+            // 只加键、不改既有键，老前端忽略它就等于行为不变
+            node.put("isPlaceholder", isPlaceholderPerson(person));
             out.add(node);
         }
         return out;
@@ -533,6 +570,8 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         node.put("name", person.getName());
         node.put("alias", person.getAlias());
         node.put("note", person.getNote());
+        // P5.60：详情页 / 管理端也能看出这一条是不是非真人容器（与清单同一份判定）
+        node.put("isPlaceholder", isPlaceholderPerson(person));
         node.put("avatarPath", person.getAvatarPath());
         // P5.48：手动头像三件套 —— kind / ref 是「存了什么」，avatarUrl 是「后端解析好的最终地址」
         node.put("avatarKind", person.getAvatarKind());
@@ -560,6 +599,28 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         putIfNotEmpty(node, "twitter", person.getTwitter());
         putIfNotEmpty(node, "instagram", person.getInstagram());
         return node;
+    }
+
+    /**
+     * 这条人物记录是不是**非真人占位实体**（P5.60）
+     *
+     * <p>两条规则取或：名字在 {@link #PLACEHOLDER_NAMES} 里，或 note 带 {@link #PLACEHOLDER_NOTE_MARK}。
+     * note 标记的意义是「改个名字它也别冒出来」，名字清单的意义是「历史数据没打标记也认」。
+     * 前端 {@code personWall.isPlaceholderPerson} 是同一套规则的镜像（老后端时它按名字兜底）。</p>
+     */
+    static boolean isPlaceholderPerson(MediaPerson person)
+    {
+        if (person == null)
+        {
+            return false;
+        }
+        String note = person.getNote();
+        if (note != null && note.contains(PLACEHOLDER_NOTE_MARK))
+        {
+            return true;
+        }
+        String name = person.getName() == null ? "" : person.getName().trim();
+        return PLACEHOLDER_NAMES.contains(name);
     }
 
     /** 只在有值时才写键（null / 空白字符串都算「未填写」） */

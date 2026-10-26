@@ -122,6 +122,22 @@ public final class MediaAvatarCrop
         return ref != null && ref.toLowerCase(Locale.ROOT).contains(MARK);
     }
 
+    /**
+     * 取 ref 的主体段（{@code #} 之前）：{@code a164:4#crop=...} → {@code a164:4}
+     *
+     * <p>P5.61：任何要按 {@code <albumId>:<seq>} 解析 ref 的地方都必须先过这一层，
+     * 否则 {@code Integer.parseInt("4#crop=...")} 会抛 NumberFormatException → 500。</p>
+     */
+    public static String bodyOf(String ref)
+    {
+        if (ref == null)
+        {
+            return null;
+        }
+        int hash = ref.indexOf('#');
+        return hash < 0 ? ref : ref.substring(0, hash);
+    }
+
     /** 从 {@code a164:4#crop=...} 里取 {@code #} 之后的裁剪串（没有则 null），不做校验 */
     public static String tailOf(String ref)
     {

@@ -105,7 +105,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </select>
 
     <select id="selectPersonBriefList" resultMap="MediaPersonResult">
-        select p.id, p.name, p.alias, p.use_count, p.avatar_path, p.avatar_kind, p.avatar_ref
+        <!-- P5.60：多带一列 p.note —— 服务层用 note 里的 [placeholder] 标记判定「非真人容器」
+             （如「未归类」相册归档容器），人物墙据此过滤；列宽 512，代价可以忽略 -->
+        select p.id, p.name, p.alias, p.use_count, p.avatar_path, p.avatar_kind, p.avatar_ref, p.note
         from media_person p
         where p.hidden = 0
         order by p.use_count desc, p.sort asc, p.id asc
