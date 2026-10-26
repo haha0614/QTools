@@ -347,6 +347,71 @@ public class MediaEditController
         return mediaSynopsisService.job(jobId);
     }
 
+    /**
+     * 批量前的影响面预览（P5.55 两步确认第一段）：body {@code {videoIds? | all:true, overwrite?}}
+     *
+     * <p>回 {@code {total,withExisting,withoutExisting,willProcess,willSkip}}：前端弹窗里那句
+     * 「将对 N 部片子生成，已有内容的 M 部将跳过/覆盖」就是直接读这三个字段，不在前端猜。</p>
+     */
+    @PostMapping("/synopsis/preview")
+    public Map<String, Object> synopsisPreview(@RequestBody(required = false) String rawBody)
+    {
+        requireSynopsisUsable();
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaSynopsisService.preview(stringsValue(body.get("videoIds"), "videoIds"),
+                booleanValue(body.get("all")), booleanValue(body.get("overwrite")));
+    }
+
+    /** 正在跑的批量任务（停止按钮第一步：先问后端有没有在跑的）：{@code {count,jobs:[...]}} */
+    @GetMapping("/synopsis/jobs/active")
+    public Map<String, Object> synopsisActiveJobs()
+    {
+        requireSynopsisUsable();
+        return mediaSynopsisService.activeJobs();
+    }
+
+    /**
+     * 请求停止（P5.55）：{@code POST /synopsis/jobs/{jobId}/cancel}
+     *
+     * <p>协作式：只置标志，<b>正在生成的那一条会跑完</b>，之后的任务不再开始。
+     * 幂等 —— 对已结束的任务调用回当前状态，不是错误。</p>
+     */
+    @PostMapping("/synopsis/jobs/{jobId}/cancel")
+    public Map<String, Object> synopsisJobCancel(@PathVariable("jobId") String jobId)
+    {
+        requireSynopsisUsable();
+        return mediaSynopsisService.cancel(jobId);
+    }
+
+    /**
+     * 撤销本次批量（P5.55）：{@code POST /synopsis/jobs/{jobId}/rollback}
+     *
+     * <p>会把该任务写过的每一行恢复到落库前的原文（旧值为空 → 清空）。这是写库动作，
+     * 因此闸门用 {@code requireWritable()}。</p>
+     */
+    @PostMapping("/synopsis/jobs/{jobId}/rollback")
+    public Map<String, Object> synopsisJobRollback(@PathVariable("jobId") String jobId)
+    {
+        mediaEditPolicyService.requireWritable();
+        return mediaSynopsisService.rollback(jobId);
+    }
+
+    /**
+     * 按 ids 清空简介（P5.55 兜底工具）：body {@code {videoIds:[...], dryRun:true}}
+     *
+     * <p>为什么需要它：P5.55 之前的批量任务没有旧值快照，撤销只能靠「把这批 id 的简介抹掉」。
+     * {@code dryRun=true}（默认）只报数不写库，前端第一段确认就靠它。</p>
+     */
+    @PostMapping("/synopsis/clear")
+    public Map<String, Object> synopsisClear(@RequestBody(required = false) String rawBody)
+    {
+        mediaEditPolicyService.requireWritable();
+        Map<String, Object> body = parseObject(rawBody, true);
+        // dryRun 缺省即 true：这是不可逆操作，默认必须是「只统计」
+        boolean dryRun = !body.containsKey("dryRun") || booleanValue(body.get("dryRun"));
+        return mediaSynopsisService.clearSynopsis(stringsValue(body.get("videoIds"), "videoIds"), dryRun);
+    }
+
     /** 简介生成的站端闸门：只有 off 档拒绝（预览不落库，local 档也要能用） */
     private void requireSynopsisUsable()
     {

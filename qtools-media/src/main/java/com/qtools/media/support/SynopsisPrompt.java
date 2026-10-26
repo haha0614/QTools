@@ -12,10 +12,12 @@ import com.qtools.media.domain.dto.SynopsisFields;
  * 「作品名称：look-sit-16 作品分类：FRAC_桌面互动壁纸 时长：00:12 …」这种纯字段复述。
  * 根因不在模型大小，在<b>没有内容素材</b>。</p>
  *
- * <p>现在有两条素材路径，提示词各有专属版本：</p>
+ * <p>现在有三条素材路径，提示词各有专属版本：</p>
  * <ol>
  *   <li>{@link #subtitle(SynopsisFields, String)}：主素材 = 字幕节选（有字幕时优先）；</li>
- *   <li>{@link #vision(SynopsisFields, java.util.List)}：主素材 = 逐帧画面描述（无字幕时）。</li>
+ *   <li>{@link #vision(SynopsisFields, java.util.List)}：主素材 = 逐帧画面描述（无字幕时）；</li>
+ *   <li>{@link #audio(SynopsisFields, String)}：主素材 = 音频转写（P5.57：字幕不可信时不信任字幕，
+ *       直接识别片子的声音）。</li>
  * </ol>
  *
  * <p>两条都遵守同一套硬约束（{@link #SYSTEM}）：禁止罗列字段、禁止照抄标题、禁止写文件名与扩展名、
@@ -94,6 +96,28 @@ public final class SynopsisPrompt
             index++;
             sb.append(index).append(". ").append(text).append('\n');
         }
+        sb.append("请输出这部片子的 2-3 句内容梗概。");
+        return sb.toString();
+    }
+
+    /**
+     * 音频转写路线：主素材 = whisper 转写文本（P5.57）
+     *
+     * <p>措辞与字幕路线有意区分：转写是<b>识别结果</b>，会有错词、漏句、复读，
+     * 所以明确告诉模型「可能有识别错误」，让它抓内容而不是抄句子；同时保留硬约束
+     * （不罗列、不照抄标题、不写文件名、不编造）。</p>
+     *
+     * @param f          结构化字段（只用到分类 / 时长做一句背景）
+     * @param transcript 转写节选（{@link MediaTranscribeMaterial} 的 excerpt）
+     */
+    public static String audio(SynopsisFields f, String transcript)
+    {
+        StringBuilder sb = new StringBuilder(Math.min(4096, SynopsisText.codePoints(transcript) * 2 + 320));
+        sb.append("下面是对这部片子音频的语音转写（说话人的对白 / 独白，按时间顺序）。请据此写内容梗概。\n");
+        sb.append("转写来自自动语音识别，可能有错词、漏句或重复，请忽略这些噪声，抓住人物在做什么、场景与气氛。\n");
+        appendContext(sb, f);
+        sb.append("语音转写：\n");
+        sb.append(transcript == null ? "" : transcript.trim()).append('\n');
         sb.append("请输出这部片子的 2-3 句内容梗概。");
         return sb.toString();
     }

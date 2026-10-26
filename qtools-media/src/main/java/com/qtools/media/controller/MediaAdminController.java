@@ -870,6 +870,24 @@ public class MediaAdminController extends BaseController
     }
 
     /**
+     * 用音频转写重新生成（P5.57，<b>预览，不落库</b>）→ 回包结构同 {@code /synopsis/llm}
+     *
+     * <p>给「字幕根本不准」时的手动入口：<b>只走</b> whisper 转写（ffmpeg 抽 16k 单声道 →
+     * whisper-cli {@code -oj}），不看既有字幕也不看画面。转写不可用 / 正文太少一律 200 +
+     * {@code insufficient:true} + {@code audioReason}，由前端显示原因，不做静默降级。</p>
+     *
+     * <p>单条限时 {@code qtools.media.llm.transcribe.timeoutMs}（默认 120s）：超时即 insufficient，
+     * 不会把前端挂在一个没有上界的推理上。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-音频转写生成简介", businessType = BusinessType.UPDATE)
+    @PostMapping("/videos/{id}/synopsis/audio")
+    public Map<String, Object> synopsisAudio(@PathVariable("id") String id)
+    {
+        return mediaSynopsisService.audio(id);
+    }
+
+    /**
      * 批量生成（P5.47 交付 2）：body {@code {videoIds:[...] | all:true, mode:"template"|"llm", overwrite:false}}
      *
      * <p>创建后台任务并立即返回任务节点；任务**逐个**处理，每完成一条立刻落库（生成一个替换一个），
@@ -889,12 +907,64 @@ public class MediaAdminController extends BaseController
                 booleanValue(body.get("all")), stringValue(body.get("mode")), booleanValue(body.get("overwrite")));
     }
 
-    /** 批量任务进度与逐条结果：{@code {jobId,mode,status,total,processed,generated,skipped,failed,items:[...]}} */
+    /** 批量任务进度与逐条结果：{@code {jobId,mode,status,total,processed,generated,skipped,failed,counts,skipReasons,items:[...]}} */
     @PreAuthorize("@ss.hasPermi('media:admin:list')")
     @GetMapping("/synopsis/jobs/{jobId}")
     public Map<String, Object> synopsisJob(@PathVariable("jobId") String jobId)
     {
         return mediaSynopsisService.job(jobId);
+    }
+
+    /** 正在跑的批量任务（P5.55）：{@code {count,jobs:[...]}} */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/synopsis/jobs/active")
+    public Map<String, Object> synopsisActiveJobs()
+    {
+        return mediaSynopsisService.activeJobs();
+    }
+
+    /** 批量前的影响面预览（P5.55 两步确认）：body {@code {videoIds? | all:true, overwrite?}} */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @PostMapping("/synopsis/preview")
+    public Map<String, Object> synopsisPreview(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaSynopsisService.preview(stringsValue(body.get("videoIds"), "videoIds"),
+                booleanValue(body.get("all")), booleanValue(body.get("overwrite")));
+    }
+
+    /** 请求停止（P5.55）：协作式，不打断正在生成的那一条；幂等 */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-停止批量生成简介", businessType = BusinessType.UPDATE)
+    @PostMapping("/synopsis/jobs/{jobId}/cancel")
+    public Map<String, Object> synopsisJobCancel(@PathVariable("jobId") String jobId)
+    {
+        return mediaSynopsisService.cancel(jobId);
+    }
+
+    /** 撤销本次批量（P5.55）：按旧值快照逐行恢复 */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-撤销批量生成简介", businessType = BusinessType.UPDATE)
+    @PostMapping("/synopsis/jobs/{jobId}/rollback")
+    public Map<String, Object> synopsisJobRollback(@PathVariable("jobId") String jobId)
+    {
+        return mediaSynopsisService.rollback(jobId);
+    }
+
+    /**
+     * 按 ids 清空简介（P5.55 兜底）：body {@code {videoIds:[...], dryRun?}}
+     *
+     * <p>P5.55 之前的任务没有旧值快照 —— 那种情况下的「撤销」只能是按 id 抹掉生成结果。
+     * {@code dryRun} 缺省 true（只统计不写），第一次确认弹窗读它。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-按ids清空简介", businessType = BusinessType.UPDATE)
+    @PostMapping("/synopsis/clear")
+    public Map<String, Object> synopsisClear(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        boolean dryRun = !body.containsKey("dryRun") || booleanValue(body.get("dryRun"));
+        return mediaSynopsisService.clearSynopsis(stringsValue(body.get("videoIds"), "videoIds"), dryRun);
     }
 
     // ------------------------------------------------------------------ 站端编辑策略

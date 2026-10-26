@@ -255,6 +255,12 @@ public class MediaProperties
      */
     private Watch watch = new Watch();
 
+    /** 便携根 {@code qtools.home}（空 = 未配置，此时只认配置里的绝对路径） */
+    public String getHome()
+    {
+        return home == null ? "" : home.trim();
+    }
+
     public String getRootPath()
     {
         return rootPath;
@@ -818,18 +824,22 @@ public class MediaProperties
     }
 
     /**
-     * 音频转写配置（P5.53 交付 3）：{@code qtools.media.llm.transcribe.*}
+     * 音频转写配置（P5.57 起接通）：{@code qtools.media.llm.transcribe.*}
      *
-     * <p><b>本机未装 whisper.cpp（{@code where whisper-cli} 无结果），因此这一路只落地配置与设计，
-     * 不实现调用</b>：默认 {@code enabled=false}，开启后服务层会把它当作「不可用来源」跳过，
-     * 并在 insufficient 的 reason 里说明原因。</p>
+     * <p>whisper.cpp 装成便携包（{@code tools/whisper/whisper-cli.exe}），模型放
+     * {@code data/models/whisper/ggml-small.bin}。P5.53 只留了配置项，P5.57 才真正接通。</p>
      *
      * <table border="1">
      *   <caption>键（qtools.media.llm.transcribe.*）/ 默认值 / 语义</caption>
      *   <tr><td>enabled</td><td>false</td><td>总开关</td></tr>
-     *   <tr><td>whisperPath</td><td>空</td><td>whisper.cpp 的 {@code whisper-cli} 可执行文件路径；空 = 用 PATH 里的</td></tr>
-     *   <tr><td>model</td><td>ggml-base.bin</td><td>whisper.cpp 模型文件名 / 路径</td></tr>
-     *   <tr><td>timeoutMs</td><td>120000</td><td>单条转写限时（默认 120s，超时即放弃这一条）</td></tr>
+     *   <tr><td>whisperPath</td><td>空</td><td>{@code whisper-cli} 路径；空 = 先找 {@code <home>/tools/whisper/}，再找 PATH</td></tr>
+     *   <tr><td>model</td><td>ggml-small.bin</td><td>模型文件名 / 路径；文件名 → 找 {@code <home>/data/models/whisper/}</td></tr>
+     *   <tr><td>timeoutMs</td><td>120000</td><td><b>单条</b>转写总限时（含抽音轨 + 全部窗口），超时即 insufficient</td></tr>
+     *   <tr><td>language</td><td>auto</td><td>whisper 语言；{@code auto} = 自动判定（短片常判错，见 fallbackLanguage）</td></tr>
+     *   <tr><td>fallbackLanguage</td><td>ja</td><td>auto 判定的转写没有可用正文时，用这门语言重跑一次；空 = 不重试</td></tr>
+     *   <tr><td>threads</td><td>8</td><td>whisper 线程数（CPU 推理，不占显存）</td></tr>
+     *   <tr><td>headSeconds</td><td>300</td><td>开头取多少秒音频（0 = 整条片子）</td></tr>
+     *   <tr><td>tailSeconds</td><td>60</td><td>结尾再取多少秒（与字幕节选「开头 + 尾巴」同思路）</td></tr>
      * </table>
      */
     public static class Transcribe
@@ -841,10 +851,25 @@ public class MediaProperties
         private String whisperPath = "";
 
         /** whisper.cpp 模型 */
-        private String model = "ggml-base.bin";
+        private String model = "ggml-small.bin";
 
         /** 单条转写限时（毫秒） */
         private int timeoutMs = 120000;
+
+        /** whisper 语言：{@code auto} = 自动判定 */
+        private String language = "auto";
+
+        /** auto 判定不可用时的重跑语言；空 = 不重试 */
+        private String fallbackLanguage = "ja";
+
+        /** whisper 线程数 */
+        private int threads = 8;
+
+        /** 开头取多少秒音频；0 = 整条片子一次转完 */
+        private int headSeconds = 300;
+
+        /** 结尾再取多少秒音频；0 = 不取尾巴 */
+        private int tailSeconds = 60;
 
         public boolean isEnabled()
         {
@@ -886,6 +911,56 @@ public class MediaProperties
             this.timeoutMs = timeoutMs;
         }
 
+        public String getLanguage()
+        {
+            return language;
+        }
+
+        public void setLanguage(String language)
+        {
+            this.language = language;
+        }
+
+        public String getFallbackLanguage()
+        {
+            return fallbackLanguage;
+        }
+
+        public void setFallbackLanguage(String fallbackLanguage)
+        {
+            this.fallbackLanguage = fallbackLanguage;
+        }
+
+        public int getThreads()
+        {
+            return threads;
+        }
+
+        public void setThreads(int threads)
+        {
+            this.threads = threads;
+        }
+
+        public int getHeadSeconds()
+        {
+            return headSeconds;
+        }
+
+        public void setHeadSeconds(int headSeconds)
+        {
+            this.headSeconds = headSeconds;
+        }
+
+        public int getTailSeconds()
+        {
+            return tailSeconds;
+        }
+
+        public void setTailSeconds(int tailSeconds)
+        {
+            this.tailSeconds = tailSeconds;
+        }
+
         /** 实际限时：夹到 [10000, 600000] */
         public int getEffectiveTimeoutMs()
         {
@@ -894,6 +969,50 @@ public class MediaProperties
                 return 10000;
             }
             return Math.min(timeoutMs, 600000);
+        }
+
+        /** 实际语言：空白 → auto */
+        public String getEffectiveLanguage()
+        {
+            String v = language == null ? "" : language.trim();
+            return v.isEmpty() ? "auto" : v;
+        }
+
+        /** 重跑语言：空白 → 空串（不重试） */
+        public String getEffectiveFallbackLanguage()
+        {
+            return fallbackLanguage == null ? "" : fallbackLanguage.trim();
+        }
+
+        /** 实际线程数：夹到 [1, 32]，未配置时取 min(8, CPU 核数) */
+        public int getEffectiveThreads()
+        {
+            if (threads <= 0)
+            {
+                int cores = Runtime.getRuntime().availableProcessors();
+                return Math.max(1, Math.min(8, cores));
+            }
+            return Math.max(1, Math.min(threads, 32));
+        }
+
+        /** 开头窗口：夹到 [0, 3600]；0 = 整条片子 */
+        public int getEffectiveHeadSeconds()
+        {
+            if (headSeconds < 0)
+            {
+                return 0;
+            }
+            return Math.min(headSeconds, 3600);
+        }
+
+        /** 结尾窗口：夹到 [0, 600] */
+        public int getEffectiveTailSeconds()
+        {
+            if (tailSeconds < 0)
+            {
+                return 0;
+            }
+            return Math.min(tailSeconds, 600);
         }
     }
 

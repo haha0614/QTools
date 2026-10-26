@@ -16,6 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 import com.qtools.media.domain.MediaPerson;
 import com.qtools.media.domain.dto.MediaPersonPatch;
 import com.qtools.media.exception.MediaException;
+import com.qtools.media.support.MediaAvatarCrop;
 import com.qtools.media.mapper.MediaPersonMapper;
 import com.qtools.media.service.IMediaIndexService;
 import com.qtools.media.service.IMediaPersonService;
@@ -845,12 +846,32 @@ public class MediaPersonServiceImpl implements IMediaPersonService
             }
             return ref;
         }
-        int colon = ref.indexOf(':');
-        if (colon <= 0 || colon == ref.length() - 1)
+        // P5.55：可选裁剪尾巴 "#crop=x,y,w,h"（比例）—— 没有尾巴就是整图，老行零改动
+        String body = ref;
+        String crop = null;
+        int hash = ref.indexOf('#');
+        if (hash >= 0)
+        {
+            body = ref.substring(0, hash).trim();
+            try
+            {
+                crop = MediaAvatarCrop.normalize(ref.substring(hash));
+            }
+            catch (IllegalArgumentException e)
+            {
+                throw MediaException.badRequest(e.getMessage());
+            }
+            if (crop == null)
+            {
+                throw MediaException.badRequest("photo 型 ref 的 # 之后必须是 #crop=x,y,w,h，本次: " + ref);
+            }
+        }
+        int colon = body.indexOf(':');
+        if (colon <= 0 || colon == body.length() - 1)
         {
             throw MediaException.badRequest("photo 型 ref 格式为 <albumId>:<seq>（如 a164:0），本次: " + ref);
         }
-        String albumId = ref.substring(0, colon).trim();
+        String albumId = body.substring(0, colon).trim();
         if (albumId.isEmpty() || albumId.length() > ALBUM_ID_MAX)
         {
             throw MediaException.badRequest("ref 里的 albumId 长度必须是 1-" + ALBUM_ID_MAX + ": " + albumId);
@@ -858,7 +879,7 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         int seq;
         try
         {
-            seq = Integer.parseInt(ref.substring(colon + 1).trim());
+            seq = Integer.parseInt(body.substring(colon + 1).trim());
         }
         catch (NumberFormatException e)
         {
@@ -868,7 +889,8 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         {
             throw MediaException.badRequest("ref 里的 seq 不能为负: " + ref);
         }
-        return albumId + ":" + seq;
+        String normalized = albumId + ":" + seq;
+        return crop == null ? normalized : normalized + MediaAvatarCrop.MARK + crop;
     }
 
     /**
@@ -891,16 +913,33 @@ public class MediaPersonServiceImpl implements IMediaPersonService
             }
             if (AVATAR_KIND_PHOTO.equals(cleanKind))
             {
-                int colon = cleanRef.indexOf(':');
-                if (colon > 0 && colon < cleanRef.length() - 1)
+                // P5.55：裁剪尾巴在 '#' 之后；取不到（或脏了）就当整图，绝不因为裁剪参数把头像整条丢掉
+                String body = cleanRef;
+                String crop = null;
+                int hash = cleanRef.indexOf('#');
+                if (hash >= 0)
                 {
-                    String albumId = cleanRef.substring(0, colon).trim();
+                    body = cleanRef.substring(0, hash).trim();
                     try
                     {
-                        int seq = Integer.parseInt(cleanRef.substring(colon + 1).trim());
+                        crop = MediaAvatarCrop.normalize(cleanRef.substring(hash));
+                    }
+                    catch (IllegalArgumentException ignored)
+                    {
+                        crop = null;
+                    }
+                }
+                int colon = body.indexOf(':');
+                if (colon > 0 && colon < body.length() - 1)
+                {
+                    String albumId = body.substring(0, colon).trim();
+                    try
+                    {
+                        int seq = Integer.parseInt(body.substring(colon + 1).trim());
                         if (!albumId.isEmpty() && seq >= 0)
                         {
-                            return photoThumbUrl(albumId, seq);
+                            String url = photoThumbUrl(albumId, seq);
+                            return crop == null ? url : url + "?crop=" + crop;
                         }
                     }
                     catch (NumberFormatException ignored)

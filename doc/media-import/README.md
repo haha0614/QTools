@@ -438,6 +438,40 @@ node scan-media.js --root='D:\我的媒体' --album-mode=prefix --purge-unclaime
    用户端 `/media/index?includeMissing=false`、`/media/album/{id}?includeMissing=false` 可以让服务端
    直接滤掉缺失行；默认 `true`（老行为，前端自行过滤）。
 
+### 4.4 相册 mtime 回填（P5.59）
+
+`media_album.mtime` 的语义是「相册所在目录的最后修改时间」。后端算人物「最近日期」时取
+`people[].mtime = max(相册 mtime 按 person_id 聚合, 视频 mtime 按人名聚合)`；这一列以前谁都不写
+（`import.js` 的老实现直接写 `NULL`，`scan-media.js` 的相册 INSERT 也不带这一列），
+真实库 158 行全 NULL，等于相册侧对「最近日期」的贡献为 0。
+
+两条来源，缺一不可：
+
+| 来源 | 谁写 | 写入值 |
+| --- | --- | --- |
+| 扫描写库 | `scan-media.js`（`buildSql` 的相册 INSERT 带 `mtime`；`ON DUPLICATE KEY UPDATE` 用 `IFNULL(n.mtime, media_album.mtime)`，本次 stat 不到目录时保留库里旧值，绝不用 NULL 抹掉） | 目录真实 mtime |
+| 存量回填 | `scan-media.js --backfill-album-mtime [--dry-run]` | 目录真实 mtime（按 `dir_key` 定位目录，`--root` 与 `media_root` 里其它 `kind='root'` 的根依次尝试） |
+| 近似兜底 | `doc/media_album_mtime.sql`（幂等 SQL，只动 `mtime IS NULL`） | 从 `media_photo.mtime` 推导；本库没这一列（只有 `last_seen`），自动退到 `last_seen` = 上次扫描时间，随后被上面两条覆盖 |
+
+为什么要 SQL 兜底：**SQL 读不到磁盘**。`--backfill-album-mtime` 要能读到媒体根、要 mysql 客户端、
+要库口令；只想「先让站端有数字」时用 SQL（它只给近似值，之后一定要跑一次脚本修正）。
+
+幂等：SQL 只更新 `mtime IS NULL`，连跑两遍第二遍命中 0 行、`ROW_COUNT()=0`；脚本按「秒」比对，
+与磁盘相同就不发 UPDATE，第二遍输出 `更新=0 相同=<n>`。目录不存在只计数（`目录不存在=<n>`），
+不删行、不报错退出。
+
+```
+# ① 库里先有值（近似）：
+mysql -h127.0.0.1 -P3307 -uroot --default-character-set=utf8mb4 -t -D qtools < QTools/doc/media_album_mtime.sql
+# ② 再写磁盘真值（幂等，可反复跑）：
+node scan-media.js --root=E:\111\视频 --port=3307 --backfill-album-mtime ^
+     --mysql=E:\111\project\QTools\tools\mysql\bin\mysql.exe ^
+     --secret=E:\111\project\QTools\QTools\qtools-admin\src\main\resources\secret.yml
+```
+
+这个模式是**纯 CLI**（管理端维护面板没有对应按钮，`MediaScanServiceImpl` 的 mode 白名单里也没有它），
+不接后端、不需要重启后端：后端的 `/api/media/index` 快照只有 60s TTL，跑完一分钟内就能看到效果。
+
 ### 5. 常见坑（本机实测）
 
 - **MySQL 端口**：本机 MySQL 在 `3307`（`application-druid.yml` 的默认值），而这五个脚本的

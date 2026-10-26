@@ -131,12 +131,23 @@ qtools:
         frames: 5
         width: 512
         timeoutMs: 60000
-      # 音频转写：本机未安装 whisper.cpp，只保留配置（P5.53 交付 3 只有设计与配置项）
+      # 音频转写（P5.57 接通）：字幕不可信 / 没有字幕时的最后一路，也是「用音频转写重新生成」按钮专走的一路。
+      # 便携包：tools/whisper/whisper-cli.exe（whisper.cpp v1.9.5，OpenBLAS CPU 版 —— 官方 x64 CUDA 包只到
+      #   12.4/sm_90，本机 RTX 5060 是 sm_120 跑不了；CPU 推理也不跟 ollama 抢那 8GB 显存）
+      # 模型：data/models/whisper/ggml-small.bin（466MB；base 更快但中日混排下错词明显更多）
       transcribe:
-        enabled: false
+        enabled: true
         whisperPath: ''
-        model: 'ggml-base.bin'
+        model: 'ggml-small.bin'
         timeoutMs: 120000
+        # auto 判语言在短片 / 音乐上很容易判错（实测 90s 日语被判成韩语），
+        # 判错时用 fallbackLanguage 重跑一次（只在第一遍没有可用正文时才重跑）
+        language: auto
+        fallbackLanguage: ja
+        threads: 8
+        # 只转「开头 + 结尾」两段：片长超过 head+tail 时不整片解码（120s 预算装不下整片）
+        headSeconds: 300
+        tailSeconds: 60
     # 允许的跨域来源，逗号分隔；* 仅用于本地开发
     allowOrigins: '*'
     # ---------------- 自动扫描（文件监听）：两层模型 ----------------

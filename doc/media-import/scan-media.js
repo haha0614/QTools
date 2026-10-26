@@ -132,6 +132,11 @@ const HELP = `
                       （等价的手工清理见 doc/media_album_dedupe.sql，可先预览再删）
   --backfill-hash     给库里 content_hash IS NULL 的行补哈希（按 --root + rel_path 读文件），
                       顺带补齐 media_album.dir_key；文件不存在只计数不删行
+  --backfill-album-mtime
+                      用磁盘目录 mtime 回填 media_album.mtime（幂等）：遍历库内相册，
+                      按 dir_key / dir 定位目录 stat 后 UPDATE；目录不存在只计数、不删行。
+                      可配 --dry-run 只看命中。SQL 读不到磁盘，所以这一列只能由本脚本写
+                      （真实扫描写库时也会顺手写：INSERT 带 mtime 列）
   --fix-poster-path   只更新 media_video.poster_path（不改其它列、不扫盘、不需要 --root）：
                       有 content_hash 的行刷成 thumbs/v/<content_hash>.jpg，
                       没有的行刷成 thumbs/v/<id>.jpg；可配 --dry-run / --dump-sql=<file>
@@ -161,6 +166,10 @@ const HELP = `
   node scan-media.js --root=D:\\我的媒体 --backfill-hash [--limit=N] [--dry-run]
   node scan-media.js --root=D:\\我的媒体 --backfill-hash --secret=D:\\cfg\\secret.yml
 
+ 相册 mtime（P5.59；SQL 只能给近似值，这里写磁盘真值，幂等可反复跑）：
+  node scan-media.js --root=D:\\我的媒体 --backfill-album-mtime [--dry-run]
+  node scan-media.js --root=D:\\我的媒体 --backfill-album-mtime --secret=D:\\cfg\\secret.yml
+
 输出（管理端 MediaScanServiceImpl 按这些行解析，改动前先看它）：
   videos=<n> albums=<n> photos=<n> people=0            扫描到的源数据条数
   条数 videos=<n> albums=<n> photos=<n> people=<n>    写库后回读的库内条数
@@ -170,6 +179,7 @@ const HELP = `
   ALIAS <hash> 主=<path> 别名=<path>                   同内容副本：主文件留在主表，这条进别名表
   DUP <hash> 保留=<path> 忽略=<path>                   同上，但别名表未建时退回老行为（副本被丢弃）
   回填 videos=<n> photos=<n> missing=<n>               --backfill-hash 的计数
+  回填 album-mtime 更新=<n> 相同=<n> 目录不存在=<n>     --backfill-album-mtime 的计数
 
 缺失文件（doc/media_missing.sql 加的 missing 列）：
   每次真实扫描收尾都会比对「本次看到的 rel_path」与库内行：
@@ -186,7 +196,7 @@ function parseArgs(argv) {
   const o = Object.assign({}, DEFAULTS, {
     root: null, mysql: null, secret: null, dumpSql: null, truncate: false, yes: false, dryRun: false,
     ignored: [], noHash: false, backfillHash: false, fixPosterPath: false, limit: null, rootId: null,
-    pruneMissing: false, purgeUnclaimed: false,
+    pruneMissing: false, purgeUnclaimed: false, backfillAlbumMtime: false,
   });
   for (const a of argv) {
     if (a === '--truncate') o.truncate = true;
@@ -195,6 +205,7 @@ function parseArgs(argv) {
     else if (a === '--help' || a === '-h') o.help = true;
     else if (a === '--no-hash') o.noHash = true;
     else if (a === '--backfill-hash') o.backfillHash = true;
+    else if (a === '--backfill-album-mtime') o.backfillAlbumMtime = true;
     else if (a === '--fix-poster-path') o.fixPosterPath = true;
     else if (a === '--prune-missing') o.pruneMissing = true;
     else if (a === '--purge-unclaimed') o.purgeUnclaimed = true;
@@ -282,6 +293,14 @@ function sqlDateTime(ms) {
   const n = Number(ms);
   if (!Number.isFinite(n)) return 'NULL';
   return 'FROM_UNIXTIME(' + Math.floor(n / 1000) + ')';
+}
+
+/** 本地时区的 YYYY-MM-DD HH:MM:SS：与 mysql FROM_UNIXTIME() 的服务器时区口径对齐，便于人工比对 */
+function stampLocal(sec) {
+  const d = new Date(sec * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+    p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
 
 function chunks(arr, size) {
@@ -425,6 +444,12 @@ function walk(root, excludeSet, sink) {
       continue;
     }
     entries.sort((a, b) => naturalCompare(a.name, b.name));
+    // 目录自身 mtime：media_album.mtime 的唯一来源（SQL 读不到磁盘，只有这里能 stat 到）
+    try {
+      sink.dirMtime.set(cur.rel, fs.statSync(cur.abs).mtimeMs);
+    } catch (e) {
+      sink.errors.push(cur.abs + '：stat ' + e.message);
+    }
     for (const d of entries) {
       const abs = path.join(cur.abs, d.name);
       const rel = cur.rel ? cur.rel + '/' + d.name : d.name;
@@ -500,7 +525,7 @@ function dirTitleOf(dirKey, rootTitle) {
 }
 
 function scanDisk(root, o) {
-  const sink = { files: [], errors: [], skippedLinks: 0 };
+  const sink = { files: [], errors: [], skippedLinks: 0, dirMtime: new Map() };
   walk(root, o.excludeSet, sink);
 
   // 本次扫描「在磁盘上看到过」的 rel_path 集合：missing 同步的唯一依据。
@@ -567,7 +592,7 @@ function scanDisk(root, o) {
     const gkey = dirKey + '\u0000' + (m ? '#' + m[1] : '*');
     let g = groups.get(gkey);
     if (!g) {
-      g = { key: gkey, dirKey, prefix: m ? m[1] : null, titleGuess: null, photos: [] };
+      g = { key: gkey, dirKey, prefix: m ? m[1] : null, titleGuess: null, dirMtimeMs: null, photos: [] };
       groups.set(gkey, g);
     }
     g.photos.push({
@@ -584,6 +609,8 @@ function scanDisk(root, o) {
 
   const list = [...groups.values()];
   for (const g of list) {
+    // 同一目录的多本册（--album-mode=prefix）共用同一个目录 mtime，与磁盘事实一致
+    g.dirMtimeMs = sink.dirMtime.has(g.dirKey) ? sink.dirMtime.get(g.dirKey) : null;
     g.photos.sort((a, b) => naturalCompare(a.name, b.name));
     g.titleGuess = g.prefix ? prefixTitle(g.prefix, g.photos[0].base) : dirTitleOf(g.dirKey, rootTitle);
   }
@@ -941,6 +968,8 @@ function planImport(scan, state, o) {
       photoCount: photos.length,
       bytes: photos.reduce((s, p) => s + p.bytes, 0),
       cover: 'thumbs/p/' + id + '/0000.jpg',
+      // P5.59：所在目录的磁盘 mtime（stat 失败为 null，写库时退化为不动该列）
+      dirMtimeMs: g.dirMtimeMs,
     });
   }
 
@@ -1059,16 +1088,22 @@ function buildSql(model, o) {
   }
 
   // 4) 相册（id 已按 (dir_key,title) 复用/新分配）
+  //    P5.59：mtime = 所在目录的磁盘 mtime。老库没有该列时整段降级（SQL 逐字同改动前）。
+  const mtimeCol = o.albumMtimeEnabled ? ',mtime' : '';
+  const mtimeTouch = o.albumMtimeEnabled ? ',mtime=IFNULL(n.mtime,media_album.mtime)' : '';
   const albumRows = model.albums.map((a) => '(' + [
     sqlStr(a.id), 'NULL', sqlStr(a.title), sqlStr(a.dirKey), sqlInt(a.photoCount),
     sqlInt(a.bytes), sqlStr(a.cover), "''", sqlInt(a.sort), '0', sqlStr(a.dirKey),
+    ...(o.albumMtimeEnabled ? [sqlDateTime(a.dirMtimeMs)] : []),
   ].join(',') + ')');
   for (const part of chunks(albumRows, o.batch)) {
-    lines.push('INSERT INTO media_album (id,person_id,title,dir,photo_count,bytes,cover_path,note,sort,hidden,dir_key) VALUES ' +
+    lines.push('INSERT INTO media_album (id,person_id,title,dir,photo_count,bytes,cover_path,note,sort,hidden,dir_key' +
+      mtimeCol + ') VALUES ' +
       part.join(',') +
       // person_id / note / hidden 不覆盖：管理端的人工归类不能被重扫冲掉
+      // mtime 用 IFNULL：本次 stat 不到目录时保留库里的已有值，绝不用 NULL 抹掉
       ' AS n ON DUPLICATE KEY UPDATE title=n.title,dir=n.dir,photo_count=n.photo_count,' +
-      'bytes=n.bytes,cover_path=n.cover_path,sort=n.sort,dir_key=n.dir_key;');
+      'bytes=n.bytes,cover_path=n.cover_path,sort=n.sort,dir_key=n.dir_key' + mtimeTouch + ';');
   }
 
   // 5) 图片 upsert（content_hash 一并写入）
@@ -1259,6 +1294,124 @@ function runBackfill(o, root) {
   const fixed = backfillAlbumDirKey(o, mysqlExe, password);
   if (fixed !== null) log('  相册 dir_key 补齐 ' + fixed + ' 行');
   log('回填 videos=' + stats.videos + ' photos=' + stats.photos + ' missing=' + stats.missing);
+  return 0;
+}
+
+// ---------------------------------------------------------------- 回填相册 mtime（--backfill-album-mtime）
+
+/** media_album.mtime 列（老库可能还没建）：没有就整段降级，绝不因为缺列让扫描/回填失败 */
+function albumMtimeReady(o, mysqlExe, password) {
+  const rows = queryRows(o, mysqlExe, password,
+    "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() " +
+    "AND table_name = 'media_album' AND column_name = 'mtime';");
+  const n = rows.length && rows[0].length ? Number(rows[0][0]) : 0;
+  if (n === 1) return true;
+  warn('media_album 还没有 mtime 列（先执行 doc/media_album_mtime.sql）：本次不写相册 mtime');
+  return false;
+}
+
+/**
+ * 相册目录的候选根：--root 优先，其后是 media_root 里其它 kind='root' 的根
+ * （多库根时 media_album 不带 root_id，只能按「哪个根下真有这个目录」认）
+ */
+function albumRoots(o, root, mysqlExe, password) {
+  const roots = [root];
+  try {
+    const rows = queryRows(o, mysqlExe, password,
+      "SELECT IFNULL(path, '') FROM media_root WHERE kind = 'root' ORDER BY id;");
+    for (const [p] of rows) {
+      if (!p) continue;
+      const abs = path.resolve(p);
+      if (!roots.some((r) => r.toLowerCase() === abs.toLowerCase())) roots.push(abs);
+    }
+  } catch (e) {
+    warn('读 media_root 失败（按单根回填）：' + (e.message || e));
+  }
+  return roots;
+}
+
+/** dir_key（相对媒体根、/ 分隔）-> 命中的绝对目录；越界或不存在返回 null */
+function locateAlbumDir(roots, rel) {
+  const parts = rel === '' ? [] : String(rel).split('/');
+  if (parts.some((p) => p === '' || p === '.' || p === '..')) return null;
+  for (const r of roots) {
+    const abs = parts.length ? path.resolve(r, ...parts) : r;
+    const back = path.relative(r, abs);
+    if (back.startsWith('..') || path.isAbsolute(back)) continue; // 防越界：必须还在根里
+    try {
+      if (fs.statSync(abs).isDirectory()) return abs;
+    } catch (e) {
+      // 该根下没有，试下一个
+    }
+  }
+  return null;
+}
+
+/**
+ * 用磁盘目录 mtime 回填 media_album.mtime（幂等）
+ *
+ * <p>这一列 SQL 补不全：SQL 读不到磁盘。真实扫描写库时已经顺手写了（buildSql 的 mtime 列），
+ * 本模式补的是「历史行 + 本次没扫到的根」。同一目录多本册（--album-mode=prefix）拿到同一个值，
+ * 与磁盘事实一致。</p>
+ *
+ * <p>幂等：与磁盘秒数相等的行不发 UPDATE，连跑第二遍 更新=0；目录不存在只计数、不删行。</p>
+ */
+function runBackfillAlbumMtime(o, root) {
+  const mysqlExe = resolveExe(o.mysql, 'MS_MYSQL', 'mysql', 'mysql 客户端');
+  const password = readPassword(o);
+  if (!albumMtimeReady(o, mysqlExe, password)) return 1;
+
+  const rows = queryRows(o, mysqlExe, password,
+    "SELECT id, IFNULL(dir_key, ''), IFNULL(dir, ''), IFNULL(UNIX_TIMESTAMP(mtime), 0) FROM media_album ORDER BY id;");
+  const roots = albumRoots(o, root, mysqlExe, password);
+  const stats = { total: rows.length, updated: 0, same: 0, noDir: 0 };
+  log('== 回填相册 mtime：root=' + root + ' 相册=' + rows.length +
+    ' 候选根=' + roots.length + (o.dryRun ? '（dry-run：不写库）' : ''));
+
+  const stmts = [];
+  const samples = [];
+  for (const [id, dirKey, dir, curSec] of rows) {
+    const rel = (dirKey || dir || '').trim();
+    const abs = locateAlbumDir(roots, rel);
+    if (!abs) {
+      stats.noDir += 1;
+      if (stats.noDir <= 10) log('  SKIP ' + id + ' dir="' + rel + '"（目录不存在）');
+      continue;
+    }
+    let st;
+    try {
+      st = fs.statSync(abs);
+    } catch (e) {
+      stats.noDir += 1;
+      if (stats.noDir <= 10) log('  SKIP ' + id + ' dir="' + rel + '"（' + (e.code || e.message) + '）');
+      continue;
+    }
+    const sec = Math.floor(st.mtimeMs / 1000);
+    // 比秒：FROM_UNIXTIME(sec) 与 UNIX_TIMESTAMP(mtime) 在同一时区上闭环，不受本地时区影响
+    if (String(sec) === String(curSec)) {
+      stats.same += 1;
+      continue;
+    }
+    stats.updated += 1;
+    samples.push([id, rel, stampLocal(sec)]);
+    stmts.push('UPDATE media_album SET mtime = FROM_UNIXTIME(' + sqlInt(sec) + ') WHERE id = ' + sqlStr(id) + ';');
+  }
+  for (const s of samples.slice(0, 10)) log('  SET ' + s[0] + ' dir="' + s[1] + '" mtime=' + s[2]);
+  if (samples.length > 10) log('  …还有 ' + (samples.length - 10) + ' 本');
+  if (o.dryRun) {
+    log('回填 album-mtime 更新=' + stats.updated + ' 相同=' + stats.same +
+      ' 目录不存在=' + stats.noDir + '（dry-run 未写库）');
+    return 0;
+  }
+  for (const part of chunks(stmts, o.batch)) {
+    const r = runMysql(o, mysqlExe, password, 'SET NAMES utf8mb4;\n' + part.join('\n'));
+    if (r.status !== 0) throw new Error('回填相册 mtime 失败：\n' + (r.stderr || '').trim());
+  }
+  const after = queryRows(o, mysqlExe, password, 'SELECT COUNT(*), SUM(mtime IS NULL) FROM media_album;');
+  const total = after.length && after[0].length ? Number(after[0][0]) : 0;
+  const nulls = after.length && after[0].length > 1 ? Number(after[0][1] || 0) : 0;
+  log('回填 album-mtime 更新=' + stats.updated + ' 相同=' + stats.same + ' 目录不存在=' + stats.noDir);
+  log('相册 mtime 自检 total=' + total + ' 仍为空=' + nulls);
   return 0;
 }
 
@@ -1570,6 +1723,7 @@ function main() {
   for (const a of o.ignored) warn('已忽略无法识别的参数（管理端/旧脚本兼容）：' + a);
 
   if (o.backfillHash) return runBackfill(o, root);
+  if (o.backfillAlbumMtime) return runBackfillAlbumMtime(o, root);
 
   const needDb = !(o.dryRun || o.dumpSql);
   let mysqlExe = null;
@@ -1585,12 +1739,15 @@ function main() {
     o.albumPersonEnabled = existingTables(o, mysqlExe, password, ['media_album_person']).has('media_album_person');
     // 缺失标记两列没建时整段降级：生成的 SQL 与改动前逐字相同
     o.missingEnabled = o.truncate ? false : missingReady(o, mysqlExe, password);
+    // 相册 mtime 列（历史行回填由 --backfill-album-mtime 负责，缺列时两处一起降级）
+    o.albumMtimeEnabled = albumMtimeReady(o, mysqlExe, password);
   } else {
     // dry-run / dump-sql 不连库：按「别名表 / missing 列已建」生成 SQL
     // （执行前请确认已 source media_dup_alias.sql 与 doc/media_missing.sql）
     o.aliasEnabled = true;
     o.missingEnabled = true;
     o.albumPersonEnabled = true;
+    o.albumMtimeEnabled = true;
   }
 
   const scan = scanDisk(root, o);

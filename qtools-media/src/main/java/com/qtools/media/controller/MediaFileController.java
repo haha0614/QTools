@@ -34,6 +34,7 @@ import com.qtools.common.annotation.Anonymous;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.service.IMediaFileService;
 import com.qtools.media.service.IMediaFrameService;
+import com.qtools.media.support.MediaAvatarCrop;
 import com.qtools.media.support.MediaFrameCommand;
 
 /**
@@ -355,12 +356,18 @@ public class MediaFileController
         return imageResponse(path, isContentHash(path.getFileName().toString()), request);
     }
 
-    /** 相册缩略图（内容寻址）thumbs/p/<content_hash>.jpg */
+    /**
+     * 相册缩略图（内容寻址）thumbs/p/<content_hash>.jpg
+     *
+     * <p>P5.55：可选 {@code ?crop=x,y,w,h}（四个 0..1 的比例）→ 现裁一张小图并落盘缓存。
+     * 不带这个参数时行为与之前完全一致（字节都一样，还是那个文件）。</p>
+     */
     @GetMapping("/thumb/p/{i}")
-    public ResponseEntity<Resource> thumbPhotoByHash(@PathVariable("i") String i, HttpServletRequest request)
+    public ResponseEntity<Resource> thumbPhotoByHash(@PathVariable("i") String i,
+            @RequestParam(value = "crop", required = false) String crop, HttpServletRequest request)
     {
         Path path = mediaFileService.resolveThumbPhotoByHash(i, false);
-        return imageResponse(path, isContentHash(i), request);
+        return croppedImageResponse(path, i, crop, request);
     }
 
     /** 相册预览图（内容寻址）thumbs/pv/<content_hash>.jpg */
@@ -371,14 +378,48 @@ public class MediaFileController
         return imageResponse(path, isContentHash(i), request);
     }
 
-    /** 相册缩略图 thumbs/p/{albumId}/{i}.jpg（i = 册内序号或内容哈希，老 URL 兼容） */
+    /**
+     * 相册缩略图 thumbs/p/{albumId}/{i}.jpg（i = 册内序号或内容哈希，老 URL 兼容）
+     *
+     * <p>P5.55：可选 {@code ?crop=x,y,w,h}。人物头像的裁剪就走这条路
+     * （{@code avatar_ref = a164:4#crop=...} → 后端拼成这条 URL 带 crop 参数），
+     * 前端只负责显示，不自己算像素。</p>
+     */
     @GetMapping("/thumb/p/{albumId}/{i}")
     public ResponseEntity<Resource> thumbPhoto(@PathVariable("albumId") String albumId, @PathVariable("i") String i,
-            HttpServletRequest request)
+            @RequestParam(value = "crop", required = false) String crop, HttpServletRequest request)
     {
         Path path = mediaFileService.resolveThumbPhoto(albumId, i, false);
         // 序号 URL 可能先指向 A 图、重建后指向 B 图，判定只看定位符本身，不看落盘命中的文件名
-        return imageResponse(path, isContentHash(i), request);
+        return croppedImageResponse(path, albumId + "/" + i, crop, request);
+    }
+
+    /**
+     * 带（可选）裁剪的图片响应
+     *
+     * <p>{@code crop} 为空 → 原样走 {@link #imageResponse}（老路径零变化）；
+     * 有 → 现裁一张落到 {@code <thumbs>/avcrop/} 再返回（{@link MediaAvatarCrop#render} 内部按
+     * 源文件 size+mtime 做键，缩略图重建后自动失效）。裁剪参数不合法 → 400，不静默退成整图
+     * —— 用户明确选了一个框，悄悄给他整图才是更难查的错。</p>
+     */
+    private ResponseEntity<Resource> croppedImageResponse(Path src, String cacheKey, String cropParam,
+            HttpServletRequest request)
+    {
+        String crop;
+        try
+        {
+            crop = MediaAvatarCrop.normalize(cropParam);
+        }
+        catch (IllegalArgumentException e)
+        {
+            throw MediaException.badRequest(e.getMessage());
+        }
+        if (crop == null)
+        {
+            return imageResponse(src, isContentHash(src.getFileName().toString()), request);
+        }
+        Path out = MediaAvatarCrop.render(src, crop, mediaFileService.thumbsRoot(), cacheKey);
+        return imageResponse(out, false, request);
     }
 
     /** 相册预览图 thumbs/pv/{albumId}/{i}.jpg（i = 册内序号或内容哈希，老 URL 兼容） */
