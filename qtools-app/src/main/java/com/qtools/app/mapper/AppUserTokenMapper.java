@@ -21,4 +21,10 @@ public interface AppUserTokenMapper
 
     /** 撤销该 jti（幂等） */
     int revoke(@Param("jti") String jti);
+
+    /** 撤销该账号的全部会话（重置密码 / 封禁时强制下线，P5.81） */
+    int revokeAllByUser(@Param("userId") Long userId);
+
+    /** 删除该账号的全部会话行（真删除账号前级联清理，P5.81） */
+    int deleteByUser(@Param("userId") Long userId);
 }

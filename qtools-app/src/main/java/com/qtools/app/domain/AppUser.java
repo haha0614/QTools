@@ -42,6 +42,18 @@ public class AppUser
 
     private LocalDateTime lastLoginAt;
 
+    /** 是否封禁：0/null 正常 / true 已封禁（P5.81，独立于审核状态 status） */
+    private Boolean banned;
+
+    /** 封禁原因（管理员填写，被拒时回显） */
+    private String bannedReason;
+
+    /** 封禁时间（解封时清空） */
+    private LocalDateTime bannedAt;
+
+    /** 最近一次管理端写操作时间（资料 / 密码 / 封禁 / 审核，P5.81） */
+    private LocalDateTime updatedAt;
+
     public Long getId()
     {
         return id;
@@ -170,5 +182,51 @@ public class AppUser
     public void setLastLoginAt(LocalDateTime lastLoginAt)
     {
         this.lastLoginAt = lastLoginAt;
+    }
+
+    public Boolean getBanned()
+    {
+        return banned;
+    }
+
+    public void setBanned(Boolean banned)
+    {
+        this.banned = banned;
+    }
+
+    /** 是否处于封禁态（null 视为未封禁：迁移前的老行没有这一列的值） */
+    public boolean isBanned()
+    {
+        return Boolean.TRUE.equals(banned);
+    }
+
+    public String getBannedReason()
+    {
+        return bannedReason;
+    }
+
+    public void setBannedReason(String bannedReason)
+    {
+        this.bannedReason = bannedReason;
+    }
+
+    public LocalDateTime getBannedAt()
+    {
+        return bannedAt;
+    }
+
+    public void setBannedAt(LocalDateTime bannedAt)
+    {
+        this.bannedAt = bannedAt;
+    }
+
+    public LocalDateTime getUpdatedAt()
+    {
+        return updatedAt;
+    }
+
+    public void setUpdatedAt(LocalDateTime updatedAt)
+    {
+        this.updatedAt = updatedAt;
     }
 }

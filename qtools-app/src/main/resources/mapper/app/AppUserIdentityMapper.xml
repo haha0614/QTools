@@ -26,4 +26,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         values (#{userId}, #{type}, #{identifier}, #{verified})
     </insert>
 
+    <delete id="deleteByUserId">
+        delete from app_user_identity where user_id = #{userId}
+    </delete>
+
 </mapper>

@@ -40,6 +40,7 @@ import com.qtools.media.service.IMediaMaintenanceService;
 import com.qtools.media.service.IMediaOrganizeService;
 import com.qtools.media.service.IMediaPersonService;
 import com.qtools.media.service.IMediaPlaylistService;
+import com.qtools.media.service.IMediaRootArtifactService;
 import com.qtools.media.service.IMediaSavedFilterService;
 import com.qtools.media.service.IMediaScanService;
 import com.qtools.media.service.IMediaStudioService;
@@ -106,6 +107,10 @@ public class MediaAdminController extends BaseController
     /** 日常维护：多库根 media_root + 便携包导出产物 */
     @Autowired
     private IMediaMaintenanceService mediaMaintenanceService;
+
+    /** 产物根子目录清单（P5.80）：一个产物根里 7 类派生资源各占多少空间 */
+    @Autowired
+    private IMediaRootArtifactService mediaRootArtifactService;
 
     /** 站端编辑策略（off / local / full）：管理端「编辑策略」面板读它、改它 */
     @Autowired
@@ -659,6 +664,29 @@ public class MediaAdminController extends BaseController
         }
         return mediaMaintenanceService.updateRoot(id, stringValue(body.get("name")),
                 stringValue(body.get("path")), note, boolValue(body.get("guestVisible")));
+    }
+
+    /**
+     * 产物根子目录清单（P5.80）：{@code GET /api/media/admin/roots/{id}/artifacts?refresh=true}
+     *
+     * <p>一个产物根（{@code kind='thumbs'}）包含<b>全部</b>派生资源，按子目录分成 7 类：
+     * {@code p} 图片缩略图 / {@code v} 视频封面 / {@code s} 精灵图 / {@code pv} 旧预览片段 /
+     * {@code pv2} 预览片段 / {@code frames} 取帧缓存 / {@code avcrop} 头像裁剪缓存。返回每类的
+     * 文件数与占用，外加「未登记的子目录」和根合计，专门给清理缓存用。</p>
+     *
+     * <ul>
+     *   <li>只有 {@code kind=thumbs} 有清单：其它 kind → 400（内容根放源文件，没有派生产物）；</li>
+     *   <li>id 不存在 → 404；根目录当前不可用（盘没挂）→ 200 + {@code exists=false} + {@code note}；</li>
+     *   <li>统计带边界：最多 20 万文件 / 8 秒 / 6 层深，超限返回 {@code partial=true} 与已统计量；</li>
+     *   <li>结果缓存 60s，{@code refresh=true} 强制重扫（管理端「重扫」按钮）。</li>
+     * </ul>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/roots/{id}/artifacts")
+    public Map<String, Object> rootArtifacts(@PathVariable("id") Integer id,
+            @RequestParam(value = "refresh", required = false) String refresh)
+    {
+        return mediaRootArtifactService.artifacts(id, Boolean.TRUE.equals(boolValue(refresh)));
     }
 
     /** 删除库根：{@code media_video} / {@code media_photo} 仍有引用时 400，message 里带引用数 */

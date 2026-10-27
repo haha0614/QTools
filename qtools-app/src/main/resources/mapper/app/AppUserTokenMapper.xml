@@ -20,4 +20,12 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         update app_user_token set revoked = 1 where token_id = #{jti} and revoked = 0
     </update>
 
+    <update id="revokeAllByUser">
+        update app_user_token set revoked = 1 where user_id = #{userId} and revoked = 0
+    </update>
+
+    <delete id="deleteByUser">
+        delete from app_user_token where user_id = #{userId}
+    </delete>
+
 </mapper>

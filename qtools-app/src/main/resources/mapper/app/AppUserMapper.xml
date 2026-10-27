@@ -2,7 +2,7 @@
 <!DOCTYPE mapper
 PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<!-- 用户端账号表 app_user 映射文件（M5；P5.79 加审核状态机） -->
+<!-- 用户端账号表 app_user 映射文件（M5；P5.79 审核状态机；P5.81 用户管理：封禁 / 改资料 / 重置密码 / 删除 / 统计） -->
 <mapper namespace="com.qtools.app.mapper.AppUserMapper">
 
     <resultMap type="com.qtools.app.domain.AppUser" id="AppUserResult">
@@ -12,6 +12,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="avatar"       column="avatar"        />
         <result property="passwordHash" column="password_hash" />
         <result property="status"       column="status"        />
+        <result property="banned"       column="banned"        />
+        <result property="bannedReason" column="banned_reason" />
+        <result property="bannedAt"     column="banned_at"     />
         <result property="reviewNote"   column="review_note"   />
         <result property="reviewedAt"   column="reviewed_at"   />
         <result property="reviewedBy"   column="reviewed_by"   />
@@ -19,18 +22,22 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="registerIp"   column="register_ip"   />
         <result property="createdAt"    column="created_at"    />
         <result property="lastLoginAt"  column="last_login_at" />
+        <result property="updatedAt"    column="updated_at"    />
     </resultMap>
 
     <sql id="selectUserColumns">
-        id, username, nickname, avatar, password_hash, status, review_note, reviewed_at, reviewed_by,
-        invite_code, register_ip, created_at, last_login_at
+        id, username, nickname, avatar, password_hash, status, banned, banned_reason, banned_at,
+        review_note, reviewed_at, reviewed_by, invite_code, register_ip, created_at, last_login_at, updated_at
     </sql>
 
-    <!-- 管理端列表条件：状态精确匹配 + 用户名/昵称模糊 -->
+    <!-- 管理端列表条件：审核状态精确匹配 + 封禁维度 + 用户名/昵称模糊 -->
     <sql id="pageWhere">
         <where>
             <if test="status != null and status != ''">
                 and status = #{status}
+            </if>
+            <if test="banned != null">
+                and banned = #{banned}
             </if>
             <if test="keyword != null and keyword != ''">
                 and (username like concat('%', #{keyword}, '%') or nickname like concat('%', #{keyword}, '%'))
@@ -47,17 +54,18 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </select>
 
     <select id="selectByIdentity" resultMap="AppUserResult">
-        select u.id, u.username, u.nickname, u.avatar, u.password_hash, u.status, u.review_note,
-               u.reviewed_at, u.reviewed_by, u.invite_code, u.register_ip, u.created_at, u.last_login_at
+        select u.id, u.username, u.nickname, u.avatar, u.password_hash, u.status, u.banned,
+               u.banned_reason, u.banned_at, u.review_note, u.reviewed_at, u.reviewed_by,
+               u.invite_code, u.register_ip, u.created_at, u.last_login_at, u.updated_at
         from app_user u
         inner join app_user_identity i on i.user_id = u.id
         where i.type = #{type} and i.identifier = #{identifier}
         limit 1
     </select>
 
-    <!-- 鉴权过滤器专用：只查审核三列，避免每请求拖 avatar（MEDIUMTEXT） -->
+    <!-- 鉴权过滤器专用：只查裁决需要的列，避免每请求拖 avatar（MEDIUMTEXT） -->
     <select id="selectStatusById" resultMap="AppUserResult">
-        select id, status, review_note from app_user where id = #{id}
+        select id, status, banned, banned_reason, review_note from app_user where id = #{id}
     </select>
 
     <insert id="insert" parameterType="com.qtools.app.domain.AppUser" useGeneratedKeys="true" keyProperty="id">
@@ -75,15 +83,45 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         set status = #{status},
             review_note = #{reviewNote,jdbcType=VARCHAR},
             reviewed_at = now(),
-            reviewed_by = #{reviewedBy,jdbcType=BIGINT}
+            reviewed_by = #{reviewedBy,jdbcType=BIGINT},
+            updated_at = now()
         where id = #{id}
     </update>
 
-    <!-- 待审核排最前：管理端一进页面就先看到要处理的 -->
+    <!-- 只改显式提供过的字段（setNickname/setAvatar/setReviewNote）；updated_at 每次写都刷新 -->
+    <update id="updateProfile">
+        update app_user
+        <set>
+            <if test="setNickname">nickname = #{nickname,jdbcType=VARCHAR},</if>
+            <if test="setAvatar">avatar = #{avatar,jdbcType=LONGVARCHAR},</if>
+            <if test="setReviewNote">review_note = #{reviewNote,jdbcType=VARCHAR},</if>
+            updated_at = now()
+        </set>
+        where id = #{id}
+    </update>
+
+    <update id="updatePassword">
+        update app_user set password_hash = #{passwordHash}, updated_at = now() where id = #{id}
+    </update>
+
+    <update id="updateBan">
+        update app_user
+        set banned = #{banned},
+            banned_reason = #{bannedReason,jdbcType=VARCHAR},
+            banned_at = #{bannedAt,jdbcType=TIMESTAMP},
+            updated_at = now()
+        where id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        delete from app_user where id = #{id}
+    </delete>
+
+    <!-- 待审核排最前：管理端一进页面就先看到要处理的；已封禁的排在正常之后 -->
     <select id="selectPage" resultMap="AppUserResult">
         select <include refid="selectUserColumns"/> from app_user
         <include refid="pageWhere"/>
-        order by case status when 'pending' then 0 when 'rejected' then 2 else 1 end, id desc
+        order by case when banned = 1 then 3 when status = 'pending' then 0 when status = 'rejected' then 2 else 1 end, id desc
         limit #{offset}, #{size}
     </select>
 
@@ -91,8 +129,43 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         select count(1) from app_user <include refid="pageWhere"/>
     </select>
 
-    <select id="selectStatusCounts" resultType="java.util.LinkedHashMap">
-        select status as status, count(1) as cnt from app_user group by status
+    <!-- 统计口径：approved = 审核通过且未封禁（卡片「正常」）；banned 是独立维度，可能与其它卡片重叠 -->
+    <select id="selectStats" resultType="java.util.LinkedHashMap">
+        select count(1)                                                              as total,
+               ifnull(sum(case when status = 'pending'  then 1 else 0 end), 0)        as pending,
+               ifnull(sum(case when status = 'approved' and banned = 0 then 1 else 0 end), 0) as approved,
+               ifnull(sum(case when status = 'rejected' then 1 else 0 end), 0)        as rejected,
+               ifnull(sum(case when banned = 1 then 1 else 0 end), 0)                 as banned,
+               ifnull(sum(case when created_at &gt;= curdate() then 1 else 0 end), 0)  as newToday,
+               ifnull(sum(case when last_login_at &gt;= date_sub(now(), interval 7 day) then 1 else 0 end), 0) as activeRecently
+        from app_user
     </select>
+
+    <select id="countTable" resultType="int">
+        select count(1) from information_schema.tables
+        where table_schema = database() and table_name = #{tableName}
+    </select>
+
+    <select id="selectFavoriteCounts" resultType="java.util.LinkedHashMap">
+        select o.user_id as userId, count(f.id) as cnt
+        from media_owner o
+        join media_favorite f on f.owner_key = o.owner_key
+        where o.user_id in
+        <foreach collection="userIds" item="uid" open="(" separator="," close=")">#{uid}</foreach>
+        group by o.user_id
+    </select>
+
+    <select id="selectPlaylistCounts" resultType="java.util.LinkedHashMap">
+        select o.user_id as userId, count(p.id) as cnt
+        from media_owner o
+        join media_playlist p on p.owner_key = o.owner_key
+        where o.user_id in
+        <foreach collection="userIds" item="uid" open="(" separator="," close=")">#{uid}</foreach>
+        group by o.user_id
+    </select>
+
+    <update id="clearOwnerBinding">
+        update media_owner set user_id = null where user_id = #{userId}
+    </update>
 
 </mapper>

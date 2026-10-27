@@ -12,8 +12,10 @@ import com.qtools.app.mapper.AppUserMapper;
  * {@link AppTokenVerifier}（媒体模块验 token）的状态校验，全部调用本类，避免同一套
  * pending / rejected 文案散在各处 if 里漂移。</p>
  *
- * <p>口径：</p>
+ * <p>口径（P5.81 起先看封禁、再看审核态）：</p>
  * <ul>
+ *   <li>{@code banned = 1} = 已封禁 → 「账号已被封禁」+（有原因时）「：<banned_reason>」，
+ *       与审核态无关（审核通过但被封禁同样进不来；解封后回到原审核态的判定）；</li>
  *   <li>{@code approved}（或历史上为空）= 放行；</li>
  *   <li>{@code pending} = 待审核 → 「账号待审核，请联系站长」；</li>
  *   <li>{@code rejected} = 未通过 → 「注册未通过审核」+ 审核备注（有则带上）；</li>
@@ -41,6 +43,12 @@ public class AppUserGuard
     public static final String MSG_UNKNOWN = "账号状态异常，请联系站长";
 
     public static final String MSG_MISSING = "账号不存在或已停用";
+
+    /** P5.81：封禁（独立于审核态，见 doc/app_user_ban.sql 的说明） */
+    public static final String MSG_BANNED = "账号已被封禁";
+
+    /** 管理端列表筛选值「已封禁」：不是审核状态，仅作为查询条件（banned = 1） */
+    public static final String FILTER_BANNED = "banned";
 
     @Autowired
     private AppUserMapper appUserMapper;
@@ -75,6 +83,12 @@ public class AppUserGuard
         if (user == null)
         {
             return MSG_MISSING;
+        }
+        // P5.81：封禁优先于审核态 —— 这是管理员明确的处置动作，文案要一眼看出「被封了」而不是「待审核」
+        if (user.isBanned())
+        {
+            String reason = user.getBannedReason();
+            return reason == null || reason.isBlank() ? MSG_BANNED : MSG_BANNED + "：" + reason.trim();
         }
         String status = user.getStatus();
         if (status == null || status.isEmpty() || STATUS_APPROVED.equals(status))

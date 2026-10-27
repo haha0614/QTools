@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -22,15 +23,16 @@ import com.qtools.common.core.page.TableDataInfo;
 import com.qtools.common.utils.SecurityUtils;
 
 /**
- * 管理端 · 用户端账号审核（前缀 {@code /api/app/admin/users}，P5.79）
+ * 管理端 · 用户端账号管理（前缀 {@code /api/app/admin/users}，P5.79 审核 → P5.81 用户管理）
  *
- * <p>为什么挂在 {@code /api/app/admin} 而不是另起前缀：接口语义上就是「用户端账号的审核」。
+ * <p>为什么挂在 {@code /api/app/admin} 而不是另起前缀：接口语义上就是「用户端账号的管理」。
  * 但它的身份是<b>后台管理员</b>，不是用户端账号，所以：</p>
  * <ul>
  *   <li>不带 {@code @Anonymous}：走 Security 的 {@code anyRequest().authenticated()}，
  *       且 {@code SecurityConfig} 显式声明 {@code /api/app/admin/**} 为 authenticated
  *       （否则会被 {@code GET /**} 的 permitAll 吞掉）；</li>
- *   <li>每个方法上 {@code @PreAuthorize}：有后台 token 但无权限 → 403；</li>
+ *   <li>每个方法上 {@code @PreAuthorize}：读 {@code app:user:list}、写 {@code app:user:edit}，
+ *       有后台 token 但无权限 → 403；</li>
  *   <li>{@link com.qtools.app.security.AppJwtFilter} 对这段前缀直接放行（它只裁决用户端 token）。</li>
  * </ul>
  *
@@ -49,7 +51,7 @@ public class AppUserAdminController
     @Autowired
     private IAppUserAdminService appUserAdminService;
 
-    /** 分页列表：status 空=全部，keyword 匹配用户名/昵称 */
+    /** 分页列表：status 空=全部 / pending / approved（正常，不含封禁）/ rejected / banned；keyword 匹配用户名/昵称 */
     @PreAuthorize("@ss.hasPermi('app:user:list')")
     @GetMapping
     public TableDataInfo list(@RequestParam(value = "status", required = false) String status,
@@ -62,7 +64,7 @@ public class AppUserAdminController
         return appUserAdminService.list(status, keyword != null ? keyword : q, page, size);
     }
 
-    /** 各状态数量（待审核角标 / 顶部提示） */
+    /** 统计（顶部卡片 / 待审核角标）：total / pending / approved / rejected / banned / newToday / activeRecently */
     @PreAuthorize("@ss.hasPermi('app:user:list')")
     @GetMapping("/stats")
     public Map<String, Object> stats()
@@ -70,12 +72,58 @@ public class AppUserAdminController
         return appUserAdminService.stats();
     }
 
-    /** 单个账号详情 */
+    /** 单个账号详情（含审核记录 / 封禁字段 / 登录身份 / 收藏数） */
     @PreAuthorize("@ss.hasPermi('app:user:list')")
     @GetMapping("/{id}")
     public Map<String, Object> detail(@PathVariable("id") Long id)
     {
         return appUserAdminService.detail(id);
+    }
+
+    /** 改资料：只改传入字段（nickname / avatar / reviewNote|note|remark） */
+    @PreAuthorize("@ss.hasPermi('app:user:edit')")
+    @PutMapping("/{id}")
+    public Map<String, Object> update(@PathVariable("id") Long id,
+            @RequestBody(required = false) String rawBody)
+    {
+        return appUserAdminService.updateProfile(id, parseObject(rawBody), SecurityUtils.getUserId());
+    }
+
+    /** 重置密码：body 可空；带 {@code {"password":"..."}} 用手填，否则生成随机密码并一次性返回 */
+    @PreAuthorize("@ss.hasPermi('app:user:edit')")
+    @PostMapping("/{id}/reset-password")
+    public Map<String, Object> resetPassword(@PathVariable("id") Long id,
+            @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody);
+        return appUserAdminService.resetPassword(id, text(body.get("password")), SecurityUtils.getUserId());
+    }
+
+    /** 封禁（body 可选 {@code {"reason":"原因"}}）；独立于审核状态 */
+    @PreAuthorize("@ss.hasPermi('app:user:edit')")
+    @PostMapping("/{id}/ban")
+    public Map<String, Object> ban(@PathVariable("id") Long id,
+            @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody);
+        return appUserAdminService.ban(id, text(body.get("reason")), SecurityUtils.getUserId());
+    }
+
+    /** 解封（幂等：未封禁时返回当前行 + changed:false） */
+    @PreAuthorize("@ss.hasPermi('app:user:edit')")
+    @PostMapping("/{id}/unban")
+    public Map<String, Object> unban(@PathVariable("id") Long id)
+    {
+        return appUserAdminService.unban(id, SecurityUtils.getUserId());
+    }
+
+    /** 真删除：必须带 ?confirm=1，否则 400（防误删）；返回被删除的用户名 */
+    @PreAuthorize("@ss.hasPermi('app:user:edit')")
+    @DeleteMapping("/{id}")
+    public Map<String, Object> delete(@PathVariable("id") Long id,
+            @RequestParam(value = "confirm", required = false) String confirm)
+    {
+        return appUserAdminService.delete(id, confirm, SecurityUtils.getUserId());
     }
 
     /** 通过（幂等：已是 approved 时返回当前状态 + changed:false） */
@@ -113,32 +161,24 @@ public class AppUserAdminController
     @PostMapping("/batch/approve")
     public Map<String, Object> batchApprove(@RequestBody(required = false) String rawBody)
     {
+        return appUserAdminService.batchApprove(parseIds(rawBody), SecurityUtils.getUserId());
+    }
+
+    /** 批量封禁：body {@code {"ids":[...], "reason":"原因"}} */
+    @PreAuthorize("@ss.hasPermi('app:user:edit')")
+    @PostMapping("/batch/ban")
+    public Map<String, Object> batchBan(@RequestBody(required = false) String rawBody)
+    {
         Map<String, Object> body = parseObject(rawBody);
-        Object raw = body.get("ids");
-        if (!(raw instanceof List))
-        {
-            throw AppException.badRequest("ids 必须是数组");
-        }
-        List<Long> ids = new ArrayList<>();
-        for (Object item : (List<?>) raw)
-        {
-            if (item instanceof Number)
-            {
-                ids.add(((Number) item).longValue());
-            }
-            else if (item != null)
-            {
-                try
-                {
-                    ids.add(Long.valueOf(String.valueOf(item).trim()));
-                }
-                catch (NumberFormatException e)
-                {
-                    throw AppException.badRequest("ids 里含非数字元素");
-                }
-            }
-        }
-        return appUserAdminService.batchApprove(ids, SecurityUtils.getUserId());
+        return appUserAdminService.batchBan(parseIds(body), text(body.get("reason")), SecurityUtils.getUserId());
+    }
+
+    /** 批量解封：body {@code {"ids":[...]}} */
+    @PreAuthorize("@ss.hasPermi('app:user:edit')")
+    @PostMapping("/batch/unban")
+    public Map<String, Object> batchUnban(@RequestBody(required = false) String rawBody)
+    {
+        return appUserAdminService.batchUnban(parseIds(rawBody), SecurityUtils.getUserId());
     }
 
     /** 解析 body；缺 body 视为空对象（缺字段由业务层给 400） */
@@ -164,6 +204,42 @@ public class AppUserAdminController
         @SuppressWarnings("unchecked")
         Map<String, Object> map = (Map<String, Object>) parsed;
         return map;
+    }
+
+    /** 从已解析的 body 里取 ids（字符串数字也接受） */
+    private static List<Long> parseIds(Map<String, Object> body)
+    {
+        Object raw = body.get("ids");
+        if (!(raw instanceof List))
+        {
+            throw AppException.badRequest("ids 必须是数组");
+        }
+        List<Long> ids = new ArrayList<>();
+        for (Object item : (List<?>) raw)
+        {
+            if (item instanceof Number)
+            {
+                ids.add(((Number) item).longValue());
+            }
+            else if (item != null)
+            {
+                try
+                {
+                    ids.add(Long.valueOf(String.valueOf(item).trim()));
+                }
+                catch (NumberFormatException e)
+                {
+                    throw AppException.badRequest("ids 里含非数字元素");
+                }
+            }
+        }
+        return ids;
+    }
+
+    /** 批量接口的原始 body 版本 */
+    private static List<Long> parseIds(String rawBody)
+    {
+        return parseIds(parseObject(rawBody));
     }
 
     private static String text(Object value)
