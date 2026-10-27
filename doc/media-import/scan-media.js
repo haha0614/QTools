@@ -142,7 +142,9 @@ const HELP = `
                       没有的行刷成 thumbs/v/<id>.jpg；可配 --dry-run / --dump-sql=<file>
                       注意顺序：先跑 build-thumbs.js（P4 起按 <content_hash>.jpg 落盘），
                       再执行本模式；封面文件还是 <id>.jpg 时刷完会指向不存在的文件
-  --limit=<n>         --backfill-hash 时最多处理多少行（默认不限）
+  --only-video        只扫视频：图片/相册一律不看（也不会把库里的图片标成缺失）
+  --only-photo        只扫图片/相册：视频一律不看（也不会把库里的视频标成缺失）
+  --limit=<n>         本次最多写多少个视频 / 多少张图片（默认不限）；--backfill-hash 时是最多处理多少行
   --prune-missing     扫完把 media_photo / media_video 里 missing=1 的行真删（默认只标记不删）；
                       删除前先打印 TOP 10 与总数，必须同时给 --yes 才真删
   --help              显示本帮助
@@ -196,6 +198,7 @@ function parseArgs(argv) {
   const o = Object.assign({}, DEFAULTS, {
     root: null, mysql: null, secret: null, dumpSql: null, truncate: false, yes: false, dryRun: false,
     ignored: [], noHash: false, backfillHash: false, fixPosterPath: false, limit: null, rootId: null,
+    onlyVideo: false, onlyPhoto: false,
     pruneMissing: false, purgeUnclaimed: false, backfillAlbumMtime: false,
   });
   for (const a of argv) {
@@ -209,6 +212,8 @@ function parseArgs(argv) {
     else if (a === '--fix-poster-path') o.fixPosterPath = true;
     else if (a === '--prune-missing') o.pruneMissing = true;
     else if (a === '--purge-unclaimed') o.purgeUnclaimed = true;
+    else if (a === '--only-video') o.onlyVideo = true;
+    else if (a === '--only-photo') o.onlyPhoto = true;
     else if (a.startsWith('--root=')) o.root = a.slice('--root='.length);
     else if (a.startsWith('--db=')) o.db = a.slice('--db='.length);
     else if (a.startsWith('--user=')) o.user = a.slice('--user='.length);
@@ -241,6 +246,9 @@ function parseArgs(argv) {
     throw new Error('--root-id 必须是正整数（media_root.id）；不确定就省略它，脚本会取 kind=root 的第一行');
   }
   if (o.noHash && o.backfillHash) throw new Error('--no-hash 与 --backfill-hash 互相矛盾：回填就是来算哈希的');
+  if (o.onlyVideo && o.onlyPhoto) {
+    throw new Error('--only-video 与 --only-photo 只能二选一（两个都不给 = 视频 + 图片一起扫）');
+  }
   o.port = String(o.port);
   o.excludeSet = new Set(o.exclude.map((s) => s.toLowerCase()));
   return o;
@@ -544,6 +552,8 @@ function scanDisk(root, o) {
     const isVideo = VIDEO_EXT.has(f.ext);
     const isPhoto = PHOTO_EXT.has(f.ext);
     if (!isVideo && !isPhoto) continue;
+    // 只扫一类时，被排除的那一类连 present 都不登记：missing 同步只处理本次真的看过的那张表
+    if (isVideo ? o.onlyPhoto : o.onlyVideo) continue;
     if (isVideo) present.video.add(f.rel);
     else present.photo.add(f.rel);
     if (f.rel.length > MAX_REL) {
@@ -631,6 +641,24 @@ function scanDisk(root, o) {
   if (sink.skippedLinks) warnings.push(sink.skippedLinks + ' 个符号链接/联接点已跳过（不跟随）');
 
   videos.sort((a, b) => naturalCompare(a.rel, b.rel));
+
+  // --limit：最多写前 n 个视频 / 前 n 张图片。present 集合在上面的循环里已经按**整盘**登记过，
+  // 截断只影响「本次写不写」，不会把没写的行误标成缺失（缺失判定只看磁盘上还在不在）。
+  if (o.limit !== null) {
+    if (videos.length > o.limit) videos.length = o.limit;
+    let left = o.limit;
+    const kept = [];
+    for (const g of list) {
+      if (left <= 0) break;
+      g.photos = g.photos.slice(0, left);
+      left -= g.photos.length;
+      kept.push(g);
+    }
+    list.length = 0;
+    for (const g of kept) list.push(g);
+    warnings.push('--limit=' + o.limit + '：本次最多写 ' + o.limit + ' 个视频 / ' + o.limit + ' 张图片' +
+      '（其余文件仍按「磁盘上还在」登记，不会被标成缺失）');
+  }
   return { videos, groups: list, warnings, skipped, rootTitle, present };
 }
 
@@ -1558,11 +1586,13 @@ function applyMissing(o, mysqlExe, password, present, snapshot) {
   // 判定必须用「写库之后」的 rel_path：本次扫描可能把旧行移动到了新路径（改名/复活），
   // 拿写库前的路径去比对，会把刚移动好的行误标成缺失。
   const after = loadMissingSnapshot(o, mysqlExe, password);
+  // --only-video / --only-photo：本次没看的那张表一律不碰（否则全部会被标成缺失）
+  const kinds = o.onlyVideo ? ['video'] : o.onlyPhoto ? ['photo'] : ['photo', 'video'];
   const beforeById = new Map();
   for (const kind of ['photo', 'video']) {
     for (const r of (snapshot[kind] || [])) beforeById.set(kind + ':' + r.id, r);
   }
-  for (const kind of ['photo', 'video']) {
+  for (const kind of kinds) {
     const table = kind === 'photo' ? 'media_photo' : 'media_video';
     const rows = after[kind] || [];
     const mark = [];
@@ -1628,7 +1658,8 @@ function existingTables(o, mysqlExe, password, names) {
 function pruneMissingRows(o, mysqlExe, password) {
   const scope = rootScope(o);
   const out = { photo: 0, video: 0, deleted: 0 };
-  for (const kind of ['photo', 'video']) {
+  // 与 applyMissing 同口径：--only-video / --only-photo 时另一张表的缺失行不是本次的结论，不许删
+  for (const kind of (o.onlyVideo ? ['video'] : o.onlyPhoto ? ['photo'] : ['photo', 'video'])) {
     const table = kind === 'photo' ? 'media_photo' : 'media_video';
     const totalRows = queryRows(o, mysqlExe, password,
       'SELECT COUNT(*) FROM ' + table + ' WHERE ' + scope + ' AND missing = 1;');
@@ -1758,6 +1789,8 @@ function main() {
     ' photos=' + photoCount + ' people=0');
   log('root=' + root + ' root-id=' + (o.rootId === null ? 'NULL' : o.rootId) +
     ' big-bytes=' + o.bigBytes + ' album-mode=' + o.albumMode +
+    (o.onlyVideo ? ' only-video=1' : '') + (o.onlyPhoto ? ' only-photo=1' : '') +
+    (o.limit !== null ? ' limit=' + o.limit : '') +
     ' hash=' + (o.noHash ? 'off' : o.hashBytes + 'B') +
     ' exclude=' + o.exclude.join(',') + (o.truncate ? ' truncate=1' : ''));
   for (const a of model.albums.slice(0, 20)) {

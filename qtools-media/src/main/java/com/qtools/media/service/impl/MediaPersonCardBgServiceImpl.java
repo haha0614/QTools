@@ -12,6 +12,7 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 import javax.imageio.ImageIO;
@@ -84,6 +85,259 @@ public class MediaPersonCardBgServiceImpl implements IMediaPersonCardBgService
 
     private static final AtomicLong LAST_PURGE = new AtomicLong(0);
 
+    /** P5.92 预热：后台线程数（2–4 个：再多只是把同一颗 CPU 抢得更碎） */
+    private static final int WARM_THREADS = 3;
+
+    /** P5.92 预热队列上限（满了就丢：预热本来就是「锦上添花」，不能把保存动作拖住） */
+    private static final int WARM_QUEUE_MAX = 64;
+
+    /**
+     * 每个人最近一次真实访问用的参数（P5.92）
+     *
+     * <p>尺寸 / 模糊 / 主题 / 卡片底色都进内容哈希，服务端猜不出来（1600px 的窗口要 328×102，
+     * 375px 的窗口要 176×82）。所以「预热」= 把这组记录下来的参数再渲一次，
+     * 并且记住上次那个缓存文件路径：文件还在就跳过，不白读一遍盘也不再查库。</p>
+     */
+    private final java.util.concurrent.ConcurrentHashMap<Long, java.util.List<WarmSpec>> warmSpecs = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 每个人最多记几组参数：低清占位 + 正式图（换视口 / 换主题会产生新的组，旧的自动淘汰） */
+    private static final int SPEC_MAX_PER_PERSON = 4;
+
+    private final java.util.concurrent.BlockingQueue<Long> warmQueue = new java.util.concurrent.LinkedBlockingQueue<>(
+            WARM_QUEUE_MAX);
+
+    private final AtomicLong warmDone = new AtomicLong(0);
+
+    private final AtomicLong warmSkipped = new AtomicLong(0);
+
+    private final AtomicLong warmFailed = new AtomicLong(0);
+
+    private final AtomicLong warmQueued = new AtomicLong(0);
+
+    private final java.util.concurrent.ExecutorService warmPool = java.util.concurrent.Executors.newFixedThreadPool(
+            WARM_THREADS, r -> {
+                Thread t = new Thread(r, "qtools-cardbg-warm");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /**
+     * 参数落盘 / 读取专用（单线程）
+     *
+     * <p>不能和预热共用 {@link #warmPool}：那 3 个线程全被常驻消费者占着（阻塞在 take()），
+     * 往同一个池里提交落盘任务会永远排在后面 —— 这正是 P5.92 第一版踩到的坑。</p>
+     */
+    private final java.util.concurrent.ExecutorService specPool = java.util.concurrent.Executors
+            .newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "qtools-cardbg-spec");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /** 上次访问的参数 + 上次命中的缓存文件 */
+    private static final class WarmSpec
+    {
+        private final Integer w;
+
+        private final Integer h;
+
+        private final BigDecimal scale;
+
+        private final BigDecimal dx;
+
+        private final BigDecimal dy;
+
+        private final Integer blur;
+
+        private final boolean dark;
+
+        private final String bg;
+
+        private volatile Path file;
+
+        WarmSpec(Integer w, Integer h, BigDecimal scale, BigDecimal dx, BigDecimal dy, Integer blur, boolean dark,
+                String bg, Path file)
+        {
+            this.w = w;
+            this.h = h;
+            this.scale = scale;
+            this.dx = dx;
+            this.dy = dy;
+            this.blur = blur;
+            this.dark = dark;
+            this.bg = bg;
+            this.file = file;
+        }
+    }
+
+    public MediaPersonCardBgServiceImpl()
+    {
+        // 常驻消费者：队列空了就阻塞，不占 CPU（不在 @PostConstruct 里起，构造即就绪，单测也好用）
+        for (int i = 0; i < WARM_THREADS; i++)
+        {
+            warmPool.execute(this::warmLoop);
+        }
+    }
+
+    /**
+     * 启动后把上次落盘的参数读回来
+     *
+     * <p>必须挂在 {@code @PostConstruct}：构造期间 {@link #mediaProperties} 还是 null，
+     * 求缓存目录会直接 NPE（P5.92 第一版就是这么静默失效的）。</p>
+     */
+    @jakarta.annotation.PostConstruct
+    public void initWarmSpecs()
+    {
+        specPool.execute(this::loadSpecs);
+    }
+
+    private void warmLoop()
+    {
+        while (true)
+        {
+            Long personId;
+            try
+            {
+                personId = warmQueue.take();
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            for (WarmSpec spec : specsOf(personId))
+            {
+                try
+                {
+                    if (spec.file != null && Files.isRegularFile(spec.file) && sizeOf(spec.file) > 0)
+                    {
+                        warmSkipped.incrementAndGet();
+                        continue;
+                    }
+                    cardBg(personId, spec.w, spec.h, spec.scale, spec.dx, spec.dy, spec.blur, spec.dark, spec.bg);
+                    warmDone.incrementAndGet();
+                }
+                catch (RuntimeException e)
+                {
+                    warmFailed.incrementAndGet();
+                    log.debug("卡片背景预热失败 person={} err={}", personId, e.getMessage());
+                }
+            }
+        }
+    }
+
+    @Override
+    public void warmAsync(java.util.Collection<Long> personIds)
+    {
+        if (personIds == null || personIds.isEmpty())
+        {
+            return;
+        }
+        for (Long id : personIds)
+        {
+            if (id == null)
+            {
+                continue;
+            }
+            // 去重：同一个人已经在队列里就不再排一次
+            if (warmQueue.contains(id))
+            {
+                continue;
+            }
+            if (warmQueue.offer(id))
+            {
+                warmQueued.incrementAndGet();
+            }
+        }
+    }
+
+    @Override
+    public void warmAfterEdit(java.util.Collection<Long> personIds)
+    {
+        if (personIds == null || personIds.isEmpty())
+        {
+            return;
+        }
+        for (Long id : personIds)
+        {
+            if (id == null)
+            {
+                continue;
+            }
+            java.util.List<WarmSpec> specs = specsOf(id);
+            if (!specs.isEmpty())
+            {
+                // 缩放 / 偏移刚被改过：记录的旧值必须丢掉，让服务层用库里新存的那组
+                java.util.List<WarmSpec> fresh = new java.util.ArrayList<>(specs.size());
+                for (WarmSpec spec : specs)
+                {
+                    fresh.add(new WarmSpec(spec.w, spec.h, null, null, null, spec.blur, spec.dark, spec.bg, null));
+                }
+                warmSpecs.put(id, fresh);
+            }
+            if (!warmQueue.contains(id) && warmQueue.offer(id))
+            {
+                warmQueued.incrementAndGet();
+            }
+        }
+    }
+
+    @Override
+    public CardBgImage warmOne(Long personId, Integer w, Integer h, BigDecimal scale, BigDecimal dx, BigDecimal dy,
+            Integer blur, boolean dark, String bgHex)
+    {
+        long begin = System.currentTimeMillis();
+        java.util.List<WarmSpec> specs = personId == null ? java.util.List.of() : specsOf(personId);
+        // 显式给了尺寸 = 只要这一张（管理端「按这个视口预演一遍」）
+        if (w != null || h != null)
+        {
+            WarmSpec spec = specs.isEmpty() ? null : specs.get(0);
+            return cardBg(personId, w, h, scale, dx, dy, blur != null ? blur : spec == null ? null : spec.blur,
+                    dark || (spec != null && spec.dark), bgHex != null ? bgHex : spec == null ? null : spec.bg);
+        }
+        // 没给 = 把记录下来的每一组（低清 + 正式）都渲一遍；全都在就是 skipped
+        boolean allHit = true;
+        CardBgImage last = new CardBgImage(new byte[0], "warm-skip", true, 0, DEFAULT_W, DEFAULT_H);
+        if (specs.isEmpty())
+        {
+            last = cardBg(personId, null, null, scale, dx, dy, blur, dark, bgHex);
+            allHit = false;
+        }
+        for (WarmSpec spec : specs)
+        {
+            if (spec.file != null && Files.isRegularFile(spec.file) && sizeOf(spec.file) > 0)
+            {
+                continue;
+            }
+            allHit = false;
+            last = cardBg(personId, spec.w, spec.h, spec.scale, spec.dx, spec.dy, spec.blur, spec.dark, spec.bg);
+        }
+        return new CardBgImage(last.getBytes(), last.getKey(), allHit, System.currentTimeMillis() - begin,
+                last.getWidth(), last.getHeight());
+    }
+
+    @Override
+    public java.util.Map<String, Object> warmStats()
+    {
+        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("queued", warmQueue.size());
+        out.put("running", WARM_THREADS - ((java.util.concurrent.ThreadPoolExecutor) warmPool).getActiveCount() == 0
+                ? WARM_THREADS
+                : ((java.util.concurrent.ThreadPoolExecutor) warmPool).getActiveCount());
+        out.put("rendered", warmDone.get());
+        out.put("skipped", warmSkipped.get());
+        out.put("failed", warmFailed.get());
+        out.put("enqueued", warmQueued.get());
+        int specCount = 0;
+        for (java.util.List<WarmSpec> list : warmSpecs.values())
+        {
+            specCount += list.size();
+        }
+        out.put("persons", warmSpecs.size());
+        out.put("specs", specCount);
+        return out;
+    }
+
     @Autowired
     private MediaPersonMapper mediaPersonMapper;
 
@@ -122,6 +376,8 @@ public class MediaPersonCardBgServiceImpl implements IMediaPersonCardBgService
         String hash = sha1(seed);
         Path dir = cacheDir();
         Path file = dir.resolve(person.getId() + "-" + outW + "x" + outH + "-" + hash + ".jpg");
+        // P5.92：记住「这个人最近一次要的是哪一组参数、落到哪个文件」—— 预热就按它来
+        rememberSpec(person.getId(), w, h, scale, dx, dy, blur, dark, bgHex, file);
 
         if (Files.isRegularFile(file) && sizeOf(file) > 0)
         {
@@ -154,6 +410,216 @@ public class MediaPersonCardBgServiceImpl implements IMediaPersonCardBgService
         log.info("预渲染人物卡背景 person={} {}x{} scale={} dx={} dy={} blur={} dark={} key={} bytes={} cost={}ms",
                 person.getId(), outW, outH, effScale, effDx, effDy, effBlur, dark, hash, bytes.length, cost);
         return new CardBgImage(bytes, hash, false, cost, outW, outH);
+    }
+
+    /** 某个人的全部历史参数（最近的在前；没有就空表） */
+    private java.util.List<WarmSpec> specsOf(Long personId)
+    {
+        java.util.List<WarmSpec> list = personId == null ? null : warmSpecs.get(personId);
+        return list == null ? java.util.List.of() : list;
+    }
+
+    /**
+     * 记下这个人这次要的参数与落到的缓存文件（去重、最近优先、每人最多 {@link #SPEC_MAX_PER_PERSON} 组）
+     *
+     * <p>为什么要留多组而不是只留最后一组：首屏每张卡有两个 URL —— 低清占位（240×…）和正式图（328×…）。
+     * 只记最后一组，预热就只能热正式图，冷缓存访问仍然是 13 HIT + 13 MISS。</p>
+     */
+    private void rememberSpec(Long personId, Integer w, Integer h, BigDecimal scale, BigDecimal dx, BigDecimal dy,
+            Integer blur, boolean dark, String bgHex, Path file)
+    {
+        java.util.List<WarmSpec> prev = warmSpecs.computeIfAbsent(personId,
+                k -> java.util.Collections.synchronizedList(new java.util.ArrayList<>(SPEC_MAX_PER_PERSON + 1)));
+        synchronized (prev)
+        {
+            for (int i = 0; i < prev.size(); i++)
+            {
+                WarmSpec s = prev.get(i);
+                if (java.util.Objects.equals(s.w, w) && java.util.Objects.equals(s.h, h)
+                        && java.util.Objects.equals(s.blur, blur) && s.dark == dark
+                        && java.util.Objects.equals(s.bg, bgHex) && java.util.Objects.equals(s.scale, scale)
+                        && java.util.Objects.equals(s.dx, dx) && java.util.Objects.equals(s.dy, dy))
+                {
+                    if (file != null && !file.equals(s.file))
+                    {
+                        s.file = file;
+                    }
+                    if (i > 0)
+                    {
+                        prev.remove(i);
+                        prev.add(0, s);
+                    }
+                    return;
+                }
+            }
+            prev.add(0, new WarmSpec(w, h, scale, dx, dy, blur, dark, bgHex, file));
+            while (prev.size() > SPEC_MAX_PER_PERSON)
+            {
+                prev.remove(prev.size() - 1);
+            }
+        }
+        scheduleSpecPersist();
+    }
+
+    /* ------------------------------------------------------- 预热参数持久化（P5.92） */
+
+    /**
+     * 参数落盘：{@code <thumbs>/cardbg/warm-spec.json}
+     *
+     * <p>为什么必须落盘：这些参数是「这个人上一次访问要的是多大、多糊、什么主题」，
+     * 进程重启后如果只剩内存里的，就退化成「缺省 666×204 亮色」—— 而真实浏览器要的是
+     * 328×102 暗色，一个都对不上，预热等于白跑。落盘之后「部署 / 重启 / 清过缓存」这些场景
+     * 才能靠上一批真实访问的参数把图渲好。</p>
+     */
+    private static final String SPEC_FILE = "warm-spec.json";
+
+    private final java.util.concurrent.atomic.AtomicBoolean specDirty = new java.util.concurrent.atomic.AtomicBoolean(
+            false);
+
+    private final AtomicLong lastSpecSave = new AtomicLong(0);
+
+    private void scheduleSpecPersist()
+    {
+        specDirty.set(true);
+        long now = System.currentTimeMillis();
+        long last = lastSpecSave.get();
+        // 2 秒最多写一次：13 张卡一轮访问会连续改 26 次，没必要写 26 遍盘
+        if (now - last < 2000 || !lastSpecSave.compareAndSet(last, now))
+        {
+            return;
+        }
+        final boolean save = specDirty.compareAndSet(true, false);
+        if (!save)
+        {
+            return;
+        }
+        specPool.execute(this::persistSpecs);
+    }
+
+    private void persistSpecs()
+    {
+        Path dir;
+        try
+        {
+            dir = cacheDir();
+        }
+        catch (RuntimeException e)
+        {
+            return;
+        }
+        // 用 Jackson 拼：手写 JSON 的引号转义在 Java 里既难读又容易写错
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        for (Map.Entry<Long, java.util.List<WarmSpec>> e : warmSpecs.entrySet())
+        {
+            if (e.getValue() == null || e.getValue().isEmpty())
+            {
+                continue;
+            }
+            java.util.List<Object> nodes = new java.util.ArrayList<>();
+            for (WarmSpec s : new java.util.ArrayList<>(e.getValue()))
+            {
+                Map<String, Object> node = new java.util.LinkedHashMap<>();
+                node.put("w", s.w);
+                node.put("h", s.h);
+                node.put("s", s.scale == null ? null : s.scale.toPlainString());
+                node.put("dx", s.dx == null ? null : s.dx.toPlainString());
+                node.put("dy", s.dy == null ? null : s.dy.toPlainString());
+                node.put("blur", s.blur);
+                node.put("d", s.dark ? 1 : 0);
+                node.put("bg", s.bg);
+                nodes.add(node);
+            }
+            out.put(String.valueOf(e.getKey()), nodes);
+        }
+        String json;
+        try
+        {
+            json = mapper.writeValueAsString(out);
+        }
+        catch (Exception ex)
+        {
+            log.debug("预热参数序列化失败（忽略）: {}", ex.getMessage());
+            return;
+        }
+        try
+        {
+            Path tmp = Files.createTempFile(dir, "spec", ".tmp");
+            Files.writeString(tmp, json, StandardCharsets.UTF_8);
+            Path target = dir.resolve(SPEC_FILE);
+            try
+            {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            }
+            catch (IOException atomicFailed)
+            {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
+        catch (IOException e)
+        {
+            log.debug("预热参数落盘失败（不影响渲染）: {}", e.getMessage());
+        }
+    }
+
+    /** 启动时把上次落盘的参数读回来（失败就当作没有：预热退化成缺省尺寸，绝不抛异常） */
+    private void loadSpecs()
+    {
+        try
+        {
+            Path file = cacheDir().resolve(SPEC_FILE);
+            if (!Files.isRegularFile(file))
+            {
+                return;
+            }
+            String text = Files.readString(file, StandardCharsets.UTF_8);
+            com.fasterxml.jackson.databind.JsonNode root = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readTree(text);
+            boolean first = true;
+            java.util.Iterator<java.util.Map.Entry<String, com.fasterxml.jackson.databind.JsonNode>> it = root
+                    .fields();
+            while (it.hasNext())
+            {
+                java.util.Map.Entry<String, com.fasterxml.jackson.databind.JsonNode> e = it.next();
+                Long id;
+                try
+                {
+                    id = Long.valueOf(e.getKey());
+                }
+                catch (NumberFormatException ignored)
+                {
+                    continue;
+                }
+                com.fasterxml.jackson.databind.JsonNode n = e.getValue();
+                java.util.List<WarmSpec> list = java.util.Collections
+                        .synchronizedList(new java.util.ArrayList<>(SPEC_MAX_PER_PERSON + 1));
+                for (com.fasterxml.jackson.databind.JsonNode node : n)
+                {
+                    list.add(new WarmSpec(
+                            node.hasNonNull("w") ? Integer.valueOf(node.get("w").asInt()) : null,
+                            node.hasNonNull("h") ? Integer.valueOf(node.get("h").asInt()) : null,
+                            node.hasNonNull("s") ? new BigDecimal(node.get("s").asText()) : null,
+                            node.hasNonNull("dx") ? new BigDecimal(node.get("dx").asText()) : null,
+                            node.hasNonNull("dy") ? new BigDecimal(node.get("dy").asText()) : null,
+                            node.hasNonNull("blur") ? Integer.valueOf(node.get("blur").asInt()) : null,
+                            node.has("d") && node.get("d").asInt() == 1,
+                            node.hasNonNull("bg") ? node.get("bg").asText() : null, null));
+                }
+                if (!list.isEmpty())
+                {
+                    warmSpecs.put(id, list);
+                }
+                first = false;
+            }
+            if (!first)
+            {
+                log.info("卡片背景预热参数已恢复 persons={}", warmSpecs.size());
+            }
+        }
+        catch (Exception e)
+        {
+            log.debug("冷却参数读取失败（忽略）: {}", e.getMessage());
+        }
     }
 
     /* ------------------------------------------------------------------ 渲染 */

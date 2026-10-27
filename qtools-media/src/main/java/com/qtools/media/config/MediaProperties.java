@@ -46,6 +46,8 @@ import org.springframework.stereotype.Component;
  *   <tr><td>scanArgs</td><td>{@code --dir-mode=raw --allow-dup-dir}</td><td>等于不带附加参数</td>
  *       <td>QTOOLS_MEDIA_SCANARGS</td></tr>
  *   <tr><td>scanTimeoutMinutes</td><td>10</td><td>-</td><td>QTOOLS_MEDIA_SCANTIMEOUTMINUTES</td></tr>
+ *   <tr><td>scanIngestTimeoutMinutes</td><td>30</td><td>扫描入库超时后强杀子进程并置 failed</td>
+ *       <td>QTOOLS_MEDIA_SCANINGESTTIMEOUTMINUTES</td></tr>
  *   <tr><td>thumbScript</td><td>空</td><td>thumb 扫描启动即报「thumbScript 未配置」</td>
  *       <td>QTOOLS_MEDIA_THUMBSCRIPT</td></tr>
  *   <tr><td>thumbArgs</td><td>空（= 增量全量跑一遍）</td><td>-</td><td>QTOOLS_MEDIA_THUMBARGS</td></tr>
@@ -154,6 +156,14 @@ public class MediaProperties
 
     /** 单次扫描超时（分钟），超时强杀进程并置 failed */
     private int scanTimeoutMinutes = 10;
+
+    /**
+     * 扫描入库（P5.91 {@code POST /api/media/admin/scan} 的 rootId 形状）超时（分钟）
+     *
+     * <p>默认 30：大目录（十万级文件 + 逐文件 oshash）最慢的量级在十几分钟，10 分钟（维护任务那一档）
+     * 会把正常任务切断；超时一律强杀子进程并置 {@code failed} + 原因写进任务日志。</p>
+     */
+    private int scanIngestTimeoutMinutes = 30;
 
     /**
      * 缩略图增量脚本（{@code type=thumb} 扫描任务执行它）；留空则 thumb 扫描无法启动
@@ -1074,6 +1084,16 @@ public class MediaProperties
     public void setScanTimeoutMinutes(int scanTimeoutMinutes)
     {
         this.scanTimeoutMinutes = scanTimeoutMinutes;
+    }
+
+    public int getScanIngestTimeoutMinutes()
+    {
+        return scanIngestTimeoutMinutes;
+    }
+
+    public void setScanIngestTimeoutMinutes(int scanIngestTimeoutMinutes)
+    {
+        this.scanIngestTimeoutMinutes = scanIngestTimeoutMinutes;
     }
 
     public String getThumbScript()

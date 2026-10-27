@@ -1,6 +1,7 @@
 package com.qtools.media.service;
 
 import java.math.BigDecimal;
+import java.util.Collection;
 
 /**
  * 人物卡背景「服务端预渲染 + 内容寻址缓存」服务（P5.90）
@@ -34,6 +35,54 @@ public interface IMediaPersonCardBgService
      */
     CardBgImage cardBg(Long personId, Integer w, Integer h, BigDecimal scale, BigDecimal dx, BigDecimal dy,
             Integer blur, boolean dark, String bgHex);
+
+    /**
+     * 后台预热（P5.92）：把这些人「上一次真实访问用的那组参数」重新渲染一遍，已有的直接跳过
+     *
+     * <p>为什么用「上一次访问的参数」而不是一组写死的参数：尺寸 / 模糊 / 主题 / 卡片底色全都进内容哈希，
+     * 猜不出来 —— 320px 宽的窗口和 1600px 的窗口要的是两张不同的图。所以每次 {@link #cardBg} 都记下
+     * 这个人最近一次的参数与缓存文件路径，预热就按它来：文件在 → 跳过；文件没了（换头像 / 清过缓存）→ 重渲染。</p>
+     *
+     * <p>异步：丢进一个有界队列，2–4 个后台线程串行消费，调用方（索引构建 / 保存参数）立刻返回。
+     * 队列满了就丢（宁可这次不预热，也不要让保存动作卡住）。</p>
+     *
+     * @param personIds 人物 id；null / 空 = 直接返回
+     */
+    void warmAsync(Collection<Long> personIds);
+
+    /**
+     * 站长改完背景参数后的预热：照旧用上次访问的尺寸 / 模糊 / 主题，但缩放与偏移**改用库里刚存的值**
+     *
+     * <p>为什么必须清掉记录里的 s/dx/dy：那三个是「保存前」的值，拿它预热会渲出一张用户马上就不要的图。
+     * 传 null 让服务层回落到人物已保存的 bg_scale/bg_dx/bg_dy —— 与前端保存后立刻发出的请求同一个内容哈希。</p>
+     *
+     * @param personIds 人物 id
+     */
+    void warmAfterEdit(Collection<Long> personIds);
+
+    /**
+     * 同步预热一个人（管理端接口 / 测试用）
+     *
+     * @param personId 人物 id
+     * @param w        输出宽（null = 用上次访问的 / 缺省 666）
+     * @param h        输出高（null = 用上次访问的 / 缺省 204）
+     * @param scale    缩放（null = 用上次访问的 / 人物已保存值）
+     * @param dx       水平偏移（同上）
+     * @param dy       垂直偏移（同上）
+     * @param blur     模糊半径（null = 上次访问的 / 6）
+     * @param dark     暗色主题（照抄前端；调用方没给就沿用上次访问的）
+     * @param bgHex    卡片底色 {@code RRGGBB}（null = 上次访问的 / ffffff）
+     * @return 渲染结果（{@link CardBgImage#isHit()} = true 表示本来就有，没白渲染）
+     */
+    CardBgImage warmOne(Long personId, Integer w, Integer h, BigDecimal scale, BigDecimal dx, BigDecimal dy,
+            Integer blur, boolean dark, String bgHex);
+
+    /**
+     * 预热状态（排障 / 实测用）：排队中 + 正在渲染 + 最近一次真正渲染的数量
+     *
+     * @return {@code {queued, running, done, skipped, failed}}
+     */
+    java.util.Map<String, Object> warmStats();
 
     /** 渲染结果 */
     final class CardBgImage

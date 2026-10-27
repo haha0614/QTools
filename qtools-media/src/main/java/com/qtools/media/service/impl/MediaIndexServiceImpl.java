@@ -105,6 +105,10 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     @Autowired
     private IMediaGuestAccessService mediaGuestAccessService;
 
+    /** 卡片背景预热（P5.92）：索引重建成功后在后台把人物墙那 13 张图渲好 */
+    @Autowired
+    private com.qtools.media.service.IMediaPersonCardBgService mediaPersonCardBgService;
+
     /**
      * 快照缓存：{@code includeMissing} × {@code guest} 四种组合各存一份
      *
@@ -158,7 +162,42 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             snapshots.put(key, fresh);
             log.info("媒体索引重建完成 includeMissing={} guest={} size={}B cost={}ms etag={}", includeMissing, guest,
                     body.length, System.currentTimeMillis() - start, fresh.getEtag());
+            warmCardBg();
             return fresh;
+        }
+    }
+
+    /**
+     * P5.92：索引重建成功 → 后台预热人物卡背景
+     *
+     * <p>为什么挂在索引上：人物页一进来就请求 {@code /media/index}（60s 一份快照），而索引重建
+     * 恰好是「人物数据刚变过」的时间点（新建人物 / 换头像 / 保存背景调整都会让索引失效）。
+     * 在这里排一次预热，用户真的打开人物页时那 13 张卡就是 HIT（3–20ms）而不是并发冷渲染（180–380ms）。</p>
+     *
+     * <p>guest / 非 guest 都预热：站端人物页是<b>匿名</b>访问（guest=true 的那份快照），
+     * 可见性筛的是库根内容，不是人物 —— 两种快照要的是同一批卡片背景图。</p>
+     */
+    private void warmCardBg()
+    {
+        if (mediaPersonCardBgService == null)
+        {
+            return;
+        }
+        try
+        {
+            List<Long> ids = new ArrayList<>();
+            for (MediaPerson person : mediaPersonMapper.selectPersonList())
+            {
+                if (person != null && person.getId() != null)
+                {
+                    ids.add(person.getId());
+                }
+            }
+            mediaPersonCardBgService.warmAsync(ids);
+        }
+        catch (RuntimeException e)
+        {
+            log.debug("索引重建后预热卡片背景失败（不影响索引）: {}", e.getMessage());
         }
     }
 

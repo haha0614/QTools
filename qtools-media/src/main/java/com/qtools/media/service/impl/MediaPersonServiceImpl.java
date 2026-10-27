@@ -24,6 +24,7 @@ import com.qtools.media.mapper.MediaPersonMapper;
 import com.qtools.media.service.IMediaFrameService;
 import com.qtools.media.service.IMediaGuestAccessService;
 import com.qtools.media.service.IMediaIndexService;
+import com.qtools.media.service.IMediaPersonCardBgService;
 import com.qtools.media.service.IMediaPersonService;
 
 /**
@@ -171,6 +172,49 @@ public class MediaPersonServiceImpl implements IMediaPersonService
     @Autowired
     private IMediaFrameService mediaFrameService;
 
+    /**
+     * 卡片背景预热（P5.92）
+     *
+     * <p>换头像 / 改背景调整都会换掉卡片背景图的缓存键 —— 用户下次打开人物页就该看到新图，
+     * 而那张新图此刻还没人渲过。写库成功后立刻排一次后台预热，人物页 13 张卡就还是 HIT。</p>
+     */
+    @Autowired
+    private IMediaPersonCardBgService mediaPersonCardBgService;
+
+    /** 后台预热一个人（失败只记日志：预热永远不能影响保存结果） */
+    private void warmCardBg(Long id)
+    {
+        if (id == null || mediaPersonCardBgService == null)
+        {
+            return;
+        }
+        try
+        {
+            mediaPersonCardBgService.warmAsync(java.util.Collections.singletonList(id));
+        }
+        catch (RuntimeException e)
+        {
+            log.debug("卡片背景预热排队失败 id={} err={}", id, e.getMessage());
+        }
+    }
+
+    /** 背景缩放 / 偏移改完：预热必须用「库里刚存的那组」，不能沿用上次访问的旧值 */
+    private void warmCardBgAfterEdit(Long id)
+    {
+        if (id == null || mediaPersonCardBgService == null)
+        {
+            return;
+        }
+        try
+        {
+            mediaPersonCardBgService.warmAfterEdit(java.util.Collections.singletonList(id));
+        }
+        catch (RuntimeException e)
+        {
+            log.debug("卡片背景预热排队失败 id={} err={}", id, e.getMessage());
+        }
+    }
+
     // ------------------------------------------------------------------ 管理端：人物字典
 
     @Override
@@ -314,6 +358,7 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         String clean = checkAvatar(path);
         mediaPersonMapper.updatePersonAvatar(id, clean);
         invalidateIndex();
+        warmCardBg(id);
         log.info("设置媒体人物头像 id={} path={}", id, clean);
         return personNode(mediaPersonMapper.selectPersonDetail(id));
     }
@@ -349,6 +394,7 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         }
         mediaPersonMapper.updatePersonBg(id, cleanScale, cleanDx, cleanDy);
         invalidateIndex();
+        warmCardBgAfterEdit(id);
         log.info("站端保存人物背景调整 id={} scale={} dx={} dy={}", id, cleanScale, cleanDx, cleanDy);
         return personNode(mediaPersonMapper.selectPersonDetail(id));
     }
@@ -360,6 +406,7 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         requirePerson(id);
         mediaPersonMapper.clearPersonBg(id);
         invalidateIndex();
+        warmCardBgAfterEdit(id);
         log.info("站端重置人物背景调整 id={}", id);
         return personNode(mediaPersonMapper.selectPersonDetail(id));
     }
@@ -458,6 +505,7 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         }
         mediaPersonMapper.updatePersonAvatarRef(id, cleanKind, cleanRef);
         invalidateIndex();
+        warmCardBg(id);
         log.info("设置人物手动头像 id={} kind={} ref={}", id, cleanKind, cleanRef);
         return personNode(mediaPersonMapper.selectPersonDetail(id));
     }
@@ -469,6 +517,7 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         requirePerson(id);
         mediaPersonMapper.updatePersonAvatarRef(id, null, null);
         invalidateIndex();
+        warmCardBg(id);
         log.info("清除人物手动头像 id={}（回退三级自动）", id);
         return personNode(mediaPersonMapper.selectPersonDetail(id));
     }

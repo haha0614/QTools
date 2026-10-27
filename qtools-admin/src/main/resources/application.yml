@@ -69,6 +69,10 @@ qtools:
     # 绝不可带 --truncate（会清 6 张 media_* 表）；旧脚本的 --dir-mode=raw --allow-dup-dir 已无意义，删掉
     scanArgs: '--root=E:/111/视频 --port=3307 --album-mode=prefix --secret=${qtools.home:E:/111/project/QTools}/QTools/qtools-admin/src/main/resources/secret.yml'
     scanTimeoutMinutes: 10
+    # 扫描入库（P5.91 管理端「扫描入库」页）：同一个 scan-media.js，但 --root= / --root-id= 由页面选中的
+    # media_root 行决定（不读 scanArgs 里的 --root=），开关由请求决定（--dry-run / --only-video /
+    # --only-photo / --limit= / --purge-unclaimed），DB 连接仍来自上面的 scanArgs（--port= / --secret=）
+    scanIngestTimeoutMinutes: 30
     # 缩略图增量扫描（type=thumb）：doc/media-import/build-thumbs.js（仓库版：读库取 content_hash 再落盘）
     thumbScript: '${qtools.home:E:/111/project/QTools}/QTools/doc/media-import/build-thumbs.js'
     # 同样必须自带路径：Java 不传 --root/--thumbs；--port 漏了会连 3306 读到空库、一张都不生成

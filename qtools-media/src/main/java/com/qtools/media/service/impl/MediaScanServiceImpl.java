@@ -39,6 +39,8 @@ import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaScanJobMapper;
 import com.qtools.media.service.IMediaIndexService;
 import com.qtools.media.service.IMediaScanService;
+import com.qtools.media.support.MediaScanArgs;
+import com.qtools.media.support.MediaScanGate;
 
 /**
  * 重建索引 / 维护类任务 服务实现
@@ -194,7 +196,9 @@ public class MediaScanServiceImpl implements IMediaScanService
         return thread;
     });
 
-    private final Object startLock = new Object();
+    /** 与扫描入库（P5.91）共用的唯一互斥点：两边都起 node 子进程写同一批 media_* 表 */
+    @Autowired
+    private MediaScanGate mediaScanGate;
 
     /** 本 JVM 正在跑的任务 id（重启后为 null，由 DB running 计数兜底） */
     private final AtomicLong runningJobId = new AtomicLong(0L);
@@ -239,8 +243,13 @@ public class MediaScanServiceImpl implements IMediaScanService
             // 导出目录由后端生成：前端只能触发，不能指定写到哪儿（下载接口也只认这个形状）
             req.setExportDir(exportDirOf());
         }
-        synchronized (startLock)
+        synchronized (mediaScanGate.lock)
         {
+            if (mediaScanGate.isIngestRunning())
+            {
+                throw MediaException.conflict("已有扫描入库任务在运行（" + mediaScanGate.getIngestJobId()
+                        + "），请等待结束或先取消");
+            }
             if (runningJobId.get() != 0L || mediaScanJobMapper.countRunning() > 0)
             {
                 throw MediaException.conflict("已有扫描任务在运行，请等待结束后再触发");
@@ -880,7 +889,7 @@ public class MediaScanServiceImpl implements IMediaScanService
         {
             forbiddenPrefixes.add("--exclude=");
         }
-        appendConfiguredArgs(command, mediaProperties.getScanArgs(), SCAN_FORBIDDEN_ARGS, SCAN_MANAGED_ARGS,
+        MediaScanArgs.appendConfigured(command, mediaProperties.getScanArgs(), SCAN_FORBIDDEN_ARGS, SCAN_MANAGED_ARGS,
                 forbiddenPrefixes);
         if (TYPE_BACKFILL.equals(jobType))
         {
@@ -920,7 +929,7 @@ public class MediaScanServiceImpl implements IMediaScanService
         command.add(requireNode());
         command.add(script);
         // --video= / --ids-file= 属于「本次请求勾选了哪几条」：配置里写了也丢掉，避免按钮与配置静默分叉
-        appendConfiguredArgs(command, mediaProperties.getThumbArgs(), THUMB_MANAGED_ARGS, List.of(),
+        MediaScanArgs.appendConfigured(command, mediaProperties.getThumbArgs(), THUMB_MANAGED_ARGS, List.of(),
                 List.of("--video=", "--ids-file="));
         // jobType 是 normalizeMode 归一化后的逗号拼接值：sprite,preview 两个开关都会带上
         if (jobType.contains("sprite"))
@@ -973,7 +982,7 @@ public class MediaScanServiceImpl implements IMediaScanService
         command.add(requireNode());
         command.add(requireScript(mediaProperties.getEnrichScript(), "enrichScript"));
         Integer limit = req == null ? null : req.getLimit();
-        appendConfiguredArgs(command, mediaProperties.getEnrichArgs(), List.of(), List.of(),
+        MediaScanArgs.appendConfigured(command, mediaProperties.getEnrichArgs(), List.of(), List.of(),
                 limit != null && limit > 0 ? List.of("--limit=") : List.of());
         if (limit != null && limit > 0)
         {
@@ -993,7 +1002,7 @@ public class MediaScanServiceImpl implements IMediaScanService
         List<String> command = new ArrayList<>();
         command.add(requireNode());
         command.add(requireScript(mediaProperties.getExportScript(), "exportScript"));
-        appendConfiguredArgs(command, mediaProperties.getExportArgs(), List.of(), List.of(), List.of("--out="));
+        MediaScanArgs.appendConfigured(command, mediaProperties.getExportArgs(), List.of(), List.of(), List.of("--out="));
         String exportDir = req == null ? null : req.getExportDir();
         requireConfigured(exportDir, "exportPath");
         command.add("--out=" + exportDir);
@@ -1192,47 +1201,6 @@ public class MediaScanServiceImpl implements IMediaScanService
             return mediaProperties.getMaintainTimeoutMinutes();
         }
         return mediaProperties.getDeriveTimeoutMinutes();
-    }
-
-    /**
-     * 追加配置里的附加参数：跳过空白、受管开关（精确匹配与 {@code --key=} 前缀匹配）
-     *
-     * <p>三层过滤的意图各不相同：{@code forbidden} 是永不接受的危险开关（{@code --truncate}）；
-     * {@code managed} 是「只能由 mode 决定」的开关（{@code --backfill-hash} / {@code --force}）；
-     * {@code forbiddenPrefixes} 是「请求已经给了值，配置里的同名参数要让位」的参数
-     * （{@code --album-mode=} / {@code --exclude=} / {@code --out=} / {@code --limit=}）。</p>
-     */
-    private static void appendConfiguredArgs(List<String> command, String extra, List<String> forbidden,
-            List<String> managed, List<String> forbiddenPrefixes)
-    {
-        if (StringUtils.isEmpty(extra))
-        {
-            return;
-        }
-        for (String arg : extra.trim().split("\\s+"))
-        {
-            if (arg.isEmpty() || forbidden.contains(arg) || managed.contains(arg))
-            {
-                continue;
-            }
-            if (startsWithAny(arg, forbiddenPrefixes))
-            {
-                continue;
-            }
-            command.add(arg);
-        }
-    }
-
-    private static boolean startsWithAny(String arg, List<String> prefixes)
-    {
-        for (String prefix : prefixes)
-        {
-            if (arg.startsWith(prefix))
-            {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**

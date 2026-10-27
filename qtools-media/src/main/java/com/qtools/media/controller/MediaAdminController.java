@@ -31,6 +31,7 @@ import com.qtools.common.core.page.TableDataInfo;
 import com.qtools.common.enums.BusinessType;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.domain.MediaVideoMarker;
+import com.qtools.media.domain.dto.MediaScanIngestRequest;
 import com.qtools.media.domain.dto.MediaScanRequest;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.service.IMediaAdminService;
@@ -38,10 +39,12 @@ import com.qtools.media.service.IMediaDeriveStatusService;
 import com.qtools.media.service.IMediaEditPolicyService;
 import com.qtools.media.service.IMediaMaintenanceService;
 import com.qtools.media.service.IMediaOrganizeService;
+import com.qtools.media.service.IMediaPersonCardBgService;
 import com.qtools.media.service.IMediaPersonService;
 import com.qtools.media.service.IMediaPlaylistService;
 import com.qtools.media.service.IMediaRootArtifactService;
 import com.qtools.media.service.IMediaSavedFilterService;
+import com.qtools.media.service.IMediaScanIngestService;
 import com.qtools.media.service.IMediaScanService;
 import com.qtools.media.service.IMediaStudioService;
 import com.qtools.media.service.IMediaSynopsisService;
@@ -89,6 +92,10 @@ public class MediaAdminController extends BaseController
     @Autowired
     private IMediaScanService mediaScanService;
 
+    /** 扫描入库（P5.91）：遍历某个库根目录写库，任务只在内存、带实时日志与取消 */
+    @Autowired
+    private IMediaScanIngestService mediaScanIngestService;
+
     @Autowired
     private IMediaOrganizeService mediaOrganizeService;
 
@@ -99,6 +106,10 @@ public class MediaAdminController extends BaseController
     /** 人物 / 演员体系（P3-A）：字典 CRUD + 视频/相册人物绑定 */
     @Autowired
     private IMediaPersonService mediaPersonService;
+
+    /** 人物卡背景预渲染（P5.90 / 预热 P5.92）：管理与排障用的手动预热入口 */
+    @Autowired
+    private IMediaPersonCardBgService mediaPersonCardBgService;
 
     /** 工作室（P5-A）：字典 CRUD + 视频绑定全量替换 */
     @Autowired
@@ -445,6 +456,12 @@ public class MediaAdminController extends BaseController
      *       产物目录由后端生成，任务结束写 {@code EXPORT ok dir=… files=… bytes=…} 日志行</td></tr>
      * </table>
      *
+     * <p>P5.91「扫描入库」是同一个 URL 的另一个形状：body 里出现 {@code rootId}（或 {@code mode=ingest}）时不再
+     * 走 mode 分支，而是交给 {@code IMediaScanIngestService}——媒体根从 {@code media_root} 里按 id 取，
+     * 不再由 {@code scanArgs} 写死；回包是 {@code {jobId, command, startedAt, ...}}，
+     * 后续用 {@code GET /scan/jobs/{jobId}} 轮询实时日志。字段与默认值见
+     * {@link com.qtools.media.domain.dto.MediaScanIngestRequest}。</p>
+     *
      * <p>生成 / 删除 / 回填开关全部由后端按 mode 追加，前端<b>不能</b>传任意子进程参数：
      * {@code albumMode} 只接受 dir|prefix 且只对 scan 生效，{@code exclude} 只允许目录名文本
      * （带空格 / 引号 / 分号一律 400），{@code noFresh} 与 {@code force} 只对 thumb / sprite / preview
@@ -452,12 +469,26 @@ public class MediaAdminController extends BaseController
      * {@code force=true} 时三档都会追加 {@code --force} 越过 mtime 新鲜度判定、全部重建；
      * {@code limit} 只对 thumb / sprite / preview / enrich 生效（其余传了直接 400）。</p>
      */
-    @PreAuthorize("@ss.hasPermi('media:admin:scan')")
+    @PreAuthorize("@ss.hasAnyPermi('media:admin:scan,media:admin:edit')")
     @Log(title = "媒体库-重建索引", businessType = BusinessType.OTHER)
     @PostMapping("/scan")
     public Map<String, Object> scan(@RequestBody(required = false) String rawBody)
     {
         Map<String, Object> body = parseObject(rawBody, false);
+        if (body.containsKey("rootId") || "ingest".equals(stringValue(body.get("mode"))))
+        {
+            // P5.91 扫描入库：body {rootId, dryRun?, withVideo?, withPhoto?, limit?, force?} → {jobId, command, startedAt}
+            // 与下面的 mode 分支共用同一个 URL，是因为「扫描」本来就只有一件事——遍历磁盘入库；
+            // 差别只在参数来源（mode 分支的媒体根写死在 scanArgs 里，这条从 media_root 里选）。
+            MediaScanIngestRequest ingest = new MediaScanIngestRequest();
+            ingest.setRootId(longValue(body.get("rootId")));
+            ingest.setDryRun(boolValue(body.get("dryRun")));
+            ingest.setWithVideo(boolValue(body.get("withVideo")));
+            ingest.setWithPhoto(boolValue(body.get("withPhoto")));
+            ingest.setLimit(integerValue(body.get("limit")));
+            ingest.setForce(boolValue(body.get("force")));
+            return mediaScanIngestService.start(ingest);
+        }
         MediaScanRequest request = new MediaScanRequest(stringValue(body.get("type")), stringValue(body.get("mode")),
                 booleanValue(body.get("confirm")), integerValue(body.get("limit")));
         // 下面四个可选参数由服务层校验取值并拼进子进程命令；前端传不进任意参数
@@ -1321,6 +1352,119 @@ public class MediaAdminController extends BaseController
      * <p>仍被视频引用时 <b>400</b>，message 里带引用计数；先解绑
      * （{@code PUT /videos/{id}/studios}）再删。不做级联删除。</p>
      */
+    /**
+     * 预热全部人物卡背景：{@code POST /api/media/admin/person/card-bg/warm}
+     *
+     * <p>P5.92：人物页首屏那 13 张图（低清占位 + 正式各一张）在服务端是内容寻址缓存 ——
+     * 命中 3–20ms，冷渲染 60–200ms 且并发时互相抢 CPU。索引重建（60s 一次）与保存背景参数后
+     * 会自动排后台预热；这个接口是手动挡：部署完 / 清过缓存 / 想确认真人访问一定 HIT 时用。</p>
+     *
+     * <p>参数可全省：省了就用每个人「上一次真实访问的那组参数」（尺寸 / 模糊 / 主题 / 卡片底色，
+     * 服务端猜不出视口宽度，所以只能跟着真实访问学）。传了就按传的对所有人物渲一遍。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-预热卡片背景", businessType = BusinessType.OTHER)
+    @PostMapping("/person/card-bg/warm")
+    public Map<String, Object> warmAllCardBg(@RequestParam(value = "w", required = false) Integer w,
+            @RequestParam(value = "h", required = false) Integer h,
+            @RequestParam(value = "blur", required = false) Integer blur,
+            @RequestParam(value = "d", required = false) String d,
+            @RequestParam(value = "bg", required = false) String bg)
+    {
+        boolean dark = "1".equals(d) || "true".equalsIgnoreCase(d);
+        List<Long> ids = personIds();
+        int rendered = 0;
+        int skipped = 0;
+        int failed = 0;
+        for (Long id : ids)
+        {
+            try
+            {
+                if (mediaPersonCardBgService.warmOne(id, w, h, null, null, null, blur, dark, bg).isHit())
+                {
+                    skipped++;
+                }
+                else
+                {
+                    rendered++;
+                }
+            }
+            catch (RuntimeException e)
+            {
+                failed++;
+                log.debug("手动预热卡片背景失败 person={} err={}", id, e.getMessage());
+            }
+        }
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("persons", ids.size());
+        out.put("rendered", rendered);
+        out.put("skipped", skipped);
+        out.put("failed", failed);
+        out.put("stats", mediaPersonCardBgService.warmStats());
+        return out;
+    }
+
+    /**
+     * 预热单个：{@code POST /api/media/admin/person/{id}/card-bg/warm}
+     *
+     * @return {@code {id, hit, key, ms, width, height}}（hit=true = 本来就有，没白渲染）
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @PostMapping("/person/{id}/card-bg/warm")
+    public Map<String, Object> warmOneCardBg(@PathVariable("id") Long id,
+            @RequestParam(value = "w", required = false) Integer w,
+            @RequestParam(value = "h", required = false) Integer h,
+            @RequestParam(value = "blur", required = false) Integer blur,
+            @RequestParam(value = "d", required = false) String d,
+            @RequestParam(value = "bg", required = false) String bg)
+    {
+        boolean dark = "1".equals(d) || "true".equalsIgnoreCase(d);
+        IMediaPersonCardBgService.CardBgImage image = mediaPersonCardBgService.warmOne(id, w, h, null, null, null,
+                blur, dark, bg);
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("id", id);
+        out.put("hit", image.isHit());
+        out.put("key", image.getKey());
+        out.put("ms", image.getRenderMs());
+        out.put("width", image.getWidth());
+        out.put("height", image.getHeight());
+        return out;
+    }
+
+    /** 预热状态：{@code GET /api/media/admin/person/card-bg/warm/stats} */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/person/card-bg/warm/stats")
+    public Map<String, Object> warmCardBgStats()
+    {
+        return mediaPersonCardBgService.warmStats();
+    }
+
+    /** 全部人物 id（管理端预热用；不排序、不筛可见性 —— 预热与「谁能看见」无关） */
+    private List<Long> personIds()
+    {
+        List<Long> ids = new java.util.ArrayList<>();
+        for (Map<String, Object> node : mediaPersonService.personBriefList())
+        {
+            Object id = node == null ? null : node.get("id");
+            if (id instanceof Number)
+            {
+                ids.add(((Number) id).longValue());
+            }
+            else if (id != null)
+            {
+                try
+                {
+                    ids.add(Long.valueOf(String.valueOf(id)));
+                }
+                catch (NumberFormatException ignored)
+                {
+                    // 非数字 id 不参与预热
+                }
+            }
+        }
+        return ids;
+    }
+
     @PreAuthorize("@ss.hasPermi('media:admin:edit')")
     @Log(title = "媒体库-删除工作室", businessType = BusinessType.DELETE)
     @DeleteMapping("/studios/{id}")
