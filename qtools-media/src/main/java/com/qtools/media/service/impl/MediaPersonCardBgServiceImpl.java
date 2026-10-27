@@ -321,9 +321,7 @@ public class MediaPersonCardBgServiceImpl implements IMediaPersonCardBgService
     {
         java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
         out.put("queued", warmQueue.size());
-        out.put("running", WARM_THREADS - ((java.util.concurrent.ThreadPoolExecutor) warmPool).getActiveCount() == 0
-                ? WARM_THREADS
-                : ((java.util.concurrent.ThreadPoolExecutor) warmPool).getActiveCount());
+        out.put("threads", WARM_THREADS);
         out.put("rendered", warmDone.get());
         out.put("skipped", warmSkipped.get());
         out.put("failed", warmFailed.get());

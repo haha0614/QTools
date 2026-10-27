@@ -78,9 +78,9 @@ public interface IMediaPersonCardBgService
             Integer blur, boolean dark, String bgHex);
 
     /**
-     * 预热状态（排障 / 实测用）：排队中 + 正在渲染 + 最近一次真正渲染的数量
+     * 预热状态（排障 / 实测用）
      *
-     * @return {@code {queued, running, done, skipped, failed}}
+     * @return {@code {queued, threads, rendered, skipped, failed, enqueued, persons, specs}}
      */
     java.util.Map<String, Object> warmStats();
 
