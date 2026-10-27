@@ -1140,6 +1140,54 @@ public class MediaAdminController extends BaseController
     }
 
     /**
+     * 管理端设人物手动头像（P5.66）：{@code PUT /api/media/admin/persons/{id}/avatar}，body {@code {kind, ref}}
+     *
+     * <p>三个 tab 落库的形状与站端一致：{@code kind = "photo"} 时 {@code ref = "<albumId>:<seq>"}、
+     * {@code kind = "frame"} 时 {@code ref = "frame:<videoId>:<sec>"}、{@code kind = "url"} 时 {@code ref} 是
+     * {@code http(s)://} / {@code data:image/…}；三者都可带 {@code #crop=x,y,w,h}（比例）裁剪尾巴。
+     * 回包是整条 personNode（含后端解析好的 {@code avatarKind / avatarRef / avatarUrl}）。</p>
+     *
+     * <p><b>与站端那条的关系</b>：业务实现完全相同 —— 直接复用
+     * {@link com.qtools.media.service.IMediaPersonService#setAvatar(Long, String, String)}，
+     * 一行逻辑都不复制。区别只有入口和闸门：</p>
+     * <ul>
+     *   <li>站端 {@code PUT /api/media/person/{id}/avatar}（MediaEditController）：{@code @Anonymous} +
+     *       {@code requireWritable()} 站端编辑策略闸门，为「访客在 full 档位下也能改」而开；</li>
+     *   <li>本接口：管理端权限 {@code media:admin:edit}，<b>不过</b>站端编辑策略闸门 ——
+     *       管理员本来就该能写，站端 off 档（禁止访客编辑）不该把管理员一起挡住。</li>
+     * </ul>
+     *
+     * <p>管理端前端（QTools-M）只用本接口，不再借用站端匿名那条。</p>
+     *
+     * <p>错误码：kind 非法 / ref 空 / ref 不成形 / 图片不在该人物名下 / 视频不存在或秒越界 → <b>400</b>；
+     * 人物不存在 → <b>404</b>；无 {@code media:admin:edit} 权限 → <b>403</b>。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-人物手动头像", businessType = BusinessType.UPDATE)
+    @PutMapping("/persons/{id}/avatar")
+    public Map<String, Object> setPersonAvatarRef(@PathVariable("id") Long id,
+            @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaPersonService.setAvatar(id, stringValue(body.get("kind")), stringValue(body.get("ref")));
+    }
+
+    /**
+     * 管理端清除人物手动头像（P5.66）：{@code DELETE /api/media/admin/persons/{id}/avatar} → 回三级自动
+     *
+     * <p>清的是 {@code avatar_kind / avatar_ref}（手动那层），历史 {@code avatar_path} 不动；
+     * 实现复用 {@link com.qtools.media.service.IMediaPersonService#clearAvatar(Long)}。
+     * 人物不存在 → 404；无 {@code media:admin:edit} 权限 → 403。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-人物手动头像", businessType = BusinessType.UPDATE)
+    @DeleteMapping("/persons/{id}/avatar")
+    public Map<String, Object> clearPersonAvatarRef(@PathVariable("id") Long id)
+    {
+        return mediaPersonService.clearAvatar(id);
+    }
+
+    /**
      * 全量替换某视频的人物与角色：{@code PUT /api/media/admin/videos/{id}/persons}
      *
      * <p>body {@code {personIds:[1,2], roles:{1:主演}}}：{@code personIds} 出现即整体替换

@@ -42,6 +42,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="instagram"    column="instagram"    />
         <result property="videoCount" column="video_count" />
         <result property="albumCount" column="album_count" />
+        <result property="photoCount"   column="photo_count"   />
+        <result property="coverPath"    column="cover_path"    />
+        <result property="coverVideoId" column="cover_video_id" />
     </resultMap>
 
     <!-- 人物行 + 两个只读计数（视频数按 media_video_actor 去重；相册数取两个来源的并集） -->
@@ -56,7 +59,60 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             select ap.album_id from media_album_person ap where ap.person_id = p.id
             union
             select al.id from media_album al where al.person_id = p.id
-        ) alb) as album_count
+        ) alb) as album_count,
+        <!--
+            P5.65：人物卡片的「Z 张照片」与相册封面，随人物行一次 SQL 聚合出来。
+
+            改前的做法是管理端每张卡片各发一次 GET /person/{id}/albums?size=200 再前端求和
+            （站端人物墙从 /index 索引里拼），一页 100 张卡就是 100+ 请求。这里把同一口径下沉到 SQL：
+            来源与 album_count 同源（media_album_person ∪ media_album.person_id），可见性与站端
+            selectPersonAlbumPage / countPersonAlbums 一致（al.hidden = 0），所以「Z 张照片」和
+            首册封面与改前逐行相同（P5.65 证据里有 13 人物逐行对比）。
+
+            photo_count 用「两段各自索引求和 + NOT EXISTS 去重」，不用 or exists(...)：后者的 OR
+            会让 media_album 变成每人物一次全表扫（158 行 × N），前者两段都走 idx_album_person /
+            idx_album_person_person（实测 0.042ms/行 vs 0.57ms/行）。
+        -->
+        ((select coalesce(sum(al.photo_count), 0)
+            from media_album al
+            join media_album_person apl on apl.album_id = al.id and apl.person_id = p.id
+           where al.hidden = 0)
+         + (select coalesce(sum(al2.photo_count), 0)
+              from media_album al2
+             where al2.hidden = 0
+               and al2.person_id = p.id
+               and not exists (select 1 from media_album_person x
+                                where x.album_id = al2.id and x.person_id = p.id))
+        ) as photo_count,
+        <!--
+            「名下第一个相册的封面」＝ 相册接口（order by al.sort asc, al.id asc）的第一行，所以必须
+            先把两个来源的相册 id 并集（LATERAL 派生表，两段各走一次索引）再排序取 1 行；写成
+            where al.person_id = p.id or al.id in (...) 同样是「按 sort 排序 → 每行全表扫」。
+        -->
+        (select al.cover_path
+           from lateral (select apl.album_id as aid
+                           from media_album_person apl
+                          where apl.person_id = p.id
+                          union
+                         select a2.id
+                           from media_album a2
+                          where a2.person_id = p.id) t
+           join media_album al on al.id = t.aid
+          where al.hidden = 0
+          order by al.sort asc, al.id asc
+          limit 1
+        ) as cover_path,
+        <!--
+            顺带把「名下第一个视频」也带上：名下没有相册的人物（娜娜 / 河北彩花 / 深田咏美）改前的
+            头像第三级是 /api/media/thumb/v/<首个视频 id>，那是每卡一次的第二个请求。
+            取值口径与 selectPersonVideoPage 的第一行一致（folder, title, id 升序，仅 hidden = 0）。
+        -->
+        (select v.id from media_video v
+          where v.hidden = 0
+            and exists (select 1 from media_video_actor a where a.video_id = v.id and a.person_id = p.id)
+          order by v.folder asc, v.title asc, v.id asc
+          limit 1
+        ) as cover_video_id
     </sql>
 
     <!-- ================================================================ 人物字典 -->

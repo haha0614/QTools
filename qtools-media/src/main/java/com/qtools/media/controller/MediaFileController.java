@@ -166,16 +166,23 @@ public class MediaFileController
      * 前端按舞台 CSS 宽度要 960-1280。宽度只影响 ffmpeg 的 {@code scale}，不参与任何缓存键：
      * 精确取帧那一支本来就不落盘，整秒那一支的缓存键仍是 {@code <秒>.jpg}（传了 w 也忽略，见下）。</p>
      *
-     * @param id 视频 id（{@code sha1(rel)[:12]}）
-     * @param t  目标时刻（秒，可带小数；同一秒内的小数命中同一份缓存）
-     * @param w  输出宽度（可空；整数像素，{@code <= 0} 或缺失按 480，越界夹到 [480, 1280]）
+     * <p><b>P5.64 新增 {@code crop}（头像「从视频画面挑一帧」）</b>：{@code ?crop=x,y,w,h}（四个 0..1 的比例）
+     * → 取到帧之后在<b>内存里</b>现裁一张 jpeg 返回，不额外落盘（URL 里已含秒 + crop，本身就是内容寻址）。
+     * 不带这个参数时字节与行为完全不变。参数不合法 → 400（不静默退成整图：用户明确选了一个框）。</p>
+     *
+     * @param id   视频 id（{@code sha1(rel)[:12]}）
+     * @param t    目标时刻（秒，可带小数；同一秒内的小数命中同一份缓存）
+     * @param w    输出宽度（可空；整数像素，{@code <= 0} 或缺失按 480，越界夹到 [480, 1280]）
+     * @param crop 可选裁剪参数 {@code x,y,w,h}（0..1 比例，见 {@link MediaAvatarCrop#normalize}）
      */
     @GetMapping("/frame/{id}")
     public ResponseEntity<byte[]> frame(@PathVariable("id") String id,
             @RequestParam(value = "t", required = false) String t,
-            @RequestParam(value = "w", required = false) String w)
+            @RequestParam(value = "w", required = false) String w,
+            @RequestParam(value = "crop", required = false) String crop)
     {
         double raw = parseSecond(t);
+        String cropParam = parseCrop(crop);
         int dur = mediaFrameService.durationOf(id);
         if (dur > 0 && raw > dur)
         {
@@ -185,7 +192,7 @@ public class MediaFileController
         // 整秒（hover / 拖动跟随层）仍走原来的「按秒永久缓存」口径，行为与请求 URL 都不变。
         if (isPrecise(raw))
         {
-            byte[] exact = mediaFrameService.frameAt(id, raw, parseWidth(w));
+            byte[] exact = MediaAvatarCrop.cropJpeg(mediaFrameService.frameAt(id, raw, parseWidth(w)), cropParam);
             return ResponseEntity.ok()
                     .contentType(MediaType.IMAGE_JPEG)
                     // 不缓存：同一 id 的精确落点没有「内容寻址」性质，缓存会无上限增长
@@ -195,7 +202,7 @@ public class MediaFileController
                     .body(exact);
         }
         int sec = MediaFrameCommand.secondOf(raw, dur);
-        byte[] bytes = mediaFrameService.frame(id, sec);
+        byte[] bytes = MediaAvatarCrop.cropJpeg(mediaFrameService.frame(id, sec), cropParam);
         return ResponseEntity.ok()
                 .contentType(MediaType.IMAGE_JPEG)
                 // 按秒寻址：内容永不变化，永久缓存
@@ -225,6 +232,23 @@ public class MediaFileController
         catch (NumberFormatException e)
         {
             return 0;
+        }
+    }
+
+    /**
+     * 裁剪参数：空 / 缺失 → null（整图）；格式或范围不合法 → 400（与缩略图那条 crop 同一条规则）
+     *
+     * <p>必须先判再取帧：参数错误的请求不该白跑一次 ffmpeg。</p>
+     */
+    private static String parseCrop(String crop)
+    {
+        try
+        {
+            return MediaAvatarCrop.normalize(crop);
+        }
+        catch (IllegalArgumentException e)
+        {
+            throw MediaException.badRequest(e.getMessage());
         }
     }
 

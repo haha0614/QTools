@@ -108,6 +108,15 @@ public class MediaPerson
     /** 只读回填：该人物名下的相册数（不落库） */
     private Long albumCount;
 
+    /** 只读回填：该人物名下**可见**相册的相片总数（P5.65，不落库；0 也输出） */
+    private Long photoCount;
+
+    /** 只读回填：名下第一个相册的封面相对路径（P5.65，不落库；无封面时 null = 整键不输出） */
+    private String coverPath;
+
+    /** 只读回填：名下第一个可见视频的 id（P5.65，不落库；无视频时 null = 整键不输出） */
+    private String coverVideoId;
+
     public String getMeasurements()
     {
         return measurements;
@@ -376,5 +385,35 @@ public class MediaPerson
     public void setAlbumCount(Long albumCount)
     {
         this.albumCount = albumCount;
+    }
+
+    public Long getPhotoCount()
+    {
+        return photoCount;
+    }
+
+    public void setPhotoCount(Long photoCount)
+    {
+        this.photoCount = photoCount;
+    }
+
+    public String getCoverPath()
+    {
+        return coverPath;
+    }
+
+    public void setCoverPath(String coverPath)
+    {
+        this.coverPath = coverPath;
+    }
+
+    public String getCoverVideoId()
+    {
+        return coverVideoId;
+    }
+
+    public void setCoverVideoId(String coverVideoId)
+    {
+        this.coverVideoId = coverVideoId;
     }
 }

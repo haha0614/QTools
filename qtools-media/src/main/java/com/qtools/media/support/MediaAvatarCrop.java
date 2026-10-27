@@ -1,6 +1,8 @@
 package com.qtools.media.support;
 
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
@@ -195,6 +197,43 @@ public final class MediaAvatarCrop
     }
 
     /**
+     * 对内存里的图片字节按裁剪参数现裁一张 jpg（P5.64：取帧接口的 {@code ?crop=}）
+     *
+     * <p>与 {@link #render} 的分工：{@code render} 是「磁盘上的缩略图 → 裁好的缓存文件」，
+     * 这里处理的是**取帧返回的 jpeg 字节**（本来就不落盘：URL 里带秒 + crop 已经是内容寻址，
+     * 缓存交给浏览器 / 网关，不再多一份磁盘垃圾）。</p>
+     *
+     * <p>与 {@code render} 同一条失败策略：裁剪失败退回原字节 —— 头像宁可「没裁」，
+     * 也不能因为一次裁剪异常整条挂掉。</p>
+     *
+     * @param src  源图字节（jpeg / png 都能解码）
+     * @param crop 已归一的 {@code x,y,w,h}；null / 空串 = 原样返回（整图）
+     */
+    public static byte[] cropJpeg(byte[] src, String crop)
+    {
+        if (src == null || src.length == 0 || crop == null || crop.isEmpty())
+        {
+            return src;
+        }
+        try
+        {
+            BufferedImage image = ImageIO.read(new ByteArrayInputStream(src));
+            if (image == null)
+            {
+                throw new IOException("源字节不是可解码的图片");
+            }
+            ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(4096, src.length));
+            writeJpeg(cut(image, crop), out);
+            return out.toByteArray();
+        }
+        catch (IOException e)
+        {
+            log.warn("帧裁剪失败，退回原图 crop={} err={}", crop, e.getMessage());
+            return src;
+        }
+    }
+
+    /**
      * 按比例切一刀
      *
      * <p>边界一律夹紧（{@code x+w=1} 时 {@code round} 可能算出 1 个像素的溢出，
@@ -228,9 +267,17 @@ public final class MediaAvatarCrop
     /** 写 jpg（显式 0.9 质量：ImageIO 默认 0.75 裁小图会明显发糊） */
     private static void writeJpeg(BufferedImage image, Path out) throws IOException
     {
+        try (OutputStream raw = Files.newOutputStream(out))
+        {
+            writeJpeg(image, raw);
+        }
+    }
+
+    /** 写 jpg 到任意输出流（P5.64：内存裁剪走这里） */
+    private static void writeJpeg(BufferedImage image, OutputStream raw) throws IOException
+    {
         ImageWriter writer = ImageIO.getImageWritersByFormatName("jpg").next();
-        try (OutputStream raw = Files.newOutputStream(out);
-                ImageOutputStream stream = ImageIO.createImageOutputStream(raw))
+        try (ImageOutputStream stream = ImageIO.createImageOutputStream(raw))
         {
             writer.setOutput(stream);
             ImageWriteParam param = writer.getDefaultWriteParam();

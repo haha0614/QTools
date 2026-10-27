@@ -7,6 +7,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,6 +19,7 @@ import com.qtools.media.domain.dto.MediaPersonPatch;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.support.MediaAvatarCrop;
 import com.qtools.media.mapper.MediaPersonMapper;
+import com.qtools.media.service.IMediaFrameService;
 import com.qtools.media.service.IMediaIndexService;
 import com.qtools.media.service.IMediaPersonService;
 
@@ -91,6 +93,24 @@ public class MediaPersonServiceImpl implements IMediaPersonService
     /** 手动头像来源：外部图片地址（ref = http(s) / data:image） */
     private static final String AVATAR_KIND_URL = "url";
 
+    /**
+     * 手动头像来源：**视频里的某一帧**（P5.64，ref = {@code "frame:<videoId>:<sec>[#crop=x,y,w,h]"}）
+     *
+     * <p>为什么单独一种 kind 而不是塞进 photo：photo 的 ref 语义是 {@code <albumId>:<seq>}
+     * （相册里的第几张），帧的语义是 {@code <videoId>:<秒>} —— 同一个字符串位置上是两个不同的东西，
+     * 混用只能靠猜。分开之后老行（photo / url）一字不动。</p>
+     */
+    private static final String AVATAR_KIND_FRAME = "frame";
+
+    /** 帧头像 URL 前缀：与前端 useMediaApi.frameAvatarUrl 同一条规则（/api/media/frame/<videoId>?t=<sec>&w=480） */
+    private static final String AVATAR_FRAME_PREFIX = "/api/media/frame/";
+
+    /** 帧头像输出宽度（与 MediaFrameCommand.FRAME_WIDTH 一致：头像最大也就 56-120px） */
+    private static final int AVATAR_FRAME_WIDTH = 480;
+
+    /** 帧 ref 里的视频 id 白名单（与 MediaFrameServiceImpl 的 SAFE_ID 同一套：杜绝路径分隔符） */
+    private static final Pattern FRAME_VIDEO_ID = Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
+
     /** 与 media_person.avatar_ref VARCHAR(512) 对齐 */
     private static final int AVATAR_REF_MAX = 512;
 
@@ -139,6 +159,10 @@ public class MediaPersonServiceImpl implements IMediaPersonService
     /** 人物写操作会改索引（videos[].persons / albums[].persons / people[]），写完必须失效快照 */
     @Autowired
     private IMediaIndexService mediaIndexService;
+
+    /** 帧头像（P5.64）校验 sec 是否落在 [0, dur] 内：时长只有取帧服务知道 */
+    @Autowired
+    private IMediaFrameService mediaFrameService;
 
     // ------------------------------------------------------------------ 管理端：人物字典
 
@@ -327,6 +351,36 @@ public class MediaPersonServiceImpl implements IMediaPersonService
             if (mediaPersonMapper.countPersonPhotoOwned(id, albumId, seq) == 0)
             {
                 throw MediaException.badRequest("该图片不在这个人物名下: " + cleanRef);
+            }
+        }
+        else if (AVATAR_KIND_FRAME.equals(cleanKind))
+        {
+            // P5.64：帧头像的两道业务兜底 —— 视频必须存在、秒必须落在 [0, dur]。
+            // 成形判断已经由 checkAvatarRef 做完；这里再解一次是防御（归一化被改坏也只能 400，
+            // 绝不让 parseInt 抛出去变成 500 —— P5.61 的 500 就是这么来的）。
+            String[] parts = frameBodyOf(MediaAvatarCrop.bodyOf(cleanRef));
+            if (parts == null)
+            {
+                throw MediaException.badRequest("frame 型 ref 格式为 frame:<videoId>:<sec>，本次: " + cleanRef);
+            }
+            String videoId = parts[0];
+            int sec;
+            try
+            {
+                sec = Integer.parseInt(parts[1]);
+            }
+            catch (NumberFormatException e)
+            {
+                throw MediaException.badRequest("ref 里的秒数必须是整数: " + cleanRef);
+            }
+            if (mediaPersonMapper.countVideoById(videoId) == 0)
+            {
+                throw MediaException.badRequest("视频不存在: " + videoId);
+            }
+            int dur = mediaFrameService.durationOf(videoId);
+            if (dur >= 0 && sec > dur)
+            {
+                throw MediaException.badRequest("sec 越界：应在 [0, " + dur + "] 秒内，本次: " + sec);
             }
         }
         mediaPersonMapper.updatePersonAvatarRef(id, cleanKind, cleanRef);
@@ -582,6 +636,14 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         node.put("useCount", person.getUseCount() == null ? 0 : person.getUseCount());
         node.put("videoCount", person.getVideoCount() == null ? 0L : person.getVideoCount());
         node.put("albumCount", person.getAlbumCount() == null ? 0L : person.getAlbumCount());
+        // P5.65：卡片「Z 张照片」与相册封面随人物行一次带出（口径见 MediaPersonMapper.personColumns）。
+        // 改前管理端是每张卡各发一次 /person/{id}/albums?size=200 再求和 —— 一页 100 张卡 100+ 请求。
+        // photoCount 恒输出（含 0）：改前「名下没有可见相册」时前端显示的就是「0 张照片」，
+        // 缺键会让文案变成「X 部视频 · Y 本相册」，属于可见变化。
+        node.put("photoCount", person.getPhotoCount() == null ? 0L : person.getPhotoCount());
+        // coverPath / coverVideoId 沿用既有「非空才输出」口径：没有就整键不输出，前端据此降级到下一级头像。
+        putIfNotEmpty(node, "coverPath", person.getCoverPath());
+        putIfNotEmpty(node, "coverVideoId", person.getCoverVideoId());
         // P5-A 资料字段：空值不输出（库里有 13 个人物、绝大多数没填这些字段，
         // 全量回 null 只会让站端 payload 变胖、前端还得逐个判空）
         putIfNotEmpty(node, "measurements", person.getMeasurements());
@@ -865,14 +927,14 @@ public class MediaPersonServiceImpl implements IMediaPersonService
 
     // ------------------------------------------------------------------ P5.48 手动头像：校验 / 解析
 
-    /** 只接受 photo / url（大小写不敏感）；其它一律 400 —— 不猜、不静默改写成 url */
+    /** 只接受 photo / url / frame（大小写不敏感）；其它一律 400 —— 不猜、不静默改写成 url */
     private static String checkAvatarKind(String raw)
     {
         String kind = raw == null ? "" : raw.trim().toLowerCase(java.util.Locale.ROOT);
-        if (!AVATAR_KIND_PHOTO.equals(kind) && !AVATAR_KIND_URL.equals(kind))
+        if (!AVATAR_KIND_PHOTO.equals(kind) && !AVATAR_KIND_URL.equals(kind) && !AVATAR_KIND_FRAME.equals(kind))
         {
             throw MediaException.badRequest("kind 只接受 " + AVATAR_KIND_PHOTO + " / " + AVATAR_KIND_URL
-                    + "，本次: " + (raw == null ? "null" : raw));
+                    + " / " + AVATAR_KIND_FRAME + "，本次: " + (raw == null ? "null" : raw));
         }
         return kind;
     }
@@ -924,8 +986,21 @@ public class MediaPersonServiceImpl implements IMediaPersonService
             }
             if (crop == null)
             {
-                throw MediaException.badRequest("photo 型 ref 的 # 之后必须是 #crop=x,y,w,h，本次: " + ref);
+                throw MediaException.badRequest("photo / frame 型 ref 的 # 之后必须是 #crop=x,y,w,h，本次: " + ref);
             }
+        }
+        if (AVATAR_KIND_FRAME.equals(kind))
+        {
+            // P5.64：帧专用形状 frame:<videoId>:<sec>[#crop=…] —— 位置语义与 photo 的 <albumId>:<seq> 不同，
+            // 所以各走各的解析。「视频存不存在 / 秒在不在片长内」是业务判断，留给 setAvatar 查库。
+            String[] parts = frameBodyOf(body);
+            if (parts == null)
+            {
+                throw MediaException.badRequest("frame 型 ref 格式为 frame:<videoId>:<sec>[#crop=x,y,w,h]"
+                        + "（如 frame:3f2a9c1b7d4e:562），本次: " + ref);
+            }
+            String normalized = AVATAR_KIND_FRAME + ":" + parts[0] + ":" + parts[1];
+            return crop == null ? normalized : normalized + MediaAvatarCrop.MARK + crop;
         }
         int colon = body.indexOf(':');
         if (colon <= 0 || colon == body.length() - 1)
@@ -955,6 +1030,40 @@ public class MediaPersonServiceImpl implements IMediaPersonService
     }
 
     /**
+     * frame 型 ref 的主体段解析：{@code frame:<videoId>:<sec>} → {@code [videoId, sec]}（{@code #crop} 已由调用方切掉）
+     *
+     * <p><b>不抛异常</b>：{@code null} = 不成形。校验路径见到 null 要 400，读路径（{@link #avatarUrlOf}）
+     * 见到 null 只能降级 —— 一个坏行不该让整个人物列表读不出来。视频 id 走白名单
+     * （{@code [A-Za-z0-9_-]{1,64}}），秒只吃纯数字：{@code parseInt} 因此不可能抛。</p>
+     */
+    private static String[] frameBodyOf(String body)
+    {
+        if (body == null)
+        {
+            return null;
+        }
+        String text = body.trim();
+        int head = AVATAR_KIND_FRAME.length();
+        if (text.length() <= head + 1 || !text.regionMatches(true, 0, AVATAR_KIND_FRAME + ":", 0, head + 1))
+        {
+            return null;
+        }
+        String rest = text.substring(head + 1);
+        int colon = rest.lastIndexOf(':');
+        if (colon <= 0 || colon == rest.length() - 1)
+        {
+            return null;
+        }
+        String videoId = rest.substring(0, colon).trim();
+        String secText = rest.substring(colon + 1).trim();
+        if (!FRAME_VIDEO_ID.matcher(videoId).matches() || !secText.matches("\\d{1,9}"))
+        {
+            return null;
+        }
+        return new String[] { videoId, secText };
+    }
+
+    /**
      * 解析「最终头像 URL」——<b>后端解析，前端不拼</b>（P5.48 契约）
      *
      * <p>顺序：手动（avatar_kind + avatar_ref）→ 历史 avatar_path → {@code null}。
@@ -971,6 +1080,36 @@ public class MediaPersonServiceImpl implements IMediaPersonService
             if (AVATAR_KIND_URL.equals(cleanKind))
             {
                 return cleanRef;
+            }
+            if (AVATAR_KIND_FRAME.equals(cleanKind))
+            {
+                // P5.64：/api/media/frame/<videoId>?t=<sec>&w=480[&crop=x,y,w,h]
+                // 脏行（videoId 不是白名单形状 / 秒不是数字 / crop 坏了）→ 落回 avatar_path，
+                // 与 photo 型同一条降级策略。
+                String crop = null;
+                String tail = MediaAvatarCrop.tailOf(cleanRef);
+                if (tail != null)
+                {
+                    try
+                    {
+                        crop = MediaAvatarCrop.normalize(tail);
+                    }
+                    catch (IllegalArgumentException ignored)
+                    {
+                        crop = null;
+                    }
+                }
+                String[] parts = frameBodyOf(MediaAvatarCrop.bodyOf(cleanRef));
+                if (parts != null)
+                {
+                    StringBuilder url = new StringBuilder(AVATAR_FRAME_PREFIX).append(parts[0])
+                            .append("?t=").append(parts[1]).append("&w=").append(AVATAR_FRAME_WIDTH);
+                    if (crop != null)
+                    {
+                        url.append("&crop=").append(crop);
+                    }
+                    return url.toString();
+                }
             }
             if (AVATAR_KIND_PHOTO.equals(cleanKind))
             {
