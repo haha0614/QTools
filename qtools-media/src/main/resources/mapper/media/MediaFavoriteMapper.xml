@@ -111,6 +111,32 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         limit #{limit}
     </select>
 
+    <!--
+         P5.74 设备态 → 账号态合并：一条语句搬走「账号里还没有的」收藏。
+
+         判重与 exactWhere 同一套口径（content_hash 优先、为 NULL 时退回老字段），
+         所以已经在账号里的条目不会被再插一次；设备行一条不删（登出后设备态原样可用）。
+         幂等性由这条 NOT EXISTS 保证：第二次调用时账号已覆盖全部来源行 → 新增 0。
+    -->
+    <insert id="copyMissingToOwner">
+        insert into media_favorite (owner_key, kind, target_id, album_id, seq, content_hash, created_at)
+        select #{toOwnerKey}, f.kind, f.target_id, f.album_id, f.seq, f.content_hash, f.created_at
+          from media_favorite f
+         where f.owner_key = #{fromOwnerKey}
+           and not exists (
+               select 1 from media_favorite x
+                where x.owner_key = #{toOwnerKey}
+                  and x.kind = f.kind
+                  and (
+                      (f.content_hash is not null and x.content_hash = f.content_hash)
+                   or (f.content_hash is null and (
+                          (f.kind = 'video' and x.target_id = f.target_id)
+                       or (f.kind = 'photo' and x.album_id = f.album_id and x.seq = f.seq)
+                      ))
+                  )
+           )
+    </insert>
+
     <select id="countByOwner" resultType="int">
         select count(*) from media_favorite where owner_key = #{ownerKey}
         <if test="kind != null"> and kind = #{kind}</if>

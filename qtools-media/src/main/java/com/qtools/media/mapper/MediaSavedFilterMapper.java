@@ -41,4 +41,14 @@ public interface MediaSavedFilterMapper
 
     /** 管理端删除：不看归属 */
     int deleteById(@Param("id") Long id);
+
+    /**
+     * P5.74 设备态 → 账号态：把 from 名下「账号里还没有同名」的筛选条件复制一份到 to
+     *
+     * <p>并集语义：同名条目账号里已有就跳过（设备行原样保留），不同名的复制过去。
+     * 判重靠 {@code NOT EXISTS}，所以重复调用第二次会插入 0 行（幂等）。</p>
+     *
+     * @return 复制过去的行数
+     */
+    int copyMissingToOwner(@Param("fromOwnerKey") String fromOwnerKey, @Param("toOwnerKey") String toOwnerKey);
 }

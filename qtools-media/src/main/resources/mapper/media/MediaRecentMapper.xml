@@ -97,6 +97,26 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         limit #{limit}
     </select>
 
+    <!-- P5.74 设备态 → 账号态合并：判重口径同 exactWhere，进度与时间原样带过去，源行不删 -->
+    <insert id="copyMissingToOwner">
+        insert into media_recent (owner_key, kind, target_id, album_id, seq, content_hash, pos, dur, updated_at)
+        select #{toOwnerKey}, r.kind, r.target_id, r.album_id, r.seq, r.content_hash, r.pos, r.dur, r.updated_at
+          from media_recent r
+         where r.owner_key = #{fromOwnerKey}
+           and not exists (
+               select 1 from media_recent x
+                where x.owner_key = #{toOwnerKey}
+                  and x.kind = r.kind
+                  and (
+                      (r.content_hash is not null and x.content_hash = r.content_hash)
+                   or (r.content_hash is null and (
+                          (r.kind = 'video' and x.target_id = r.target_id)
+                       or (r.kind = 'photo' and x.album_id = r.album_id and x.seq = r.seq)
+                      ))
+                  )
+           )
+    </insert>
+
     <select id="countByOwner" resultType="int">
         select count(*) from media_recent where owner_key = #{ownerKey} and kind = #{kind}
     </select>

@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.qtools.common.annotation.Anonymous;
 import com.qtools.media.domain.MediaOwnerSession;
 import com.qtools.media.exception.MediaException;
+import com.qtools.media.service.IMediaAccountSyncService;
 import com.qtools.media.service.IMediaOwnerService;
 import com.qtools.media.service.IMediaUserService;
 
@@ -47,6 +48,9 @@ public class MediaUserController
 
     @Autowired
     private IMediaUserService mediaUserService;
+
+    @Autowired
+    private IMediaAccountSyncService mediaAccountSyncService;
 
     /** 完整用户对象 */
     @GetMapping("/user")
@@ -121,6 +125,24 @@ public class MediaUserController
     {
         String kind = trimToNull(request.getParameter("kind"));
         return mediaUserService.selectRecentList(mediaOwnerService.resolve(request, response), kind);
+    }
+
+    /**
+     * 设备态 → 账号态的数据接管（P5.74）：登录成功后调用一次即可，<b>幂等</b>
+     *
+     * <p>为什么需要它：P5.74 之前所有数据挂在设备键上，登录那一刻账号态是空的，
+     * 用户会觉得「我的列表 / 收藏没了」。这个接口把设备态里账号态还缺的部分并过去，
+     * 并回统计（{@code playlistsMoved/playlistsMerged/favoritesAdded/…}）供前端 toast。</p>
+     *
+     * <p>语义边界：<b>不清空设备态</b>（登出后数据原样还在）；重复调用只补差集，
+     * 第二次起各项统计恒为 0。未登录调用 400（没有目标账号）。</p>
+     */
+    @PostMapping("/user/sync")
+    public Map<String, Object> syncAccount(HttpServletRequest request, HttpServletResponse response)
+    {
+        MediaOwnerSession session = mediaOwnerService.resolve(request, response);
+        log.debug("设备数据并入账号 device={} account={}", session.getDeviceKey(), session.getOwnerKey());
+        return mediaAccountSyncService.syncDeviceToAccount(session);
     }
 
     /** 身份 + 各类计数 */

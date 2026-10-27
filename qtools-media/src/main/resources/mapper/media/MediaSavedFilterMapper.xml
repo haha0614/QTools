@@ -75,6 +75,22 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         </choose>
     </delete>
 
+    <!--
+         P5.74 设备态 → 账号态合并：账号下没有同名的筛选复制一份过去，同名的不动（设备行原样保留）。
+
+        判重靠 NOT EXISTS：第二次调用时账号已覆盖全部来源名字 → 插入 0 行（幂等）。
+    -->
+    <insert id="copyMissingToOwner">
+        insert into media_saved_filter (name, params, owner_key, create_time, update_time)
+        select f.name, f.params, #{toOwnerKey}, f.create_time, f.update_time
+          from media_saved_filter f
+         where f.owner_key = #{fromOwnerKey}
+           and not exists (
+               select 1 from media_saved_filter x
+                where x.owner_key = #{toOwnerKey} and x.name = f.name
+           )
+    </insert>
+
     <delete id="deleteById">
         delete from media_saved_filter where id = #{id}
     </delete>

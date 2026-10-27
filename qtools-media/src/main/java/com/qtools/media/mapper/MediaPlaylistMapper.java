@@ -23,6 +23,11 @@ public interface MediaPlaylistMapper
     /** 管理端全量清单（带条目数、归属与时间；全局条目排最前） */
     List<MediaPlaylist> selectAll();
 
+    /** 精确按归属取列表（不含全局条目）：设备态 → 账号态合并用（P5.74） */
+    List<MediaPlaylist> selectByOwnerKey(@Param("ownerKey") String ownerKey);
+
+
+
     MediaPlaylist selectById(@Param("id") Long id);
 
     /** 按 (name, owner_key) 精确匹配；ownerKey 为 null 时匹配全局条目 */

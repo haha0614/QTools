@@ -38,6 +38,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         order by p.owner_key is not null, p.owner_key asc, p.update_time desc, p.id desc
     </select>
 
+    <!-- P5.74 设备态 → 账号态合并：只取该 owner 名下的（全局条目 owner_key is null 天然不会命中） -->
+    <select id="selectByOwnerKey" resultMap="MediaPlaylistResult">
+        <include refid="selectPlaylistColumns"/>
+        where p.owner_key = #{ownerKey}
+        order by p.update_time desc, p.id desc
+    </select>
+
     <select id="selectById" resultMap="MediaPlaylistResult">
         <include refid="selectPlaylistColumns"/>
         where p.id = #{id}

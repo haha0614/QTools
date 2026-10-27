@@ -44,4 +44,14 @@ public interface MediaRecentMapper
 
     /** 每类只保留最新 keep 条（按 updated_at 倒序） */
     int trim(@Param("ownerKey") String ownerKey, @Param("kind") String kind, @Param("keep") int keep);
+
+    /**
+     * P5.74 设备态 → 账号态：把 from 名下缺的浏览记录补到 to 名下（<b>源行保留</b>）
+     *
+     * <p>判重口径与 {@link #insertIfAbsent} 相同（content_hash 优先、老字段回退），
+     * 进度 {@code pos/dur} 与 {@code updated_at} 原样带过去；重复调用幂等。</p>
+     *
+     * @return 实际新增的行数
+     */
+    int copyMissingToOwner(@Param("fromOwnerKey") String fromOwnerKey, @Param("toOwnerKey") String toOwnerKey);
 }

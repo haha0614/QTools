@@ -137,7 +137,12 @@ public class MediaUserServiceImpl implements IMediaUserService
         counts.put("recentVideo", mediaRecentMapper.countByOwner(key, KIND_VIDEO));
         counts.put("recentPhoto", mediaRecentMapper.countByOwner(key, KIND_PHOTO));
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("ownerKey", key);
+        // P5.74：ownerKey 回设备键（前端拿它继续发 X-Ms-Owner；回 u:<id> 会被服务端按「自称账号」拒绝），
+        // 真正决定数据归属的是 dataOwner，account/userId 让前端知道当前是否账号态
+        out.put("ownerKey", session.getDeviceKey());
+        out.put("dataOwner", key);
+        out.put("account", session.isAccount());
+        out.put("userId", session.getUserId());
         out.put("profile", profileNode(session));
         out.put("counts", counts);
         return out;
@@ -483,7 +488,11 @@ public class MediaUserServiceImpl implements IMediaUserService
         List<Map<String, Object>> recentPhotos = recentNodes(key, KIND_PHOTO);
 
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("ownerKey", key);
+        // P5.74：同 selectMe —— ownerKey 恒为设备键，账号态靠 account/dataOwner 表达
+        out.put("ownerKey", session.getDeviceKey());
+        out.put("dataOwner", key);
+        out.put("account", session.isAccount());
+        out.put("userId", session.getUserId());
         out.put("profile", profileNode(session));
         out.put("favorites", favorites);
         out.put("recentVideos", recentVideos);

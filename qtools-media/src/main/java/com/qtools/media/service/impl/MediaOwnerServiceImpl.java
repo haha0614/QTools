@@ -9,14 +9,18 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import com.qtools.common.security.IAppTokenVerifier;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.domain.MediaOwner;
 import com.qtools.media.domain.MediaOwnerSession;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaOwnerMapper;
 import com.qtools.media.service.IMediaOwnerService;
+import com.qtools.media.support.BearerTokens;
+import com.qtools.media.support.OwnerKeys;
 
 /**
  * 匿名所有者（owner_key）服务实现
@@ -26,6 +30,16 @@ import com.qtools.media.service.IMediaOwnerService;
  * 前端在 5173 端口访问 8080 时跨端口 cookie 不生效，故必须支持请求头通道。</p>
  *
  * <p>profile 全部落库：nick -> media_owner.display_name，avatar -> media_owner.avatar(MEDIUMTEXT)。</p>
+ *
+ * <p><b>P5.74 · 账号态优先</b>：本类是全站唯一的「所有者键解析器」。除了上面两条设备通道，
+ * 它还会看 {@code Authorization: Bearer <app token>}——token 有效时数据归属键变成
+ * {@code u:<appUserId>}（账号态，跨设备跟随账号），无效 / 缺失时退回设备键（匿名态，行为与 P5.74 之前一致）。
+ * 因此<b>所有用到 owner 的代码都不该再自己读请求头</b>：播放列表、收藏、收藏夹、最近浏览、
+ * 保存的筛选统一从 {@link MediaOwnerSession#getOwnerKey()} 取值，资料（昵称/头像）从
+ * {@link MediaOwnerSession#getDeviceKey()} 取值。</p>
+ *
+ * <p>账号态的设备键仍然会被登记进 {@code media_owner}（昵称 / 头像跟着设备走），但<b>不会</b>
+ * 写入 {@code u:<id>} 这种合成行——它只出现在业务数据表的 {@code owner_key} 列。</p>
  *
  * @author qtools
  */
@@ -70,38 +84,55 @@ public class MediaOwnerServiceImpl implements IMediaOwnerService
     @Autowired
     private MediaOwnerMapper mediaOwnerMapper;
 
+    /**
+     * 用户端 token 校验（qtools-app 提供实现）；媒体模块单独部署 / 单测时没有该 bean，
+     * {@code getIfAvailable()} 返回 null，一切照旧走匿名设备态，不会启动失败。
+     */
+    @Autowired
+    private ObjectProvider<IAppTokenVerifier> appTokenVerifier;
+
     @Override
     public MediaOwnerSession resolve(HttpServletRequest request, HttpServletResponse response)
     {
         String header = trimToNull(request.getHeader(HEADER_NAME));
         String cookie = cookieValue(request, COOKIE_NAME);
 
-        String key;
+        String deviceKey;
         boolean fresh = false;
         if (header != null)
         {
+            // 账号态只能由 Authorization 决定：客户端自称 "u:<id>" 会让任何人都能读写别人的账号数据，一律 400
+            if (header.startsWith(OwnerKeys.ACCOUNT_PREFIX))
+            {
+                throw MediaException.badRequest(HEADER_NAME + " 不接受 " + OwnerKeys.ACCOUNT_PREFIX
+                        + " 前缀：账号态由 Authorization: Bearer <app token> 决定，客户端不能自称账号");
+            }
             // 显式传了头却非法：宁可 400 也不静默改用别的 key（否则会悄悄把数据写到另一个身份下）
             if (!isValidKey(header))
             {
                 throw MediaException.badRequest(HEADER_NAME + " 非法：只允许字母数字和 . _ - ，长度 1-64");
             }
-            key = header;
+            deviceKey = header;
         }
         else if (cookie != null && isValidKey(cookie))
         {
-            key = cookie;
+            deviceKey = cookie;
         }
         else
         {
-            key = newKey();
+            deviceKey = newKey();
             fresh = true;
         }
 
-        mediaOwnerMapper.insertIgnore(key);
-        mediaOwnerMapper.updateLastSeen(key);
+        // 登录态：有效 app token -> 账号态（数据跟随账号）；否则匿名设备态（不破坏匿名使用）
+        Long userId = accountUserId(request);
 
-        MediaOwnerSession session = new MediaOwnerSession(key, fresh);
-        MediaOwner owner = mediaOwnerMapper.selectOwnerByKey(key);
+        // 设备行照旧登记：昵称 / 头像仍按设备保存，账号态也不例外
+        mediaOwnerMapper.insertIgnore(deviceKey);
+        mediaOwnerMapper.updateLastSeen(deviceKey);
+
+        MediaOwnerSession session = new MediaOwnerSession(deviceKey, userId, fresh);
+        MediaOwner owner = mediaOwnerMapper.selectOwnerByKey(deviceKey);
         if (owner != null)
         {
             session.setNick(StringUtils.isEmpty(owner.getDisplayName()) ? DEFAULT_NICK : owner.getDisplayName());
@@ -112,15 +143,48 @@ public class MediaOwnerServiceImpl implements IMediaOwnerService
             session.setNick(DEFAULT_NICK);
         }
 
-        if (!key.equals(cookie))
+        if (!deviceKey.equals(cookie))
         {
-            writeCookie(response, key);
+            writeCookie(response, deviceKey);
         }
         if (fresh)
         {
-            log.debug("下发新的 owner_key={}", key);
+            log.debug("下发新的 device_key={}", deviceKey);
+        }
+        if (session.isAccount())
+        {
+            log.debug("账号态 owner_key={} device_key={}", session.getOwnerKey(), deviceKey);
         }
         return session;
+    }
+
+    /**
+     * 解析登录账号：{@code Authorization: Bearer <app token>} → app_user.id
+     *
+     * <p>任何失败都只是「没登录」：头缺失 / 不是 Bearer / token 失效 / 校验组件不存在 / 校验抛异常，
+     * 一律返回 null 让调用方走匿名设备态——媒体站匿名必须永远可用，不能因为登录态判断失败就 401。</p>
+     */
+    private Long accountUserId(HttpServletRequest request)
+    {
+        IAppTokenVerifier verifier = appTokenVerifier == null ? null : appTokenVerifier.getIfAvailable();
+        if (verifier == null)
+        {
+            return null;
+        }
+        String token = BearerTokens.of(request);
+        if (token == null)
+        {
+            return null;
+        }
+        try
+        {
+            return verifier.verifyUserId(token);
+        }
+        catch (RuntimeException e)
+        {
+            log.debug("app token 校验异常，按未登录处理: {}", e.getMessage());
+            return null;
+        }
     }
 
     @Override
@@ -139,7 +203,8 @@ public class MediaOwnerServiceImpl implements IMediaOwnerService
             {
                 throw MediaException.badRequest("nick 需 1-" + NICK_MAX + " 字符");
             }
-            mediaOwnerMapper.updateDisplayName(session.getOwnerKey(), nick);
+            // 昵称是设备级资料（media_owner 按设备键存），不跟着账号态走
+            mediaOwnerMapper.updateDisplayName(session.getDeviceKey(), nick);
             session.setNick(nick);
         }
         if (profile.containsKey("avatar"))
@@ -156,7 +221,7 @@ public class MediaOwnerServiceImpl implements IMediaOwnerService
                 String text = ((String) raw).trim();
                 avatar = text.isEmpty() ? null : checkAvatar(text);
             }
-            mediaOwnerMapper.updateAvatar(session.getOwnerKey(), avatar);
+            mediaOwnerMapper.updateAvatar(session.getDeviceKey(), avatar);
             session.setAvatar(avatar);
         }
     }
