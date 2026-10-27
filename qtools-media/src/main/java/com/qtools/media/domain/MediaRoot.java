@@ -30,6 +30,15 @@ public class MediaRoot
     /** root=媒体根 / thumbs=缩略图根 / trash=回收站根 */
     private String kind;
 
+    /**
+     * 未登录是否可见（P5.78）：{@code true}=未登录可见（默认），{@code false}=仅登录可见
+     *
+     * <p>为 {@code false} 的根下，未登录访客在 {@code /api/media/index} 里看不到它的视频 /
+     * 相册 / 图片 / 人物统计，直接访问其资源（按 id 或 hash）一律 404。
+     * 判定与拦截统一在 {@code IMediaGuestAccessService}，业务代码不要自己读这一列。</p>
+     */
+    private Boolean guestVisible;
+
     /** 备注 */
     private String note;
 
@@ -74,6 +83,16 @@ public class MediaRoot
     public void setKind(String kind)
     {
         this.kind = kind;
+    }
+
+    public Boolean getGuestVisible()
+    {
+        return guestVisible;
+    }
+
+    public void setGuestVisible(Boolean guestVisible)
+    {
+        this.guestVisible = guestVisible;
     }
 
     public String getNote()

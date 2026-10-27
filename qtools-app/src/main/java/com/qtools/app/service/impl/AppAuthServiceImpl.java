@@ -27,6 +27,7 @@ import com.qtools.app.mapper.AppUserMapper;
 import com.qtools.app.mapper.AppUserTokenMapper;
 import com.qtools.app.mapper.AppVerifyCodeMapper;
 import com.qtools.app.security.AppJwtService;
+import com.qtools.app.security.AppUserGuard;
 import com.qtools.app.security.LoginAttemptGuard;
 import com.qtools.app.service.IAppAuthService;
 import com.qtools.common.utils.ip.IpUtils;
@@ -77,6 +78,9 @@ public class AppAuthServiceImpl implements IAppAuthService
     /** 统一失败文案：不区分「用户不存在」与「密码错误」，避免枚举账号 */
     private static final String LOGIN_FAILED = "用户名或密码错误";
 
+    /** 注册成功但待审核的提示（前端原样显示） */
+    private static final String REGISTER_PENDING_MESSAGE = "注册成功，等待站长审核";
+
     /** cost=10，与 app_user.password_hash 的列注释一致 */
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder(10);
 
@@ -103,6 +107,10 @@ public class AppAuthServiceImpl implements IAppAuthService
 
     @Autowired
     private LoginAttemptGuard loginAttemptGuard;
+
+    /** 审核状态判定（P5.79）：注册写 pending、登录拦 pending/rejected 都走它，口径只一处 */
+    @Autowired
+    private AppUserGuard appUserGuard;
 
     // ------------------------------------------------------------------ 注册
 
@@ -165,7 +173,8 @@ public class AppAuthServiceImpl implements IAppAuthService
         user.setUsername(username);
         user.setNickname(nickname);
         user.setPasswordHash(passwordEncoder.encode(password));
-        user.setStatus("0");
+        // P5.79：邀请码只挡垃圾注册，不再等于「放行」——注册一律先进待审核队列
+        user.setStatus(AppUserGuard.STATUS_PENDING);
         user.setInviteCode(inviteCode);
         user.setRegisterIp(trim(IpUtils.getIpAddr(request), 64));
         try
@@ -185,11 +194,14 @@ public class AppAuthServiceImpl implements IAppAuthService
         identity.setVerified(1);
         appUserIdentityMapper.insert(identity);
 
-        log.info("用户端注册成功 userId={} username={} invite={} ip={}", user.getId(), username,
+        log.info("用户端注册成功（待审核） userId={} username={} invite={} ip={}", user.getId(), username,
                 inviteMode ? "yes" : "no", user.getRegisterIp());
 
+        // 注册成功**不发 token**：账号还没通过审核，任何登录态都不该被创建（前端据此提示等待审核）
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("user", userView(user));
+        result.put("pending", true);
+        result.put("message", REGISTER_PENDING_MESSAGE);
         return result;
     }
 
@@ -244,9 +256,15 @@ public class AppAuthServiceImpl implements IAppAuthService
             log.warn("用户端登录失败 identifier={} ip={}", identifier, ip);
             throw AppException.unauthorized(LOGIN_FAILED);
         }
-        if (!"0".equals(user.getStatus()))
+        // P5.79：密码正确之后才看审核状态——顺序不能反，否则等于向未持密码的人泄露账号状态
+        String blocked = appUserGuard.blockReason(user);
+        if (blocked != null)
         {
-            throw new AppException(403, "账号已停用");
+            // 不算一次「密码错误」：密码是对的，只是账号没过审核。记失败会让待审核用户
+            // 反复尝试后被 429「登录失败次数过多」盖住真正的「待审核」文案。
+            loginAttemptGuard.reset(attemptKey);
+            log.info("用户端登录被审核状态拒绝 userId={} status={} ip={}", user.getId(), user.getStatus(), ip);
+            throw new AppException(403, blocked);
         }
 
         AppJwtService.Issued issued = appJwtService.issue(user.getId());

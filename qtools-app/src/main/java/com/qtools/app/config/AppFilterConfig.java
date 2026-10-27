@@ -6,6 +6,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
 import com.qtools.app.security.AppJwtFilter;
 import com.qtools.app.security.AppJwtService;
+import com.qtools.app.security.AppUserGuard;
 
 /**
  * 用户端过滤器注册
@@ -26,10 +27,11 @@ public class AppFilterConfig
     private static final int APP_FILTER_ORDER = Ordered.HIGHEST_PRECEDENCE + 50;
 
     @Bean
-    public FilterRegistrationBean<AppJwtFilter> appJwtFilterRegistration(AppJwtService appJwtService)
+    public FilterRegistrationBean<AppJwtFilter> appJwtFilterRegistration(AppJwtService appJwtService,
+            AppUserGuard appUserGuard)
     {
         FilterRegistrationBean<AppJwtFilter> registration = new FilterRegistrationBean<>();
-        registration.setFilter(new AppJwtFilter(appJwtService));
+        registration.setFilter(new AppJwtFilter(appJwtService, appUserGuard));
         registration.addUrlPatterns("/api/app/*");
         registration.setName("appJwtFilter");
         registration.setOrder(APP_FILTER_ORDER);

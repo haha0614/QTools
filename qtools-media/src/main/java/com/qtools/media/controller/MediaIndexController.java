@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
 import com.qtools.common.annotation.Anonymous;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.domain.MediaIndexSnapshot;
+import com.qtools.media.service.IMediaGuestAccessService;
 import com.qtools.media.service.IMediaIndexService;
 
 /**
@@ -37,6 +38,10 @@ public class MediaIndexController
     @Autowired
     private IMediaIndexService mediaIndexService;
 
+    /** 未登录可见性判定（P5.78）：/media/index 是<b>筛</b>（不是 404），登录态在这里取一次 */
+    @Autowired
+    private IMediaGuestAccessService mediaGuestAccessService;
+
     /**
      * 视频/相册/人物/统计聚合
      *
@@ -48,7 +53,9 @@ public class MediaIndexController
             throws IOException
     {
         // includeMissing=false 时服务端滤掉 missing=1 的行；默认 true = 老行为（前端自行过滤）
-        MediaIndexSnapshot snapshot = mediaIndexService.indexSnapshot(includeMissing);
+        // P5.78：未登录访客走 guest 版快照 —— guest_visible=0 的根下内容整行不出现（ETag 也分开）
+        boolean guest = mediaGuestAccessService.isGuest(request);
+        MediaIndexSnapshot snapshot = mediaIndexService.indexSnapshot(includeMissing, guest);
         String etag = snapshot.getEtag();
         response.setHeader("ETag", etag);
         response.setHeader("Cache-Control", "no-cache");

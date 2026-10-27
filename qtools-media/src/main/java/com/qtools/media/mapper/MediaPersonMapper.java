@@ -129,17 +129,23 @@ public interface MediaPersonMapper
 
     // ------------------------------------------------------------------ 站端人物页 / 索引
 
-    /** 某人物名下的视频分页（按 media_video_actor.person_id 命中，去重） */
+    /**
+     * 某人物名下的视频分页（按 media_video_actor.person_id 命中，去重）
+     *
+     * <p>{@code hiddenRootIds}（P5.78）：未登录访客请求时传入 {@code guest_visible = 0} 的根 id，
+     * 这些根下的视频连「条目数」都不出现（分页 total 用同一个条件算，不会出现
+     * 「说 5 条但只列出 3 条」的错位）。null / 空 = 不过滤（登录用户与改动前逐字相同）。</p>
+     */
     List<Map<String, Object>> selectPersonVideoPage(@Param("personId") Long personId, @Param("offset") int offset,
-            @Param("size") int size);
+            @Param("size") int size, @Param("hiddenRootIds") List<Integer> hiddenRootIds);
 
-    long countPersonVideos(@Param("personId") Long personId);
+    long countPersonVideos(@Param("personId") Long personId, @Param("hiddenRootIds") List<Integer> hiddenRootIds);
 
-    /** 某人物名下的相册分页（media_album_person ∪ media_album.person_id） */
+    /** 某人物名下的相册分页（media_album_person ∪ media_album.person_id）；hiddenRootIds 口径同上（按图片反推） */
     List<Map<String, Object>> selectPersonAlbumPage(@Param("personId") Long personId, @Param("offset") int offset,
-            @Param("size") int size);
+            @Param("size") int size, @Param("hiddenRootIds") List<Integer> hiddenRootIds);
 
-    long countPersonAlbums(@Param("personId") Long personId);
+    long countPersonAlbums(@Param("personId") Long personId, @Param("hiddenRootIds") List<Integer> hiddenRootIds);
 
     /** 索引用：全部视频的人物绑定 [{videoId, personId, name, role}] */
     List<Map<String, Object>> selectVideoPersonList();

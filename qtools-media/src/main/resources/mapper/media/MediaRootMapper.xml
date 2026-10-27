@@ -13,12 +13,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="name"      column="name"       />
         <result property="path"      column="path"       />
         <result property="kind"      column="kind"       />
+        <result property="guestVisible" column="guest_visible" />
         <result property="note"      column="note"       />
         <result property="createdAt" column="created_at" />
     </resultMap>
 
     <sql id="selectRootVo">
-        select id, name, path, kind, note, created_at from media_root
+        select id, name, path, kind, guest_visible, note, created_at from media_root
     </sql>
 
     <select id="selectRootList" resultMap="MediaRootResult">
@@ -42,8 +43,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <!-- 写路径只在管理端「多库根」面板走，引用计数检查在服务层做 -->
     <insert id="insertRoot" parameterType="com.qtools.media.domain.MediaRoot" useGeneratedKeys="true" keyProperty="id">
-        insert into media_root (name, path, kind, note, created_at)
-        values (#{name}, #{path}, #{kind}, #{note}, now())
+        insert into media_root (name, path, kind, guest_visible, note, created_at)
+        values (#{name}, #{path}, #{kind}, #{guestVisible}, #{note}, now())
     </insert>
 
     <update id="updateRoot" parameterType="com.qtools.media.domain.MediaRoot">
@@ -52,6 +53,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="name != null">name = #{name},</if>
             <if test="path != null">path = #{path},</if>
             <if test="kind != null">kind = #{kind},</if>
+            <if test="guestVisible != null">guest_visible = #{guestVisible},</if>
             <if test="note != null">note = #{note},</if>
         </set>
         where id = #{id}
@@ -68,6 +70,11 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <select id="countPhotosByRoot" resultType="java.util.Map">
         select root_id as rootId, count(*) as cnt from media_photo group by root_id
+    </select>
+
+    <!-- 相册没有 root_id：按图片反推（同一相册跨根时两边各记一次，管理端只做展示用） -->
+    <select id="countAlbumsByRoot" resultType="java.util.Map">
+        select root_id as rootId, count(distinct album_id) as cnt from media_photo group by root_id
     </select>
 
     <select id="countVideoByRootId" parameterType="java.lang.Integer" resultType="int">

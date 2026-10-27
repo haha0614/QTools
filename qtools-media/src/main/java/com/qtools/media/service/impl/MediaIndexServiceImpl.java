@@ -7,6 +7,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -36,6 +37,7 @@ import com.qtools.media.mapper.MediaStudioMapper;
 import com.qtools.media.mapper.MediaPhotoMapper;
 import com.qtools.media.mapper.MediaVideoMapper;
 import com.qtools.media.service.IMediaFileService;
+import com.qtools.media.service.IMediaGuestAccessService;
 import com.qtools.media.service.IMediaIndexService;
 
 /**
@@ -99,8 +101,17 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     @Autowired
     private IMediaFileService mediaFileService;
 
-    /** 快照缓存：两种 includeMissing 取值各存一份（默认 true 的那份才是老行为） */
-    private final Map<Boolean, MediaIndexSnapshot> snapshots = new java.util.concurrent.ConcurrentHashMap<>();
+    /** 未登录可见性（P5.78）：{@code guest_visible = 0} 的根下内容对未登录访客整行筛掉 */
+    @Autowired
+    private IMediaGuestAccessService mediaGuestAccessService;
+
+    /**
+     * 快照缓存：{@code includeMissing} × {@code guest} 四种组合各存一份
+     *
+     * <p>P5.78 起键里必须有 {@code guest}：未登录访客看到的是筛过的索引，TTL 与 ETag 都必须
+     * 与登录态那份分开，否则登录用户会把「含收紧库根内容」的 304 递给未登录的人（或反过来）。</p>
+     */
+    private final Map<String, MediaIndexSnapshot> snapshots = new java.util.concurrent.ConcurrentHashMap<>();
 
     @Override
     public MediaIndexSnapshot indexSnapshot()
@@ -111,7 +122,14 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     @Override
     public MediaIndexSnapshot indexSnapshot(boolean includeMissing)
     {
-        Boolean key = Boolean.valueOf(includeMissing);
+        // 不带登录态参数的调用一律按「已登录 / 不筛」处理：老调用方的行为逐字不变
+        return indexSnapshot(includeMissing, false);
+    }
+
+    @Override
+    public MediaIndexSnapshot indexSnapshot(boolean includeMissing, boolean guest)
+    {
+        String key = cacheKey(includeMissing, guest);
         MediaIndexSnapshot cached = snapshots.get(key);
         if (cached != null && System.currentTimeMillis() - cached.getBuiltAt() < CACHE_TTL_MS)
         {
@@ -125,7 +143,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
                 return cached;
             }
             long start = System.currentTimeMillis();
-            Map<String, Object> data = buildIndex(includeMissing);
+            Map<String, Object> data = buildIndex(includeMissing, guest);
             byte[] body;
             try
             {
@@ -138,8 +156,8 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             MediaIndexSnapshot fresh = new MediaIndexSnapshot(body, "\"idx-" + digest(body) + "\"",
                     System.currentTimeMillis());
             snapshots.put(key, fresh);
-            log.info("媒体索引重建完成 includeMissing={} size={}B cost={}ms etag={}", includeMissing, body.length,
-                    System.currentTimeMillis() - start, fresh.getEtag());
+            log.info("媒体索引重建完成 includeMissing={} guest={} size={}B cost={}ms etag={}", includeMissing, guest,
+                    body.length, System.currentTimeMillis() - start, fresh.getEtag());
             return fresh;
         }
     }
@@ -280,12 +298,51 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         snapshots.clear();
     }
 
+    // ------------------------------------------------------------------ 可见性 / 缓存键
+
+    /** 快照缓存键：{@code m<includeMissing>g<guest>}（两维四组合） */
+    private static String cacheKey(boolean includeMissing, boolean guest)
+    {
+        return (includeMissing ? "m1" : "m0") + (guest ? "g1" : "g0");
+    }
+
+    /** 该行是否落在「仅登录可见」的根下（root_id 为 NULL 的存量行走配置根，不在任何行下 → 不筛） */
+    private static boolean isHiddenRoot(Integer rootId, Set<Integer> hidden)
+    {
+        return rootId != null && !hidden.isEmpty() && hidden.contains(rootId);
+    }
+
     // ------------------------------------------------------------------ 构建
 
-    private Map<String, Object> buildIndex(boolean includeMissing)
+    /**
+     * 构建索引数据
+     *
+     * @param includeMissing 是否带出缺失行
+     * @param guest          未登录访客：{@code guest_visible = 0} 的根下内容整行不出现（P5.78）
+     *
+     * <p><b>筛除口径（全站唯一，与拦截器一致）</b>：视频 / 图片按自己那行的 {@code root_id} 判；
+     * 相册自己没有 {@code root_id}，按它的图片算——<b>有一张落在收紧的根下，整册对未登录访客隐藏</b>
+     * （保守方向：宁可多藏不漏）。人物节点由相册聚合而来，相册被筛掉后计数自然下降；
+     * 一个在收紧根下「只剩人物没有可见相册」的节点对访客整条不输出。</p>
+     */
+    private Map<String, Object> buildIndex(boolean includeMissing, boolean guest)
     {
         Boolean keepMissing = Boolean.valueOf(includeMissing);
-        List<MediaVideo> videos = mediaVideoMapper.selectVideoList(keepMissing);
+        Set<Integer> hidden = guest ? mediaGuestAccessService.hiddenRootIds() : Set.of();
+        List<MediaVideo> videoRows = mediaVideoMapper.selectVideoList(keepMissing);
+        List<MediaVideo> videos = videoRows;
+        if (!hidden.isEmpty())
+        {
+            videos = new ArrayList<>(videoRows.size());
+            for (MediaVideo row : videoRows)
+            {
+                if (!isHiddenRoot(row.getRootId(), hidden))
+                {
+                    videos.add(row);
+                }
+            }
+            log.debug("索引未登录筛除：视频 {}/{} 可见", videos.size(), videoRows.size());
+        }
         Map<String, List<String[]>> tagsByVideo = new HashMap<>();
         Set<String> facets = new LinkedHashSet<>();
         for (MediaVideoTag tag : mediaVideoMapper.selectTagList())
@@ -371,9 +428,16 @@ public class MediaIndexServiceImpl implements IMediaIndexService
 
         List<MediaAlbum> albums = mediaAlbumMapper.selectAlbumList();
         Map<String, List<Map<String, Object>>> photosByAlbum = new HashMap<>();
+        // 未登录时「含隐藏根图片」的相册整册不输出（相册自己没有 root_id，只能由图片反推）
+        Set<String> hiddenAlbums = new HashSet<>();
         int photoCount = 0;
         for (MediaPhoto photo : mediaPhotoMapper.selectPhotoList(keepMissing))
         {
+            if (isHiddenRoot(photo.getRootId(), hidden))
+            {
+                hiddenAlbums.add(photo.getAlbumId());
+                continue;
+            }
             photosByAlbum.computeIfAbsent(photo.getAlbumId(), k -> new ArrayList<>()).add(toPhotoNode(photo));
             photoCount++;
         }
@@ -383,6 +447,10 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         Map<Long, List<MediaAlbum>> albumsByPerson = new LinkedHashMap<>();
         for (MediaAlbum album : albums)
         {
+            if (hiddenAlbums.contains(album.getId()))
+            {
+                continue;
+            }
             albumNodes.add(toAlbumNode(album, personNames,
                     photosByAlbum.getOrDefault(album.getId(), List.of()),
                     personNamesByAlbum.getOrDefault(album.getId(), List.of())));
@@ -405,6 +473,11 @@ public class MediaIndexServiceImpl implements IMediaIndexService
                 albumIds.add(album.getId());
                 photos += album.getPhotoCount() == null ? 0 : album.getPhotoCount();
             }
+            if (!hidden.isEmpty() && albumIds.isEmpty())
+            {
+                // 未登录且该人物名下没有任何可见相册：整条不输出（否则「人名的存在」本身也会泄出去）
+                continue;
+            }
             Map<String, Object> node = new LinkedHashMap<>();
             node.put("name", person.getName());
             node.put("count", own.size());
@@ -424,7 +497,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
 
         Map<String, Object> stats = new LinkedHashMap<>();
         stats.put("videos", videos.size());
-        stats.put("albums", albums.size());
+        stats.put("albums", albumNodes.size());
         stats.put("photos", photoCount);
         stats.put("posters", posterCount);
         stats.put("people", personCount);

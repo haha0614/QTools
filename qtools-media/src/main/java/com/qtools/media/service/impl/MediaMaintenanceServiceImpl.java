@@ -25,6 +25,8 @@ import com.qtools.media.config.MediaProperties;
 import com.qtools.media.domain.MediaRoot;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaRootMapper;
+import com.qtools.media.service.IMediaGuestAccessService;
+import com.qtools.media.service.IMediaIndexService;
 import com.qtools.media.service.IMediaMaintenanceService;
 
 /**
@@ -73,6 +75,14 @@ public class MediaMaintenanceServiceImpl implements IMediaMaintenanceService
     @Autowired
     private MediaProperties mediaProperties;
 
+    /** 未登录可见性判定（P5.78）：改完库根要让它手上的根缓存失效 */
+    @Autowired
+    private IMediaGuestAccessService mediaGuestAccessService;
+
+    /** 索引快照（P5.78）：改 guest_visible 后必须清掉未登录那份，否则最多 60s 还是旧索引 */
+    @Autowired
+    private IMediaIndexService mediaIndexService;
+
     // ------------------------------------------------------------------ 多库根
 
     @Override
@@ -84,6 +94,8 @@ public class MediaMaintenanceServiceImpl implements IMediaMaintenanceService
         long[] nullPhotos = new long[1];
         Map<Integer, Long> videoCounts = countByRoot(mediaRootMapper.countVideosByRoot(), nullVideos);
         Map<Integer, Long> photoCounts = countByRoot(mediaRootMapper.countPhotosByRoot(), nullPhotos);
+        long[] nullAlbums = new long[1];
+        Map<Integer, Long> albumCounts = countByRoot(mediaRootMapper.countAlbumsByRoot(), nullAlbums);
         Integer defaultRootId = mediaRootMapper.selectDefaultRootId();
         List<Map<String, Object>> out = new ArrayList<>();
         for (MediaRoot root : roots)
@@ -92,21 +104,25 @@ public class MediaMaintenanceServiceImpl implements IMediaMaintenanceService
             boolean exists = path != null && Files.exists(path);
             long videos = countOf(videoCounts, root.getId());
             long photos = countOf(photoCounts, root.getId());
+            long albums = countOf(albumCounts, root.getId());
             if (root.getId() != null && root.getId().equals(defaultRootId) && "root".equalsIgnoreCase(root.getKind()))
             {
                 // root_id 为 NULL 的存量行一律走配置 rootPath，也就是这个默认根
                 videos += nullVideos[0];
                 photos += nullPhotos[0];
+                albums += nullAlbums[0];
             }
             Map<String, Object> node = new LinkedHashMap<>();
             node.put("id", root.getId());
             node.put("name", root.getName());
             node.put("path", normalizePath(root.getPath()));
             node.put("kind", root.getKind());
+            node.put("guestVisible", guestVisibleOf(root));
             node.put("note", root.getNote());
             node.put("exists", exists);
             node.put("readable", path != null && Files.isReadable(path));
             node.put("videoCount", videos);
+            node.put("albumCount", albums);
             node.put("photoCount", photos);
             node.put("isDefault", root.getId() != null && root.getId().equals(defaultRootId));
             out.add(node);
@@ -116,7 +132,7 @@ public class MediaMaintenanceServiceImpl implements IMediaMaintenanceService
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public Map<String, Object> createRoot(String name, String path, String kind, String note)
+    public Map<String, Object> createRoot(String name, String path, String kind, String note, Boolean guestVisible)
     {
         String nameText = requireName(name);
         String pathText = requireDirectory(path);
@@ -132,9 +148,13 @@ public class MediaMaintenanceServiceImpl implements IMediaMaintenanceService
         root.setName(nameText);
         root.setPath(pathText);
         root.setKind(kindText);
+        // P5.78：不传就是 true（＝本次改动之前的行为），老前端 / 脚本调用零影响
+        root.setGuestVisible(guestVisible == null ? Boolean.TRUE : guestVisible);
         root.setNote(noteText);
         mediaRootMapper.insertRoot(root);
-        log.info("新增库根 id={} name={} kind={} path={}", root.getId(), nameText, kindText, pathText);
+        invalidateGuestCaches();
+        log.info("新增库根 id={} name={} kind={} guestVisible={} path={}", root.getId(), nameText, kindText,
+                root.getGuestVisible(), pathText);
         Map<String, Object> view = rootView(mediaRootMapper.selectRootById(root.getId()));
         view.put("created", true);
         view.put("hint", "新根还没有媒体行：跑一次 mode=scan（带 --root-id=" + root.getId()
@@ -144,7 +164,7 @@ public class MediaMaintenanceServiceImpl implements IMediaMaintenanceService
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public Map<String, Object> updateRoot(Integer id, String name, String path, String note)
+    public Map<String, Object> updateRoot(Integer id, String name, String path, String note, Boolean guestVisible)
     {
         MediaRoot current = mediaRootMapper.selectRootById(id);
         if (current == null)
@@ -179,12 +199,19 @@ public class MediaMaintenanceServiceImpl implements IMediaMaintenanceService
             patch.setNote(normalizeNote(note));
             changed = true;
         }
+        if (guestVisible != null)
+        {
+            patch.setGuestVisible(guestVisible);
+            changed = true;
+        }
         if (!changed)
         {
-            throw MediaException.badRequest("没有要修改的字段（name / path / note 至少给一个）");
+            throw MediaException.badRequest("没有要修改的字段（name / path / note / guestVisible 至少给一个）");
         }
         mediaRootMapper.updateRoot(patch);
-        log.info("修改库根 id={} name={} pathChanged={}", id, nameText, pathChanged);
+        // 未登录可见性变了 → 立刻让站端判定缓存 + 索引快照失效（开关语义要即时，不能等 TTL）
+        invalidateGuestCaches();
+        log.info("修改库根 id={} name={} pathChanged={} guestVisible={}", id, nameText, pathChanged, guestVisible);
         Map<String, Object> view = rootView(mediaRootMapper.selectRootById(id));
         view.put("updated", true);
         view.put("pathChanged", pathChanged);
@@ -215,6 +242,7 @@ public class MediaMaintenanceServiceImpl implements IMediaMaintenanceService
         }
         boolean wasDefault = id.equals(mediaRootMapper.selectDefaultRootId());
         mediaRootMapper.deleteRootById(id);
+        invalidateGuestCaches();
         log.info("删除库根 id={} name={} wasDefault={}", id, current.getName(), wasDefault);
         Map<String, Object> view = new LinkedHashMap<>();
         view.put("deleted", 1);
@@ -459,6 +487,24 @@ public class MediaMaintenanceServiceImpl implements IMediaMaintenanceService
         return null;
     }
 
+    /**
+     * 库根行变了：站端判定缓存（5s）与索引快照（60s）一起失效
+     *
+     * <p>两道缓存缺一不可：只清判定缓存时，未登录那次请求会被<b>旧的索引快照</b>服务，
+     * 开关看上去要等一分钟才生效（实测过，见 p578-evidence 的第一版探针）。</p>
+     */
+    private void invalidateGuestCaches()
+    {
+        mediaGuestAccessService.invalidateRoots();
+        mediaIndexService.invalidateSnapshot();
+    }
+
+    /** 列默认 1；历史行 / 未迁移库读回 null 时按「未登录可见」处理，与改动前行为一致 */
+    private static boolean guestVisibleOf(MediaRoot root)
+    {
+        return root == null || root.getGuestVisible() == null || root.getGuestVisible().booleanValue();
+    }
+
     private static long countOf(Map<Integer, Long> counts, Integer id)
     {
         Long value = id == null ? null : counts.get(id);
@@ -478,6 +524,7 @@ public class MediaMaintenanceServiceImpl implements IMediaMaintenanceService
         view.put("name", root.getName());
         view.put("path", normalizePath(root.getPath()));
         view.put("kind", root.getKind());
+        view.put("guestVisible", guestVisibleOf(root));
         view.put("note", root.getNote());
         view.put("exists", path != null && Files.exists(path));
         view.put("readable", path != null && Files.isReadable(path));

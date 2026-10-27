@@ -8,6 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -37,6 +38,20 @@ public class AppExceptionHandler
             log.warn("用户端接口异常 {} {} -> {}", request.getMethod(), request.getRequestURI(), e.getMessage());
         }
         writeError(request, response, e.getStatus(), e.getMessage());
+    }
+
+    /**
+     * 权限不足（管理端 {@code @PreAuthorize} 拒绝，P5.79 起的 app:user:* 接口）
+     *
+     * <p>必须显式声明：本 advice 优先级高于 framework 的 GlobalExceptionHandler，
+     * 落到下面的 {@code Exception} 分支会把 403 变成 500。</p>
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    public void handleAccessDenied(AccessDeniedException e, HttpServletRequest request, HttpServletResponse response)
+            throws IOException
+    {
+        log.warn("用户端管理接口权限不足 {} {} -> {}", request.getMethod(), request.getRequestURI(), e.getMessage());
+        writeError(request, response, 403, "forbidden");
     }
 
     @ExceptionHandler(Exception.class)

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    未登录可见性判定（P5.78）：库根 guest_visible 的横切查询。
+    表由 doc/media_portability.sql 建立，guest_visible 列由 doc/media_root_guest_visible.sql 添加。
+    这里全部是主键 / album_id / content_hash 索引上的点查，没有全表扫描。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaGuestMapper">
+
+    <select id="selectGuestHiddenRootIds" resultType="java.lang.Integer">
+        select id from media_root where guest_visible = 0 order by id asc
+    </select>
+
+    <select id="selectRootIdOfVideo" resultType="java.lang.Integer">
+        select root_id from media_video where id = #{id} limit 1
+    </select>
+
+    <select id="selectRootIdsOfAlbum" resultType="java.lang.Integer">
+        select distinct root_id from media_photo where album_id = #{albumId}
+    </select>
+
+    <select id="selectRootIdsOfPhotoByHash" resultType="java.lang.Integer">
+        select distinct root_id from media_photo where content_hash = #{hash}
+    </select>
+
+    <select id="selectRootIdOfPhotoBySeq" resultType="java.lang.Integer">
+        select root_id from media_photo where album_id = #{albumId} and seq = #{seq} limit 1
+    </select>
+
+</mapper>

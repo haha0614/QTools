@@ -20,6 +20,7 @@ import com.qtools.media.exception.MediaException;
 import com.qtools.media.support.MediaAvatarCrop;
 import com.qtools.media.mapper.MediaPersonMapper;
 import com.qtools.media.service.IMediaFrameService;
+import com.qtools.media.service.IMediaGuestAccessService;
 import com.qtools.media.service.IMediaIndexService;
 import com.qtools.media.service.IMediaPersonService;
 
@@ -159,6 +160,10 @@ public class MediaPersonServiceImpl implements IMediaPersonService
     /** 人物写操作会改索引（videos[].persons / albums[].persons / people[]），写完必须失效快照 */
     @Autowired
     private IMediaIndexService mediaIndexService;
+
+    /** 未登录可见性（P5.78）：站端人物页的视频 / 相册分页要按「仅登录可见」的根筛掉 */
+    @Autowired
+    private IMediaGuestAccessService mediaGuestAccessService;
 
     /** 帧头像（P5.64）校验 sec 是否落在 [0, dur] 内：时长只有取帧服务知道 */
     @Autowired
@@ -594,8 +599,9 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         int safePage = page < 1 ? 1 : page;
         int safeSize = size < 1 ? PAGE_SIZE_DEFAULT : Math.min(size, PAGE_SIZE_MAX);
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("rows", mediaPersonMapper.selectPersonVideoPage(id, (safePage - 1) * safeSize, safeSize));
-        out.put("total", mediaPersonMapper.countPersonVideos(id));
+        List<Integer> guestHidden = guestHiddenRootIds();
+        out.put("rows", mediaPersonMapper.selectPersonVideoPage(id, (safePage - 1) * safeSize, safeSize, guestHidden));
+        out.put("total", mediaPersonMapper.countPersonVideos(id, guestHidden));
         out.put("page", safePage);
         out.put("size", safeSize);
         return out;
@@ -608,11 +614,29 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         int safePage = page < 1 ? 1 : page;
         int safeSize = size < 1 ? PAGE_SIZE_DEFAULT : Math.min(size, PAGE_SIZE_MAX);
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("rows", mediaPersonMapper.selectPersonAlbumPage(id, (safePage - 1) * safeSize, safeSize));
-        out.put("total", mediaPersonMapper.countPersonAlbums(id));
+        List<Integer> guestHidden = guestHiddenRootIds();
+        out.put("rows", mediaPersonMapper.selectPersonAlbumPage(id, (safePage - 1) * safeSize, safeSize, guestHidden));
+        out.put("total", mediaPersonMapper.countPersonAlbums(id, guestHidden));
         out.put("page", safePage);
         out.put("size", safeSize);
         return out;
+    }
+
+    /**
+     * 未登录访客要排除的根（P5.78）
+     *
+     * <p>只有「当前请求确实是未登录」且「有根被设成仅登录可见」时才返回非空列表；
+     * 其余情况返回 {@code null}，SQL 里对应的 {@code <if>} 整段不出现 —— 登录用户与改动前的
+     * SQL 逐字相同（不多一次条件、不多一次索引判断）。</p>
+     */
+    private List<Integer> guestHiddenRootIds()
+    {
+        if (!mediaGuestAccessService.isGuest())
+        {
+            return null;
+        }
+        Set<Integer> hidden = mediaGuestAccessService.hiddenRootIds();
+        return hidden.isEmpty() ? null : new ArrayList<>(hidden);
     }
 
     // ------------------------------------------------------------------ 输出 / 校验 / 工具

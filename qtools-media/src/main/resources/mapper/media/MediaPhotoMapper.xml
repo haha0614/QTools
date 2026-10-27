@@ -16,6 +16,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="isBig"   column="is_big"   />
         <!-- 内容哈希：前端用它拼缩略图 URL（/media/thumb/p/<albumId>/<hash>），也用于收藏身份 -->
         <result property="contentHash" column="content_hash" />
+        <!-- 所属库根（P5.78）：索引构建时按它筛掉「仅登录可见」的根；未 select 该列的查询留 null 即可 -->
+        <result property="rootId" column="root_id" />
     </resultMap>
 
     <!--
@@ -23,7 +25,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         显式传 false 时加 missing = 0，服务端就把「文件已消失」的行滤掉。
     -->
     <select id="selectPhotoList" resultMap="MediaPhotoResult">
-        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big, p.content_hash
+        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big, p.content_hash, p.root_id
         from media_photo p
         inner join media_album a on a.id = p.album_id and a.hidden = 0
         where p.hidden = 0

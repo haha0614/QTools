@@ -22,8 +22,17 @@ public class AppUser
     /** BCrypt(cost=10)；仅验证码登录的账号可为空 */
     private String passwordHash;
 
-    /** 0 正常 / 1 停用 */
+    /** 审核状态：pending 待审核 / approved 已通过 / rejected 未通过（P5.79 起取代旧的 0 正常 / 1 停用） */
     private String status;
+
+    /** 审核备注（拒绝原因等） */
+    private String reviewNote;
+
+    /** 最近一次审核时间 */
+    private LocalDateTime reviewedAt;
+
+    /** 审核人（sys_user.user_id） */
+    private Long reviewedBy;
 
     private String inviteCode;
 
@@ -91,6 +100,36 @@ public class AppUser
     public void setStatus(String status)
     {
         this.status = status;
+    }
+
+    public String getReviewNote()
+    {
+        return reviewNote;
+    }
+
+    public void setReviewNote(String reviewNote)
+    {
+        this.reviewNote = reviewNote;
+    }
+
+    public LocalDateTime getReviewedAt()
+    {
+        return reviewedAt;
+    }
+
+    public void setReviewedAt(LocalDateTime reviewedAt)
+    {
+        this.reviewedAt = reviewedAt;
+    }
+
+    public Long getReviewedBy()
+    {
+        return reviewedBy;
+    }
+
+    public void setReviewedBy(Long reviewedBy)
+    {
+        this.reviewedBy = reviewedBy;
     }
 
     public String getInviteCode()

@@ -2,7 +2,7 @@
 <!DOCTYPE mapper
 PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<!-- 用户端账号表 app_user 映射文件（M5） -->
+<!-- 用户端账号表 app_user 映射文件（M5；P5.79 加审核状态机） -->
 <mapper namespace="com.qtools.app.mapper.AppUserMapper">
 
     <resultMap type="com.qtools.app.domain.AppUser" id="AppUserResult">
@@ -12,6 +12,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="avatar"       column="avatar"        />
         <result property="passwordHash" column="password_hash" />
         <result property="status"       column="status"        />
+        <result property="reviewNote"   column="review_note"   />
+        <result property="reviewedAt"   column="reviewed_at"   />
+        <result property="reviewedBy"   column="reviewed_by"   />
         <result property="inviteCode"   column="invite_code"   />
         <result property="registerIp"   column="register_ip"   />
         <result property="createdAt"    column="created_at"    />
@@ -19,7 +22,20 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </resultMap>
 
     <sql id="selectUserColumns">
-        id, username, nickname, avatar, password_hash, status, invite_code, register_ip, created_at, last_login_at
+        id, username, nickname, avatar, password_hash, status, review_note, reviewed_at, reviewed_by,
+        invite_code, register_ip, created_at, last_login_at
+    </sql>
+
+    <!-- 管理端列表条件：状态精确匹配 + 用户名/昵称模糊 -->
+    <sql id="pageWhere">
+        <where>
+            <if test="status != null and status != ''">
+                and status = #{status}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                and (username like concat('%', #{keyword}, '%') or nickname like concat('%', #{keyword}, '%'))
+            </if>
+        </where>
     </sql>
 
     <select id="selectById" resultMap="AppUserResult">
@@ -31,12 +47,17 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </select>
 
     <select id="selectByIdentity" resultMap="AppUserResult">
-        select u.id, u.username, u.nickname, u.avatar, u.password_hash, u.status, u.invite_code,
-               u.register_ip, u.created_at, u.last_login_at
+        select u.id, u.username, u.nickname, u.avatar, u.password_hash, u.status, u.review_note,
+               u.reviewed_at, u.reviewed_by, u.invite_code, u.register_ip, u.created_at, u.last_login_at
         from app_user u
         inner join app_user_identity i on i.user_id = u.id
         where i.type = #{type} and i.identifier = #{identifier}
         limit 1
+    </select>
+
+    <!-- 鉴权过滤器专用：只查审核三列，避免每请求拖 avatar（MEDIUMTEXT） -->
+    <select id="selectStatusById" resultMap="AppUserResult">
+        select id, status, review_note from app_user where id = #{id}
     </select>
 
     <insert id="insert" parameterType="com.qtools.app.domain.AppUser" useGeneratedKeys="true" keyProperty="id">
@@ -48,5 +69,30 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     <update id="updateLastLogin">
         update app_user set last_login_at = now() where id = #{id}
     </update>
+
+    <update id="updateReviewStatus">
+        update app_user
+        set status = #{status},
+            review_note = #{reviewNote,jdbcType=VARCHAR},
+            reviewed_at = now(),
+            reviewed_by = #{reviewedBy,jdbcType=BIGINT}
+        where id = #{id}
+    </update>
+
+    <!-- 待审核排最前：管理端一进页面就先看到要处理的 -->
+    <select id="selectPage" resultMap="AppUserResult">
+        select <include refid="selectUserColumns"/> from app_user
+        <include refid="pageWhere"/>
+        order by case status when 'pending' then 0 when 'rejected' then 2 else 1 end, id desc
+        limit #{offset}, #{size}
+    </select>
+
+    <select id="countPage" resultType="int">
+        select count(1) from app_user <include refid="pageWhere"/>
+    </select>
+
+    <select id="selectStatusCounts" resultType="java.util.LinkedHashMap">
+        select status as status, count(1) as cnt from app_user group by status
+    </select>
 
 </mapper>

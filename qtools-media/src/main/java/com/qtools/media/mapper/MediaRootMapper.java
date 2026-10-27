@@ -51,6 +51,14 @@ public interface MediaRootMapper
 
     List<Map<String, Object>> countPhotosByRoot();
 
+    /**
+     * 按 root_id 统计<b>相册</b>数（P5.78 管理端「库根管理」页的条目数一栏）
+     *
+     * <p>{@code media_album} 自己没有 {@code root_id}，只能由图片反推：
+     * {@code count(distinct album_id)}，一个相册的图片跨两个根时会在两边各记一次。</p>
+     */
+    List<Map<String, Object>> countAlbumsByRoot();
+
     /** 某个根下还剩多少条视频引用（删除前的引用检查） */
     int countVideoByRootId(@Param("id") Integer id);
 

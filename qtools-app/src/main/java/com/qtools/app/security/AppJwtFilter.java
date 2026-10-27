@@ -39,15 +39,29 @@ public class AppJwtFilter extends OncePerRequestFilter
             "/api/app/auth/login",
             "/api/app/auth/code");
 
+    /**
+     * 管理端前缀：{@code /api/app/admin/**} 是<b>后台管理员</b>接口
+     *
+     * <p>它们与用户端身份体系无关：鉴权由 Spring Security 的后台 token 链 +
+     * {@code @PreAuthorize("...app:user:*")} 裁决（SecurityConfig 里把该前缀显式声明为
+     * {@code authenticated()}）。本过滤器只裁决用户端 token，因此对这段路径直接放行 ——
+     * 否则管理员带着后台 token 调用时会被这里拦成 401 用户端未登录。</p>
+     */
+    private static final String ADMIN_PREFIX = "/api/app/admin/";
+
     private static final String BEARER = "Bearer ";
 
     private static final String UNAUTHORIZED_BODY = "{\"error\":\"未登录或登录已过期\"}";
 
     private final AppJwtService appJwtService;
 
-    public AppJwtFilter(AppJwtService appJwtService)
+    /** 审核状态判定（pending / rejected 一律拒绝，P5.79） */
+    private final AppUserGuard appUserGuard;
+
+    public AppJwtFilter(AppJwtService appJwtService, AppUserGuard appUserGuard)
     {
         this.appJwtService = appJwtService;
+        this.appUserGuard = appUserGuard;
     }
 
     @Override
@@ -60,7 +74,8 @@ public class AppJwtFilter extends OncePerRequestFilter
             chain.doFilter(request, response);
             return;
         }
-        if (WHITELIST.contains(path(request)))
+        String path = path(request);
+        if (WHITELIST.contains(path) || path.startsWith(ADMIN_PREFIX))
         {
             chain.doFilter(request, response);
             return;
@@ -76,6 +91,15 @@ public class AppJwtFilter extends OncePerRequestFilter
         {
             log.debug("用户端 token 无效 uri={}", request.getRequestURI());
             unauthorized(request, response);
+            return;
+        }
+        // P5.79：token 有效不等于可进站 —— 审核状态未通过（pending / rejected）在这里统一拦掉。
+        // 只此一处：所有需要登录的用户端接口都经过本过滤器，不在各 controller 里重复 if。
+        String blocked = appUserGuard.blockReasonOf(principal.getUserId());
+        if (blocked != null)
+        {
+            log.debug("用户端账号未通过审核 userId={} uri={} reason={}", principal.getUserId(), request.getRequestURI(), blocked);
+            rejected(request, response, blocked);
             return;
         }
         request.setAttribute(ATTR_USER_ID, principal.getUserId());
@@ -134,22 +158,69 @@ public class AppJwtFilter extends OncePerRequestFilter
         return uri;
     }
 
+    /**
+     * 账号未通过审核（pending / rejected）：403 + {@code {"error":"..."}}
+     *
+     * <p>刻意不用 401：401 会让前端的「会话失效」钩子清掉 token —— 这是账号状态问题，
+     * 不是会话过期，清 token 会把「请去等审核」误导成「重新登录」。</p>
+     */
+    private static void rejected(HttpServletRequest request, HttpServletResponse response, String message)
+            throws IOException
+    {
+        writeJson(request, response, HttpServletResponse.SC_FORBIDDEN,
+                "{\"error\":\"" + escape(message) + "\"}");
+    }
+
     private static void unauthorized(HttpServletRequest request, HttpServletResponse response) throws IOException
     {
-        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        writeJson(request, response, HttpServletResponse.SC_UNAUTHORIZED, UNAUTHORIZED_BODY);
+    }
+
+    /** 过滤器直出 JSON（含跨域头）：本过滤器跑在 framework 的 CorsFilter 之前 */
+    private static void writeJson(HttpServletRequest request, HttpServletResponse response, int status, String json)
+            throws IOException
+    {
+        response.setStatus(status);
         response.setContentType("application/json; charset=utf-8");
         response.setHeader("X-Content-Type-Options", "nosniff");
         response.setHeader("Cache-Control", "no-store");
-        // 本过滤器跑在 framework 的 CorsFilter 之前，401 需要自己补上跨域头，否则浏览器只能看到 CORS 错误
+        // 本过滤器跑在 framework 的 CorsFilter 之前，错误响应需要自己补上跨域头，否则浏览器只能看到 CORS 错误
         String origin = request.getHeader("Origin");
         if (origin != null && !origin.isEmpty())
         {
             response.setHeader("Access-Control-Allow-Origin", origin);
             response.setHeader("Vary", "Origin");
         }
-        byte[] body = UNAUTHORIZED_BODY.getBytes(StandardCharsets.UTF_8);
+        byte[] body = json.getBytes(StandardCharsets.UTF_8);
         response.setContentLength(body.length);
         response.getOutputStream().write(body);
         response.flushBuffer();
+    }
+
+    /** 最小 JSON 字符串转义（文案里可能带审核备注） */
+    private static String escape(String text)
+    {
+        if (text == null)
+        {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder(text.length() + 8);
+        for (int i = 0; i < text.length(); i++)
+        {
+            char c = text.charAt(i);
+            if (c == '"' || c == '\\')
+            {
+                sb.append('\\').append(c);
+            }
+            else if (c < 0x20)
+            {
+                sb.append(String.format("\\u%04x", (int) c));
+            }
+            else
+            {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 }

@@ -2,6 +2,7 @@ package com.qtools.app.security;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import com.qtools.app.security.AppUserGuard;
 import com.qtools.common.security.IAppTokenVerifier;
 
 /**
@@ -18,6 +19,10 @@ public class AppTokenVerifier implements IAppTokenVerifier
     @Autowired
     private AppJwtService appJwtService;
 
+    /** P5.79：审核状态未通过的账号，其 token 同样不被承认（媒体侧与用户端同一口径） */
+    @Autowired
+    private AppUserGuard appUserGuard;
+
     @Override
     public Long verifyUserId(String token)
     {
@@ -26,6 +31,10 @@ public class AppTokenVerifier implements IAppTokenVerifier
             return null;
         }
         AppJwtService.Principal principal = appJwtService.verify(token);
-        return principal == null ? null : principal.getUserId();
+        if (principal == null)
+        {
+            return null;
+        }
+        return appUserGuard.blockReasonOf(principal.getUserId()) == null ? principal.getUserId() : null;
     }
 }

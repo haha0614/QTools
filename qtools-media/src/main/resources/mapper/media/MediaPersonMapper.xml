@@ -353,6 +353,25 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         ) t
     </select>
 
+    <!-- ================================================================ 未登录可见性（P5.78） -->
+
+    <!-- 视频侧：root_id 落在「仅登录可见」的根下就不出现（root_id 为 NULL 的存量行走配置根，不筛） -->
+    <sql id="guestRootFilter">
+        <if test="hiddenRootIds != null and hiddenRootIds.size() > 0">
+            and (v.root_id is null or v.root_id not in
+            <foreach collection="hiddenRootIds" item="rid" open="(" separator="," close=")">#{rid}</foreach>)
+        </if>
+    </sql>
+
+    <!-- 相册侧：相册自己没有 root_id，只要它名下有图片落在收紧的根里，整册就不出现（与索引口径一致） -->
+    <sql id="guestAlbumRootFilter">
+        <if test="hiddenRootIds != null and hiddenRootIds.size() > 0">
+            and not exists (select 1 from media_photo gp
+                             where gp.album_id = al.id and gp.root_id in
+                            <foreach collection="hiddenRootIds" item="rid" open="(" separator="," close=")">#{rid}</foreach>)
+        </if>
+    </sql>
+
     <!-- ================================================================ 站端人物页 / 索引 -->
 
     <select id="selectPersonVideoPage" resultType="java.util.LinkedHashMap">
@@ -363,6 +382,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         from media_video v
         where v.hidden = 0
           and exists (select 1 from media_video_actor a where a.video_id = v.id and a.person_id = #{personId})
+        <include refid="guestRootFilter"/>
         order by v.folder asc, v.title asc, v.id asc
         limit #{offset}, #{size}
     </select>
@@ -371,6 +391,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         select count(*) from media_video v
         where v.hidden = 0
           and exists (select 1 from media_video_actor a where a.video_id = v.id and a.person_id = #{personId})
+        <include refid="guestRootFilter"/>
     </select>
 
     <select id="selectPersonAlbumPage" resultType="java.util.LinkedHashMap">
@@ -381,6 +402,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
           and (al.person_id = #{personId}
                or exists (select 1 from media_album_person ap
                            where ap.album_id = al.id and ap.person_id = #{personId}))
+        <include refid="guestAlbumRootFilter"/>
         order by al.sort asc, al.id asc
         limit #{offset}, #{size}
     </select>
@@ -391,6 +413,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
           and (al.person_id = #{personId}
                or exists (select 1 from media_album_person ap
                            where ap.album_id = al.id and ap.person_id = #{personId}))
+        <include refid="guestAlbumRootFilter"/>
     </select>
 
     <!-- 索引 videos[].persons（role 为 null 时不输出该键，由 Java 侧处理） -->

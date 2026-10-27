@@ -28,6 +28,22 @@ public interface IMediaIndexService
     MediaIndexSnapshot indexSnapshot(boolean includeMissing);
 
     /**
+     * 取索引快照，并按「未登录可见性」筛掉收紧库根下的内容（P5.78）
+     *
+     * <p>{@code guest = true} 时：{@code media_root.guest_visible = 0} 的根下的视频 / 相册 / 图片
+     * 整行不出现在 videos / albums / albums[].photos 里，{@code stats} 与 people 的计数
+     * 也随之下降（人物节点由相册聚合而来，相册被筛掉后自然减少）。</p>
+     *
+     * <p>两种访客身份<b>各存一份缓存</b>：未登录与登录拿到的 ETag 不同，
+     * 浏览器 / CDN 不会把「登录后那份」当成未登录那份的 304。</p>
+     *
+     * @param includeMissing 是否带出缺失行
+     * @param guest          是否未登录访客（无有效 app token）
+     * @return 快照
+     */
+    MediaIndexSnapshot indexSnapshot(boolean includeMissing, boolean guest);
+
+    /**
      * 单片详情（含 tags/actors）
      *
      * @param id 视频 id

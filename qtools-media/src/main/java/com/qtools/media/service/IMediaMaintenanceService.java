@@ -19,7 +19,7 @@ import java.util.Map;
  */
 public interface IMediaMaintenanceService
 {
-    /** 多库根清单：[{id,name,path,kind,note,exists,readable,videoCount,photoCount}] */
+    /** 多库根清单：[{id,name,path,kind,guestVisible,note,exists,readable,videoCount,photoCount,isDefault}] */
     List<Map<String, Object>> listRoots();
 
     /**
@@ -27,8 +27,9 @@ public interface IMediaMaintenanceService
      *
      * @param path 必须存在且是目录、不能与已有根重复（唯一键 uk_media_root_path）
      * @param kind root / thumbs / trash，缺省 root
+     * @param guestVisible 未登录是否可见（P5.78），{@code null} = 默认 true（沿用改动前的行为）
      */
-    Map<String, Object> createRoot(String name, String path, String kind, String note);
+    Map<String, Object> createRoot(String name, String path, String kind, String note, Boolean guestVisible);
 
     /**
      * 改库根：只改传入的字段
@@ -36,7 +37,7 @@ public interface IMediaMaintenanceService
      * <p>提示：改 {@code path} <b>不会</b>自动重扫，{@code rel_path} / {@code root_id} 仍指向旧布局，
      * 需要再跑一次 {@code mode=scan}（或 {@code backfill-hash}）。</p>
      */
-    Map<String, Object> updateRoot(Integer id, String name, String path, String note);
+    Map<String, Object> updateRoot(Integer id, String name, String path, String note, Boolean guestVisible);
 
     /** 删除库根：{@code media_video} / {@code media_photo} 仍有引用时 400，并在 message 里给出引用数 */
     Map<String, Object> deleteRoot(Integer id);

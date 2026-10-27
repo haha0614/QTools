@@ -619,7 +619,11 @@ public class MediaAdminController extends BaseController
         return mediaMaintenanceService.listRoots();
     }
 
-    /** 新增库根：body {@code {name, path, kind?, note?}}；path 必须存在且是目录、不能与已有根重复 */
+    /**
+     * 新增库根：body {@code {name, path, kind?, note?, guestVisible?}}；path 必须存在且是目录、不能与已有根重复
+     *
+     * <p>{@code guestVisible}（P5.78）：true=未登录可见（缺省值，＝改动前行为），false=仅登录可见。</p>
+     */
     @PreAuthorize("@ss.hasPermi('media:admin:edit')")
     @Log(title = "媒体库-新增库根", businessType = BusinessType.INSERT)
     @PostMapping("/roots")
@@ -627,14 +631,18 @@ public class MediaAdminController extends BaseController
     {
         Map<String, Object> body = parseObject(rawBody, true);
         return mediaMaintenanceService.createRoot(stringValue(body.get("name")), stringValue(body.get("path")),
-                stringValue(body.get("kind")), stringValue(body.get("note")));
+                stringValue(body.get("kind")), stringValue(body.get("note")), boolValue(body.get("guestVisible")));
     }
 
     /**
-     * 改库根：body {@code {name?, path?, note?}}
+     * 改库根：body {@code {name?, path?, note?, guestVisible?}}
      *
      * <p>{@code note} 出现且为空串 = 清空备注；不出现 = 保持原值。改 {@code path} <b>不会</b>自动重扫，
      * 返回体的 {@code pathChanged} / {@code hint} 会提示还要跑一次 {@code mode=scan}。</p>
+     *
+     * <p>{@code guestVisible}（P5.78）是<b>真正的局部更新</b>：不传 = 不改；传 true/false = 覆盖。
+     * 管理端「库根管理」页的行内开关就是这条：{@code PUT /api/media/admin/roots/{id} {"guestVisible":false}}，
+     * 写完立即让站端判定缓存失效，未登录访客下一次请求就看不到该根。</p>
      */
     @PreAuthorize("@ss.hasPermi('media:admin:edit')")
     @Log(title = "媒体库-修改库根", businessType = BusinessType.UPDATE)
@@ -650,7 +658,7 @@ public class MediaAdminController extends BaseController
             note = raw == null ? "" : raw;
         }
         return mediaMaintenanceService.updateRoot(id, stringValue(body.get("name")),
-                stringValue(body.get("path")), note);
+                stringValue(body.get("path")), note, boolValue(body.get("guestVisible")));
     }
 
     /** 删除库根：{@code media_video} / {@code media_photo} 仍有引用时 400，message 里带引用数 */
