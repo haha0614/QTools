@@ -6,8 +6,10 @@ import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import com.qtools.common.security.IAppRoleResolver;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.domain.MediaOwnerSession;
 import com.qtools.media.domain.MediaUserItem;
@@ -77,6 +79,13 @@ public class MediaUserServiceImpl implements IMediaUserService
     @Autowired
     private MediaFavoriteMapper mediaFavoriteMapper;
 
+    /**
+     * 角色解析（P5.89；由 qtools-app 提供实现）。媒体模块单独部署 / 单测时该 bean 不存在，
+     * {@code getIfAvailable()} 返回 null → 一律回 {@code user}，不会启动失败。
+     */
+    @Autowired
+    private ObjectProvider<IAppRoleResolver> appRoleResolver;
+
     @Autowired
     private MediaRecentMapper mediaRecentMapper;
 
@@ -143,6 +152,8 @@ public class MediaUserServiceImpl implements IMediaUserService
         out.put("dataOwner", key);
         out.put("account", session.isAccount());
         out.put("userId", session.getUserId());
+        // P5.89：两档角色（未登录为 null；前端据 owner 决定「管理后台」入口与站长编辑入口）
+        out.put("role", roleOf(session));
         out.put("profile", profileNode(session));
         out.put("counts", counts);
         return out;
@@ -493,6 +504,8 @@ public class MediaUserServiceImpl implements IMediaUserService
         out.put("dataOwner", key);
         out.put("account", session.isAccount());
         out.put("userId", session.getUserId());
+        // P5.89：与 GET /api/media/me 同一口径（对外只暴露两档角色，未登录为 null）
+        out.put("role", roleOf(session));
         out.put("profile", profileNode(session));
         out.put("favorites", favorites);
         out.put("recentVideos", recentVideos);
@@ -503,6 +516,21 @@ public class MediaUserServiceImpl implements IMediaUserService
         recent.put("photos", recentPhotos);
         out.put("recent", recent);
         return out;
+    }
+
+    /**
+     * 当前请求者的角色（P5.89）：{@code owner} / {@code user}；未登录（或没有角色解析组件）返回 null
+     *
+     * <p>只输出两档：库里脏值由 {@link IAppRoleResolver} 归一化成 {@code user}。</p>
+     */
+    private String roleOf(MediaOwnerSession session)
+    {
+        if (session == null || session.getUserId() == null)
+        {
+            return null;
+        }
+        IAppRoleResolver resolver = appRoleResolver == null ? null : appRoleResolver.getIfAvailable();
+        return resolver == null ? null : resolver.roleOf(session.getUserId());
     }
 
     private Map<String, Object> profileNode(MediaOwnerSession session)

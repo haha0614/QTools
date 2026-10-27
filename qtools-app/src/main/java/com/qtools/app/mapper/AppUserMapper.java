@@ -27,6 +27,19 @@ public interface AppUserMapper
     /** 只查裁决相关列（审核状态 + 封禁；鉴权过滤器每请求一次，不取 avatar 等大字段） */
     AppUser selectStatusById(@Param("id") Long id);
 
+    /**
+     * 只查角色一列（P5.89；站端闸门 {@code requireWritable()} 经 {@code IAppRoleResolver} 每请求最多一次）
+     *
+     * @return {@code user} / {@code owner}；账号不存在返回 null（调用方按 user 处理）
+     */
+    String selectRoleById(@Param("id") Long id);
+
+    /** 改角色：只写 role + updated_at（管理端行内切换；值域由服务层校验） */
+    int updateRole(@Param("id") Long id, @Param("role") String role);
+
+    /** 某角色的账号数（「不能把最后一个 owner 降级」的唯一依据） */
+    int countByRole(@Param("role") String role);
+
     /** 新增账号，回填自增主键 */
     int insert(AppUser user);
 

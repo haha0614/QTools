@@ -30,6 +30,7 @@ import com.qtools.app.security.AppJwtService;
 import com.qtools.app.security.AppUserGuard;
 import com.qtools.app.security.LoginAttemptGuard;
 import com.qtools.app.service.IAppAuthService;
+import com.qtools.common.security.IAppRoleResolver;
 import com.qtools.common.utils.ip.IpUtils;
 
 /**
@@ -324,10 +325,24 @@ public class AppAuthServiceImpl implements IAppAuthService
         result.put("username", user.getUsername());
         result.put("nickname", user.getNickname());
         result.put("avatar", user.getAvatar());
+        // P5.89：两档角色（user / owner）—— 用户端据它决定「管理后台」入口是否渲染
+        result.put("role", roleOf(user));
         result.put("identities", identities);
         result.put("createdAt", format(user.getCreatedAt()));
         result.put("lastLoginAt", format(user.getLastLoginAt()));
         return result;
+    }
+
+    /** 角色归一化（P5.89）：空 / 脏值一律普通用户，与 IAppRoleResolver 同一口径 */
+    private static String roleOf(AppUser user)
+    {
+        if (user == null || user.getRole() == null)
+        {
+            return IAppRoleResolver.ROLE_USER;
+        }
+        String clean = user.getRole().trim().toLowerCase();
+        return IAppRoleResolver.ROLE_OWNER.equals(clean) ? IAppRoleResolver.ROLE_OWNER
+                : IAppRoleResolver.ROLE_USER;
     }
 
     // ------------------------------------------------------------------ 绑定 / 验证码
@@ -427,6 +442,9 @@ public class AppAuthServiceImpl implements IAppAuthService
         view.put("username", user.getUsername());
         view.put("nickname", user.getNickname());
         view.put("avatar", user.getAvatar());
+        // P5.89：登录 / 注册回包直接带 role —— 前端（侧栏「管理后台」入口）收到即可用，
+        // 不必再等一次 GET /api/app/me
+        view.put("role", roleOf(user));
         return view;
     }
 

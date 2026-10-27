@@ -58,6 +58,20 @@ public class MediaPerson
     /** 三围 / 尺寸等自由文本（可空，<= 128 字符；P5-A 资料字段） */
     private String measurements;
 
+    /**
+     * 人物卡背景缩放（P5.89，可空）：{@code 1} = 自动几何，值域 0.5–3
+     *
+     * <p>站端人物墙的卡片背景调整原本只存在 P5.88 的前端 localStorage。P5.89 起站长（role=owner）
+     * 的调整落服务端这三列，渲染优先级：服务端值 &gt; localStorage &gt; 自动几何。</p>
+     */
+    private java.math.BigDecimal bgScale;
+
+    /** 人物卡背景水平偏移（P5.89，可空）：卡片**宽度**的比例，±2 = ±200%，4 位小数 */
+    private java.math.BigDecimal bgDx;
+
+    /** 人物卡背景垂直偏移（P5.89，可空）：卡片**高度**的比例，±2 = ±200%，4 位小数 */
+    private java.math.BigDecimal bgDy;
+
     /** 出道年份（可空，1900-2100；与 careerEnd 同时非空时要求 end >= start） */
     private Integer careerStart;
 
@@ -325,6 +339,36 @@ public class MediaPerson
     public void setAvatarRef(String avatarRef)
     {
         this.avatarRef = avatarRef;
+    }
+
+    public java.math.BigDecimal getBgScale()
+    {
+        return bgScale;
+    }
+
+    public void setBgScale(java.math.BigDecimal bgScale)
+    {
+        this.bgScale = bgScale;
+    }
+
+    public java.math.BigDecimal getBgDx()
+    {
+        return bgDx;
+    }
+
+    public void setBgDx(java.math.BigDecimal bgDx)
+    {
+        this.bgDx = bgDx;
+    }
+
+    public java.math.BigDecimal getBgDy()
+    {
+        return bgDy;
+    }
+
+    public void setBgDy(java.math.BigDecimal bgDy)
+    {
+        this.bgDy = bgDy;
     }
 
     public String getGender()

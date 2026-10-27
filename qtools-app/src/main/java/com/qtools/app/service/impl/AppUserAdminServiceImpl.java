@@ -19,9 +19,11 @@ import com.qtools.app.exception.AppException;
 import com.qtools.app.mapper.AppUserIdentityMapper;
 import com.qtools.app.mapper.AppUserMapper;
 import com.qtools.app.mapper.AppUserTokenMapper;
+import com.qtools.app.security.AppRoleResolver;
 import com.qtools.app.security.AppUserGuard;
 import com.qtools.app.service.IAppUserAdminService;
 import com.qtools.common.core.page.TableDataInfo;
+import com.qtools.common.security.IAppRoleResolver;
 
 /**
  * 用户端账号 用户管理实现（P5.79 审核 → P5.81 完整用户管理）
@@ -82,6 +84,10 @@ public class AppUserAdminServiceImpl implements IAppUserAdminService
 
     @Autowired
     private AppUserIdentityMapper appUserIdentityMapper;
+
+    /** 角色缓存（P5.89）：改完角色立刻失效，不让站长权限等 30s */
+    @Autowired
+    private AppRoleResolver appRoleResolver;
 
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder(10);
 
@@ -258,21 +264,45 @@ public class AppUserAdminServiceImpl implements IAppUserAdminService
             patch.put("reviewNote", reviewNote);
         }
 
-        if (!setNickname && !setAvatar && !setNote)
+        // P5.89：角色（user / owner）也走这条改资料接口 —— 管理端「角色」列行内切换就调它
+        boolean setRole = body != null && body.containsKey("role");
+        String role = null;
+        if (setRole)
         {
-            throw AppException.badRequest("没有要修改的字段（支持 nickname / avatar / reviewNote）");
+            role = requireRole(text(body.get("role")));
+            // 「不能把最后一个 owner 降级」：唯一依据是库里 owner 的行数（不是前端传的标志）
+            if (IAppRoleResolver.ROLE_USER.equals(role) && IAppRoleResolver.ROLE_OWNER.equals(roleOf(user))
+                    && appUserMapper.countByRole(IAppRoleResolver.ROLE_OWNER) <= 1)
+            {
+                throw AppException.badRequest("不能把最后一个站长降级：请先把另一个账号设为站长，再降级这个账号");
+            }
+        }
+
+        if (!setNickname && !setAvatar && !setNote && !setRole)
+        {
+            throw AppException.badRequest("没有要修改的字段（支持 nickname / avatar / reviewNote / role）");
         }
 
         boolean sameNickname = !setNickname || Objects.equals(nickname, user.getNickname());
         boolean sameAvatar = !setAvatar || Objects.equals(avatar, emptyToNull(user.getAvatar()));
         boolean sameNote = !setNote || Objects.equals(reviewNote, user.getReviewNote());
-        if (sameNickname && sameAvatar && sameNote)
+        boolean sameRole = !setRole || Objects.equals(role, roleOf(user));
+        if (sameNickname && sameAvatar && sameNote && sameRole)
         {
             Map<String, Object> unchanged = adminView(user);
             unchanged.put("changed", false);
             return unchanged;
         }
-        appUserMapper.updateProfile(patch);
+        if (setRole && !sameRole)
+        {
+            appUserMapper.updateRole(id, role);
+            // 角色缓存立刻失效：owner 的站端 full 权限不能等 30s 才生效
+            appRoleResolver.invalidate(id);
+        }
+        if (setNickname || setAvatar || setNote)
+        {
+            appUserMapper.updateProfile(patch);
+        }
         Map<String, Object> changed = adminView(appUserMapper.selectById(id));
         changed.put("changed", true);
         changed.put("updatedBy", operatorId);
@@ -520,6 +550,21 @@ public class AppUserAdminServiceImpl implements IAppUserAdminService
         return null;
     }
 
+    /** 角色值域校验（P5.89）：只接受 user / owner，其它一律 400 */
+    private static String requireRole(String role)
+    {
+        if (role == null)
+        {
+            throw AppException.badRequest("role 只能是 user / owner");
+        }
+        String clean = role.trim().toLowerCase();
+        if (!IAppRoleResolver.ROLE_USER.equals(clean) && !IAppRoleResolver.ROLE_OWNER.equals(clean))
+        {
+            throw AppException.badRequest("role 只能是 user / owner，本次: " + role);
+        }
+        return clean;
+    }
+
     private static String requireStatus(String status)
     {
         String value = trim(status, 16);
@@ -539,6 +584,9 @@ public class AppUserAdminServiceImpl implements IAppUserAdminService
         view.put("nickname", user.getNickname());
         view.put("status", user.getStatus());
         view.put("statusText", statusText(user.getStatus()));
+        // P5.89：两档角色（user 普通用户 / owner 站长）—— 管理端列表「角色」列与行内切换读它
+        view.put("role", roleOf(user));
+        view.put("roleText", roleText(roleOf(user)));
         view.put("banned", user.isBanned());
         view.put("bannedReason", user.getBannedReason());
         view.put("bannedAt", format(user.getBannedAt()));
@@ -556,6 +604,24 @@ public class AppUserAdminServiceImpl implements IAppUserAdminService
         view.put("reviewedBy", user.getReviewedBy());
         view.put("hasPassword", user.getPasswordHash() != null && !user.getPasswordHash().isEmpty());
         return view;
+    }
+
+    /** 角色归一化（P5.89）：空 / 脏值一律普通用户 */
+    static String roleOf(AppUser user)
+    {
+        if (user == null || user.getRole() == null)
+        {
+            return IAppRoleResolver.ROLE_USER;
+        }
+        String clean = user.getRole().trim().toLowerCase();
+        return IAppRoleResolver.ROLE_OWNER.equals(clean) ? IAppRoleResolver.ROLE_OWNER
+                : IAppRoleResolver.ROLE_USER;
+    }
+
+    /** 角色文案（管理端表格「角色」列） */
+    static String roleText(String role)
+    {
+        return IAppRoleResolver.ROLE_OWNER.equals(role) ? "站长" : "普通用户";
     }
 
     static String statusText(String status)

@@ -29,4 +29,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         select root_id from media_photo where album_id = #{albumId} and seq = #{seq} limit 1
     </select>
 
+    <!-- P5.90：人物卡背景预渲染要按「头像属于哪个根」判可见性；只取两列，不碰 selectPersonDetail 的 4 个子查询 -->
+    <select id="selectAvatarOfPerson" resultType="java.util.Map">
+        select avatar_kind as kind, avatar_ref as ref from media_person where id = #{id} limit 1
+    </select>
+
 </mapper>

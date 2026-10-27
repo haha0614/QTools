@@ -66,6 +66,17 @@ public interface MediaPersonMapper
     int updatePersonAvatarRef(@Param("id") Long id, @Param("avatarKind") String avatarKind,
             @Param("avatarRef") String avatarRef);
 
+    /**
+     * 写人物卡背景调整三列（P5.89）：一次 UPDATE 写完，null = 该列为空
+     *
+     * <p>三列全为 null 时等价于「重置为自动几何」，服务层会直接走 {@link #clearPersonBg}。</p>
+     */
+    int updatePersonBg(@Param("id") Long id, @Param("scale") java.math.BigDecimal scale,
+            @Param("dx") java.math.BigDecimal dx, @Param("dy") java.math.BigDecimal dy);
+
+    /** 重置人物卡背景调整（P5.89）：三列写回 NULL */
+    int clearPersonBg(@Param("id") Long id);
+
     /** 校验「该图片在该人物名下」：（albumId, seq）存在且相册属于这个人物（P5.48） */
     long countPersonPhotoOwned(@Param("personId") Long personId, @Param("albumId") String albumId,
             @Param("seq") int seq);

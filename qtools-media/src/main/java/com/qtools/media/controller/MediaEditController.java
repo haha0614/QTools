@@ -24,6 +24,7 @@ import com.qtools.media.service.IMediaSynopsisService;
 import static com.qtools.media.support.MediaBodyParser.booleanValue;
 import static com.qtools.media.support.MediaBodyParser.longsValue;
 import static com.qtools.media.support.MediaBodyParser.metaPatch;
+import static com.qtools.media.support.MediaBodyParser.optionalDecimalValue;
 import static com.qtools.media.support.MediaBodyParser.parseObject;
 import static com.qtools.media.support.MediaBodyParser.rolesValue;
 import static com.qtools.media.support.MediaBodyParser.stringValue;
@@ -64,7 +65,13 @@ import static com.qtools.media.support.MediaBodyParser.textValue;
  *   <li>{@code PUT /media/video/{id}/synopsis} 作品简介 / 剧情梗概（P5.38）</li>
  *   <li>{@code PUT /media/person/{id}/avatar} 手动指定人物头像（P5.48）</li>
  *   <li>{@code DELETE /media/person/{id}/avatar} 清除手动头像，回退三级自动（P5.48）</li>
+ *   <li>{@code PUT /media/person/{id}/bg} 人物卡背景调整（缩放 / 偏移，P5.89 站长持久化）</li>
+ *   <li>{@code DELETE /media/person/{id}/bg} 重置人物卡背景调整（P5.89）</li>
  * </ul>
+ *
+ * <p><b>P5.89 · 站长豁免</b>：{@code role=owner} 的请求者无视 {@code media.userEditing} 三档，
+ * 上述所有写接口一律放行；普通用户 / 未登录仍按三档。判定在
+ * {@link IMediaEditPolicyService#requireWritable()} 的实现里做一次，本类只调用、不判角色。</p>
  * <p>人物只读四件套（清单 / 详情 / 名下视频 / 名下相册）仍在 {@link MediaPersonController}，
  * 那里类级说明写着「只读」——所以人物<b>写</b>接口故意放在本类，与闸门同处一个文件。</p>
  *
@@ -93,11 +100,21 @@ public class MediaEditController
 
     // ------------------------------------------------------------------ 读
 
-    /** 当前站端编辑策略：{@code {level}}，前端据此决定「可编辑 / 只改本地 / 只读」 */
+    /**
+     * 当前站端编辑策略：{@code {level, role, canWrite}}（P5.89 起带角色）
+     *
+     * <p>前端<b>不再只看档位</b>决定要不要显示编辑入口：{@code owner} 在 off / local 档也恒
+     * {@code canWrite=true}，普通用户 / 未登录则等于「档位是不是 full」。{@code role} 未登录时为
+     * null（不是 {@code user}，前端据 null 区分「未登录」与「普通用户」）。</p>
+     */
     @GetMapping("/edit-policy")
     public Map<String, Object> editPolicy()
     {
-        return Map.of("level", mediaEditPolicyService.getLevel());
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("level", mediaEditPolicyService.getLevel());
+        out.put("role", mediaEditPolicyService.currentRole());
+        out.put("canWrite", mediaEditPolicyService.canWrite());
+        return out;
     }
 
     /** 标签字典（只读，供站端标签选择器）：{@code [{id,name,color,useCount}]} */
@@ -229,7 +246,7 @@ public class MediaEditController
      * （photo → {@code /api/media/thumb/p/<albumId>/<pad4(seq)>}），前端直接用、不自己拼缩略图 URL。</p>
      *
      * <p>错误码：kind 非法 / ref 空 / ref 格式不对 / 图片不在该人物名下 → <b>400</b>；
-     * 人物不存在 → <b>404</b>；编辑策略非 full → <b>403</b>（闸门在第一行，先于 body 解析）。</p>
+     * 人物不存在 → <b>404</b>；编辑策略非 full 且请求者不是站长 → <b>403</b>（闸门在第一行，先于 body 解析）。</p>
      */
     @PutMapping("/person/{id}/avatar")
     public Map<String, Object> setPersonAvatar(@PathVariable("id") Long id,
@@ -256,6 +273,41 @@ public class MediaEditController
         mediaEditPolicyService.requireWritable();
         Map<String, Object> out = mediaPersonService.clearAvatar(id);
         log.debug("站端清除人物头像 id={}", id);
+        return out;
+    }
+
+    /**
+     * 站端保存人物卡背景调整（P5.89）：body {@code {scale?, dx?, dy?}} → 解析好的人物节点
+     *
+     * <p>口径与 P5.88 的前端存储完全一致：{@code scale} 是缩放倍率（1 = 自动几何，0.5–3），
+     * {@code dx / dy} 是<b>卡片宽高的比例</b>（±2 = ±200%），不是 px。三个字段都可选，缺省按自动几何补齐；
+     * 越界值夹到值域内；最终等于自动几何 → 等价于清空（三列写 NULL）。</p>
+     *
+     * <p>闸门与其它站端写接口同一句 {@code requireWritable()}：P5.89 起<b>站长（role=owner）无视
+     * media.userEditing 三档</b>，普通用户 / 未登录只在 full 档可写。人物不存在 → 404。</p>
+     */
+    @PutMapping("/person/{id}/bg")
+    public Map<String, Object> setPersonBackground(@PathVariable("id") Long id,
+            @RequestBody(required = false) String rawBody)
+    {
+        mediaEditPolicyService.requireWritable();
+        Map<String, Object> body = parseObject(rawBody, true);
+        Map<String, Object> out = mediaPersonService.setBg(id,
+                optionalDecimalValue(body.get("scale"), "scale"),
+                optionalDecimalValue(body.get("dx"), "dx"),
+                optionalDecimalValue(body.get("dy"), "dy"));
+        log.debug("站端保存人物背景调整 id={} scale={} dx={} dy={}", id, body.get("scale"), body.get("dx"),
+                body.get("dy"));
+        return out;
+    }
+
+    /** 站端重置人物卡背景调整（P5.89）：{@code DELETE /media/person/{id}/bg} → 三键不再出现在回包里 */
+    @DeleteMapping("/person/{id}/bg")
+    public Map<String, Object> clearPersonBackground(@PathVariable("id") Long id)
+    {
+        mediaEditPolicyService.requireWritable();
+        Map<String, Object> out = mediaPersonService.clearBg(id);
+        log.debug("站端重置人物背景调整 id={}", id);
         return out;
     }
 

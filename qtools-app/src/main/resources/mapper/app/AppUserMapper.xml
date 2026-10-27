@@ -12,6 +12,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="avatar"       column="avatar"        />
         <result property="passwordHash" column="password_hash" />
         <result property="status"       column="status"        />
+        <result property="role"         column="role"          />
         <result property="banned"       column="banned"        />
         <result property="bannedReason" column="banned_reason" />
         <result property="bannedAt"     column="banned_at"     />
@@ -26,7 +27,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </resultMap>
 
     <sql id="selectUserColumns">
-        id, username, nickname, avatar, password_hash, status, banned, banned_reason, banned_at,
+        id, username, nickname, avatar, password_hash, status, role, banned, banned_reason, banned_at,
         review_note, reviewed_at, reviewed_by, invite_code, register_ip, created_at, last_login_at, updated_at
     </sql>
 
@@ -54,7 +55,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </select>
 
     <select id="selectByIdentity" resultMap="AppUserResult">
-        select u.id, u.username, u.nickname, u.avatar, u.password_hash, u.status, u.banned,
+        select u.id, u.username, u.nickname, u.avatar, u.password_hash, u.status, u.role, u.banned,
                u.banned_reason, u.banned_at, u.review_note, u.reviewed_at, u.reviewed_by,
                u.invite_code, u.register_ip, u.created_at, u.last_login_at, u.updated_at
         from app_user u
@@ -66,6 +67,21 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     <!-- 鉴权过滤器专用：只查裁决需要的列，避免每请求拖 avatar（MEDIUMTEXT） -->
     <select id="selectStatusById" resultMap="AppUserResult">
         select id, status, banned, banned_reason, review_note from app_user where id = #{id}
+    </select>
+
+    <!-- P5.89：站端闸门经 IAppRoleResolver 只查这一列（不拖整行，尤其不拖 avatar MEDIUMTEXT） -->
+    <select id="selectRoleById" resultType="java.lang.String">
+        select role from app_user where id = #{id}
+    </select>
+
+    <!-- P5.89：管理端行内切换角色；updated_at 与其它管理端写操作同一口径 -->
+    <update id="updateRole">
+        update app_user set role = #{role}, updated_at = now() where id = #{id}
+    </update>
+
+    <!-- P5.89：「不能把最后一个 owner 降级」的唯一依据 -->
+    <select id="countByRole" resultType="int">
+        select count(*) from app_user where role = #{role}
     </select>
 
     <insert id="insert" parameterType="com.qtools.app.domain.AppUser" useGeneratedKeys="true" keyProperty="id">

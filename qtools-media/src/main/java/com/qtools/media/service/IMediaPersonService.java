@@ -101,6 +101,26 @@ public interface IMediaPersonService
     Map<String, Object> clearAvatar(Long id);
 
     /**
+     * 站端保存人物卡背景调整（{@code PUT /api/media/person/{id}/bg}，P5.89）
+     *
+     * <p>口径与 P5.88 的前端存储完全一致（{@code QTools-C/src/views/media/personBgAdjust.js}）：
+     * {@code scale} 是缩放倍率（1 = 自动几何，值域 0.5–3）；{@code dx / dy} 是<b>卡片宽高的比例</b>
+     * （±2 = ±200%），不是 px —— 卡片是流式 grid（1600 宽 5 列 / 375 宽 1 列），存 px 换个视口就偏。
+     * 越界值在这里夹到值域内（前端滑块也夹，这里是最后一道）；三个字段都可选，缺省按自动几何
+     * （1 / 0 / 0）补齐，最终等于自动几何 → 等价于清空（三列写 NULL，不留垃圾行）。</p>
+     *
+     * <p>闸门在控制器第一行 {@code requireWritable()}：P5.89 起<b>站长（role=owner）无视三档</b>，
+     * 普通用户 / 未登录在 off、local 档 403。</p>
+     *
+     * @return 落库后的人物节点（放开时带 bgScale / bgDx / bgDy）
+     */
+    Map<String, Object> setBg(Long id, java.math.BigDecimal scale, java.math.BigDecimal dx,
+            java.math.BigDecimal dy);
+
+    /** 站端重置人物卡背景调整（{@code DELETE /api/media/person/{id}/bg}）：三列写回 NULL */
+    Map<String, Object> clearBg(Long id);
+
+    /**
      * 全量替换某视频的人物与角色
      * （管理端 {@code PUT /api/media/admin/videos/{id}/persons}、站端 {@code PUT /api/media/video/{id}/persons}）
      *

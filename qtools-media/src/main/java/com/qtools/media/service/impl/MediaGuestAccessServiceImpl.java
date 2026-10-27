@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import jakarta.servlet.http.HttpServletRequest;
@@ -216,6 +217,9 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
                 case "/media/thumb/p/{albumId}/{i}":
                 case "/media/preview/p/{albumId}/{i}":
                     return photoSeqBlocked(albumId, index);
+                // ---- P5.90 人物卡背景预渲染：出口是「头像原图」的像素，必须与它的来源根同口径
+                case "/media/person/{id}/card-bg":
+                    return personBgBlocked(pathVar);
                 // ---- 原文件 / 转码流 / 字幕：按相对路径 + 可选根 id
                 case "/media/file":
                 case "/media/stream":
@@ -234,6 +238,60 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
     }
 
     // ------------------------------------------------------------------ 各类目标
+
+    /**
+     * 人物卡背景（P5.90）：按<b>头像来源</b>判，不按人物判
+     *
+     * <p>人物行本身不分根（索引里对访客也照常列出名字与计数），真正带内容的是头像：
+     * photo 档指向某本相册的某一页、frame 档指向某个视频 —— 两者都能落到 {@code root_id}。
+     * 所以这里复用相册序号 / 视频根两条既有判定，口径与 {@code /thumb/p/<album>/<seq>}、
+     * {@code /frame/<id>} 完全一致：<b>头像取不到时，预渲染出来的图也必须取不到</b>，
+     * 否则这条新接口就成了「登录可见库根的图片外带通道」。</p>
+     */
+    private boolean personBgBlocked(String personId)
+    {
+        if (StringUtils.isEmpty(personId))
+        {
+            return false;
+        }
+        long id;
+        try
+        {
+            id = Long.parseLong(personId.trim());
+        }
+        catch (NumberFormatException e)
+        {
+            return false;
+        }
+        Map<String, Object> row = mediaGuestMapper.selectAvatarOfPerson(id);
+        if (row == null)
+        {
+            return false;
+        }
+        String kind = row.get("kind") == null ? "" : String.valueOf(row.get("kind")).trim().toLowerCase(Locale.ROOT);
+        String ref = row.get("ref") == null ? "" : String.valueOf(row.get("ref")).trim();
+        int hash = ref.indexOf('#');
+        String body = hash >= 0 ? ref.substring(0, hash).trim() : ref;
+        if ("photo".equals(kind))
+        {
+            int colon = body.indexOf(':');
+            if (colon <= 0)
+            {
+                return false;
+            }
+            return photoSeqBlocked(body.substring(0, colon).trim(), body.substring(colon + 1).trim());
+        }
+        if ("frame".equals(kind))
+        {
+            String[] parts = body.split(":");
+            if (parts.length < 3)
+            {
+                return false;
+            }
+            return isRootHidden(mediaGuestMapper.selectRootIdOfVideo(parts[1].trim()));
+        }
+        return false;
+    }
 
     /** 相册对未登录访客是否隐藏：它的图片里<b>有任何一张</b>落在收紧的根下就整册藏（保守方向） */
     private boolean albumBlocked(String albumId)

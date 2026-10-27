@@ -36,4 +36,14 @@ public interface MediaGuestMapper
 
     /** 按「册内序号」找图片所在根（老 URL {@code /thumb/p/<albumId>/<seq>} 用） */
     Integer selectRootIdOfPhotoBySeq(@Param("albumId") String albumId, @Param("seq") Integer seq);
+
+    /**
+     * 人物头像来源（P5.90：卡片背景预渲染接口要按「头像属于哪个根」判可见性）
+     *
+     * <p>只回两列：{@code avatar_kind} / {@code avatar_ref}。刻意不查 {@code selectPersonDetail}
+     * —— 那条 SQL 带 4 个子查询，只为判一个 404 太重。</p>
+     *
+     * @return {@code {kind, ref}}；人物不存在返回 null
+     */
+    java.util.Map<String, Object> selectAvatarOfPerson(@Param("id") Long id);
 }

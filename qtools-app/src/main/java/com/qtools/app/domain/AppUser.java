@@ -25,6 +25,15 @@ public class AppUser
     /** 审核状态：pending 待审核 / approved 已通过 / rejected 未通过（P5.79 起取代旧的 0 正常 / 1 停用） */
     private String status;
 
+    /**
+     * 角色（P5.89，两档）：{@code user} 普通用户 / {@code owner} 站长
+     *
+     * <p>站长拿站端 full 权限（无视 {@code media.userEditing} 三档，闸门只此一处：
+     * {@code MediaEditPolicyServiceImpl#requireWritable()}）。列 NOT NULL DEFAULT 'user'，
+     * 因此这里理论上不会为 null；迁移前的老行由 DDL 默认值兜住。</p>
+     */
+    private String role;
+
     /** 审核备注（拒绝原因等） */
     private String reviewNote;
 
@@ -112,6 +121,22 @@ public class AppUser
     public void setStatus(String status)
     {
         this.status = status;
+    }
+
+    public String getRole()
+    {
+        return role;
+    }
+
+    public void setRole(String role)
+    {
+        this.role = role;
+    }
+
+    /** 是否站长（null / 脏值一律 false：不认识的角色不当站长） */
+    public boolean isOwner()
+    {
+        return com.qtools.common.security.IAppRoleResolver.ROLE_OWNER.equals(role);
     }
 
     public String getReviewNote()

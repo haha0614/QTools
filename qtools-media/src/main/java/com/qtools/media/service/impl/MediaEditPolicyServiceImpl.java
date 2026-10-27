@@ -2,14 +2,21 @@ package com.qtools.media.service.impl;
 
 import java.util.LinkedHashSet;
 import java.util.Set;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
+import com.qtools.common.security.IAppRoleResolver;
+import com.qtools.common.security.IAppTokenVerifier;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaEditPolicyMapper;
 import com.qtools.media.service.IMediaEditPolicyService;
+import com.qtools.media.support.BearerTokens;
 
 /**
  * 媒体库「站端编辑策略」服务实现：三档 off / local / full
@@ -58,6 +65,19 @@ public class MediaEditPolicyServiceImpl implements IMediaEditPolicyService
     @Autowired
     private MediaEditPolicyMapper mediaEditPolicyMapper;
 
+    /**
+     * 用户端 token 校验 / 角色解析（都由 qtools-app 提供实现）
+     *
+     * <p>用 {@code ObjectProvider} 而不是直接 {@code @Autowired}：媒体模块单独部署或跑单测时
+     * 这两个 bean 不存在，{@code getIfAvailable()} 返回 null → 一切按「未登录 / 普通用户」处理，
+     * 不会启动失败（与 {@code MediaOwnerServiceImpl} 同一个写法）。</p>
+     */
+    @Autowired
+    private ObjectProvider<IAppTokenVerifier> appTokenVerifier;
+
+    @Autowired
+    private ObjectProvider<IAppRoleResolver> appRoleResolver;
+
     /** 缓存值（已归一化，一定是三个合法值之一） */
     private volatile String cachedLevel;
 
@@ -95,15 +115,98 @@ public class MediaEditPolicyServiceImpl implements IMediaEditPolicyService
         log.info("媒体库站端编辑策略改为 {}", clean);
     }
 
+    /**
+     * 站端写闸门（P5.89 起<b>唯一</b>的角色判定点）
+     *
+     * <p>顺序刻意是「先问角色、再读策略」：站长命中时连 {@code sys_config} 都不查（省一次库），
+     * 且不受 30s 策略缓存影响 —— 管理员把档位改回 off 时，站长照样能改人物头像 / 背景。</p>
+     *
+     * <p>为什么放在这里而不是每个 controller：站端 20+ 个写接口第一行都是这一句
+     * （{@code MediaEditController} / {@code MediaFilterController} / {@code MediaPlaylistController}），
+     * 角色逻辑写在实现里就只有一份，controller 一行都不用改。</p>
+     */
     @Override
     public String requireWritable()
     {
+        if (isCurrentOwner())
+        {
+            return getLevel();
+        }
         String level = getLevel();
         if (!LEVEL_FULL.equals(level))
         {
             throw new MediaException(403, BLOCKED_MESSAGE);
         }
         return level;
+    }
+
+    @Override
+    public String currentRole()
+    {
+        Long userId = currentUserId();
+        if (userId == null)
+        {
+            return null;
+        }
+        IAppRoleResolver resolver = appRoleResolver == null ? null : appRoleResolver.getIfAvailable();
+        return resolver == null ? null : resolver.roleOf(userId);
+    }
+
+    @Override
+    public boolean canWrite()
+    {
+        return isCurrentOwner() || LEVEL_FULL.equals(getLevel());
+    }
+
+    /** 当前请求者是否站长（未登录 / 没有角色解析组件一律 false） */
+    boolean isCurrentOwner()
+    {
+        return IAppRoleResolver.ROLE_OWNER.equals(currentRole());
+    }
+
+    /**
+     * 当前请求的登录账号 id —— <b>不读 controller 传进来的参数</b>，直接取线程绑定的请求
+     *
+     * <p>{@link RequestContextHolder} 是 Spring MVC 在派发时绑定的（同一个线程），因此
+     * {@code requireWritable()} 无需改签名、无需 controller 传参就能知道「这次请求是谁」。
+     * 非 HTTP 场景（单测 / 定时任务）取不到请求 → 返回 null → 按未登录处理，行为与 P5.89 之前一致。</p>
+     */
+    private Long currentUserId()
+    {
+        HttpServletRequest request = currentRequest();
+        if (request == null)
+        {
+            return null;
+        }
+        IAppTokenVerifier verifier = appTokenVerifier == null ? null : appTokenVerifier.getIfAvailable();
+        if (verifier == null)
+        {
+            return null;
+        }
+        String token = BearerTokens.of(request);
+        if (token == null)
+        {
+            return null;
+        }
+        try
+        {
+            return verifier.verifyUserId(token);
+        }
+        catch (RuntimeException e)
+        {
+            log.debug("站端闸门解析登录态异常，按未登录处理: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private static HttpServletRequest currentRequest()
+    {
+        var attributes = RequestContextHolder.getRequestAttributes();
+        if (attributes instanceof ServletRequestAttributes servlet)
+        {
+            return servlet.getRequest();
+        }
+        return null;
     }
 
     /** 清空本地缓存（写后调用；30s 后自然过期，因此外部改库最迟 30s 生效） */

@@ -1,5 +1,7 @@
 package com.qtools.media.service.impl;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -316,6 +318,72 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         return personNode(mediaPersonMapper.selectPersonDetail(id));
     }
 
+    // ------------------------------------------------------------------ 站端：背景调整持久化（P5.89）
+
+    /** 背景缩放值域（与 P5.88 前端 personBgAdjust.js 的 SCALE_MIN / SCALE_MAX 逐值一致） */
+    private static final BigDecimal BG_SCALE_MIN = new BigDecimal("0.5");
+
+    private static final BigDecimal BG_SCALE_MAX = new BigDecimal("3");
+
+    /** 偏移值域：卡片宽高的比例，±2 = ±200%（前端 OFFSET_LIMIT） */
+    private static final BigDecimal BG_OFFSET_LIMIT = new BigDecimal("2");
+
+    private static final BigDecimal BG_SCALE_AUTO = BigDecimal.ONE;
+
+    private static final BigDecimal BG_ZERO = BigDecimal.ZERO;
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> setBg(Long id, BigDecimal scale, BigDecimal dx, BigDecimal dy)
+    {
+        requirePerson(id);
+        BigDecimal cleanScale = clampBg(scale, BG_SCALE_AUTO, BG_SCALE_MIN, BG_SCALE_MAX, 3);
+        BigDecimal cleanDx = clampBg(dx, BG_ZERO, BG_OFFSET_LIMIT.negate(), BG_OFFSET_LIMIT, 4);
+        BigDecimal cleanDy = clampBg(dy, BG_ZERO, BG_OFFSET_LIMIT.negate(), BG_OFFSET_LIMIT, 4);
+        // 等于自动几何就不留垃圾行：清空三列（与前端 setAdjust「等于自动就删掉这条」同一口径）
+        if (isAutoBg(cleanScale, cleanDx, cleanDy))
+        {
+            mediaPersonMapper.clearPersonBg(id);
+            log.info("站端背景调整回到自动几何，已清空 id={}", id);
+            return personNode(mediaPersonMapper.selectPersonDetail(id));
+        }
+        mediaPersonMapper.updatePersonBg(id, cleanScale, cleanDx, cleanDy);
+        invalidateIndex();
+        log.info("站端保存人物背景调整 id={} scale={} dx={} dy={}", id, cleanScale, cleanDx, cleanDy);
+        return personNode(mediaPersonMapper.selectPersonDetail(id));
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> clearBg(Long id)
+    {
+        requirePerson(id);
+        mediaPersonMapper.clearPersonBg(id);
+        invalidateIndex();
+        log.info("站端重置人物背景调整 id={}", id);
+        return personNode(mediaPersonMapper.selectPersonDetail(id));
+    }
+
+    /** 夹到值域并定标度：null / 非数字走默认值（服务层最后一道，前端滑块本身也夹） */
+    private static BigDecimal clampBg(BigDecimal value, BigDecimal fallback, BigDecimal min, BigDecimal max, int scale)
+    {
+        BigDecimal v = value == null ? fallback : value;
+        if (v.compareTo(min) < 0)
+        {
+            v = min;
+        }
+        else if (v.compareTo(max) > 0)
+        {
+            v = max;
+        }
+        return v.setScale(scale, RoundingMode.HALF_UP);
+    }
+
+    private static boolean isAutoBg(BigDecimal scale, BigDecimal dx, BigDecimal dy)
+    {
+        return scale.compareTo(BG_SCALE_AUTO) == 0 && dx.signum() == 0 && dy.signum() == 0;
+    }
+
     // ------------------------------------------------------------------ 站端：手动头像（P5.48）
 
     @Override
@@ -578,6 +646,10 @@ public class MediaPersonServiceImpl implements IMediaPersonService
             node.put("avatarKind", person.getAvatarKind());
             node.put("avatarRef", person.getAvatarRef());
             node.put("avatarUrl", avatarUrlOf(person.getAvatarKind(), person.getAvatarRef(), person.getAvatarPath()));
+            // P5.89：人物墙的卡片背景按服务端值优先渲染（清单里一次带出，避免每人一次详情请求）
+            putIfNotEmpty(node, "bgScale", person.getBgScale());
+            putIfNotEmpty(node, "bgDx", person.getBgDx());
+            putIfNotEmpty(node, "bgDy", person.getBgDy());
             // P5.60：人物墙要能认出「不是人」的条目（如「未归类」相册容器）并过滤掉；
             // 只加键、不改既有键，老前端忽略它就等于行为不变
             node.put("isPlaceholder", isPlaceholderPerson(person));
@@ -655,6 +727,11 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         node.put("avatarKind", person.getAvatarKind());
         node.put("avatarRef", person.getAvatarRef());
         node.put("avatarUrl", avatarUrlOf(person.getAvatarKind(), person.getAvatarRef(), person.getAvatarPath()));
+        // P5.89：人物卡背景调整（站长持久化）。三键都缺 = 自动几何；前端按
+        // 「服务端值 > localStorage > 自动几何」取值，所以这里必须是「非空才输出」而不是回 null。
+        putIfNotEmpty(node, "bgScale", person.getBgScale());
+        putIfNotEmpty(node, "bgDx", person.getBgDx());
+        putIfNotEmpty(node, "bgDy", person.getBgDy());
         node.put("gender", person.getGender());
         node.put("birthday", formatDate(person.getBirthday()));
         node.put("useCount", person.getUseCount() == null ? 0 : person.getUseCount());
