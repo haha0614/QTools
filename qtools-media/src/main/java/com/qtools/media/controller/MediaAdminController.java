@@ -42,6 +42,7 @@ import com.qtools.media.service.IMediaOrganizeService;
 import com.qtools.media.service.IMediaPersonCardBgService;
 import com.qtools.media.service.IMediaPersonService;
 import com.qtools.media.service.IMediaPlaylistService;
+import com.qtools.media.service.IMediaRatingClassifyService;
 import com.qtools.media.service.IMediaRatingService;
 import com.qtools.media.service.IMediaRootArtifactService;
 import com.qtools.media.service.IMediaSavedFilterService;
@@ -49,6 +50,7 @@ import com.qtools.media.service.IMediaScanIngestService;
 import com.qtools.media.service.IMediaScanService;
 import com.qtools.media.service.IMediaStudioService;
 import com.qtools.media.service.IMediaSynopsisService;
+import com.qtools.media.service.IMediaTagNormalizeService;
 import com.qtools.media.service.IMediaWatchService;
 import static com.qtools.media.support.MediaBodyParser.booleanValue;
 import static com.qtools.media.support.MediaBodyParser.boolValue;
@@ -100,6 +102,10 @@ public class MediaAdminController extends BaseController
     @Autowired
     private IMediaOrganizeService mediaOrganizeService;
 
+    /** 标签原子化迁移（P6.03）：跑 doc/media-import/normalize-tags.js，返回脚本统计 */
+    @Autowired
+    private IMediaTagNormalizeService mediaTagNormalizeService;
+
     /** 作品简介自动生成（模板 / 本地模型 / 批量任务），P5.47 */
     @Autowired
     private IMediaSynopsisService mediaSynopsisService;
@@ -131,6 +137,10 @@ public class MediaAdminController extends BaseController
     /** 内容分级（P5.99）：视频 / 相册的单条与批量分级 + 分级可见性策略 */
     @Autowired
     private IMediaRatingService mediaRatingService;
+
+    /** 内容自动分级（P6.02）：规则（rating-rules.json）+ 本地模型兜底，一次跑批、可预览可执行 */
+    @Autowired
+    private IMediaRatingClassifyService mediaRatingClassifyService;
 
     /** 保存的筛选条件（站端写、管理端只读清单 + 清理） */
     @Autowired
@@ -432,6 +442,31 @@ public class MediaAdminController extends BaseController
                 boolValue(body.get("restricted")));
     }
 
+    /**
+     * 自动分级（P6.02）：body {@code {dryRun?:bool, only?:"all"|"video"|"album", limit?:int, useLlm?:bool, force?:bool}}
+     *
+     * <p><b>默认 dryRun=true</b>：不传就是预览，返回报告但不写库。管理端「维护 → 自动分级」先点一次预览，
+     * 看过每档计数 / 命中词 / 20 条样例 / 模型兜底结果，确认后带 {@code {dryRun:false}} 再调一次才写库。</p>
+     *
+     * <p>权限沿用 {@code media:admin:edit}（与单条分级同一个权限）：能手工改分级的人才能跑批量分级。
+     * {@code @Log} 只在写入时留下审计，dry-run 不落「改了哪些分级」的日志噪音。</p>
+     *
+     * <p>幂等：默认只把 {@code general}（含未分类）升级成更严的档，已经是 {@code guidance / restricted}
+     * 的条目不动（{@code force:true} 才覆盖），所以重复执行不会来回抖动。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-自动分级", businessType = BusinessType.UPDATE)
+    @PostMapping("/rating/classify")
+    public Map<String, Object> ratingClassify(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, false);
+        // 缺省 dryRun=true：预览是安全的默认值，写库必须显式 {dryRun:false}
+        Boolean dryRun = boolValue(body.get("dryRun"));
+        return mediaRatingClassifyService.classify(dryRun == null ? Boolean.TRUE : dryRun,
+                stringValue(body.get("only")), intValue(body.get("limit")), boolValue(body.get("useLlm")),
+                boolValue(body.get("force")));
+    }
+
     // ------------------------------------------------------------------ 软删 / 恢复
 
     /** 软删：移动到回收站并置 hidden=1（绝不真删） */
@@ -579,6 +614,10 @@ public class MediaAdminController extends BaseController
         request.setExclude(stringValue(body.get("exclude")));
         request.setNoFresh(booleanValue(body.get("noFresh")));
         request.setForce(booleanValue(body.get("force")));
+        // P6.04：维护抽屉的「当前筛选结果 / 选中项」范围。契约在 P5.10-B 就写了 videoIds
+        // （服务层只对 thumb / sprite / preview 生效并做形状 / 数量校验），但这里漏了绑定，
+        // 导致前端传了也被丢掉、实际整库跑。补上绑定，语义仍是「只处理这些 videoId」。
+        request.setVideoIds(stringsValue(body.get("videoIds"), "videoIds"));
         return mediaScanService.start(request);
     }
 
@@ -1181,6 +1220,31 @@ public class MediaAdminController extends BaseController
         return mediaOrganizeService.updateTag(id, stringValue(body.get("name")),
                 stringValue(body.get("color")), body.containsKey("color"),
                 longValue(body.get("parentId")), body.containsKey("parentId"));
+    }
+
+    /**
+     * 标签规范化（P6.03）：body {@code {dryRun}}，缺省 dryRun=true
+     *
+     * <p>把「非原子标签」按 {@code doc/media-import/tag-map.json} 的映射重建为原子标签：
+     * 组合标签拆开（{@code cos热舞 → cos + 热舞}）、近义合并（{@code asmr音声 → ASMR}）、
+     * 同一概念在多个 facet 下的重复行收敛成一行、{@code use_count} 按真实引用重算、
+     * 无引用且不在保留白名单里的标签删除。</p>
+     *
+     * <p><b>dryRun=false 会先备份</b> {@code media_tag} / {@code media_video_tag}
+     * （存在 {@code media_album_tag} 也带上）到 {@code doc/backup/tags_before_<ts>.sql}，再单事务写库；
+     * 写库后自动失效索引快照，站端筛选侧栏立刻只剩原子标签。</p>
+     *
+     * <p>幂等：连跑两遍，第二遍 0 变更（不写库、不产生新备份）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-标签规范化", businessType = BusinessType.UPDATE)
+    @PostMapping("/tags/normalize")
+    public Map<String, Object> normalizeTags(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        // 默认 dry-run：没有 body 或没给 dryRun 时绝不写库（按钮第一次点必须是预览）
+        boolean dryRun = !body.containsKey("dryRun") || booleanValue(body.get("dryRun"));
+        return mediaTagNormalizeService.normalize(dryRun);
     }
 
     /**

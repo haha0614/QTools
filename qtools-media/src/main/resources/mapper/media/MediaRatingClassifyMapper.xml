@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    自动分级（P6.02）：只读取数。
+
+    为什么 hidden=0 也写进 SQL：软删的条目在站端已经看不见，给它打限制级没有意义，
+    反而会在「按分级统计」时把一个已下架条目算进限制级里，让站长以为还有东西要处理。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaRatingClassifyMapper">
+
+    <select id="selectVideoRows" resultType="java.util.LinkedHashMap">
+        select id as id, title as title, folder as folder,
+               rel_path as relPath, content_rating as contentRating
+          from media_video
+         where hidden = 0
+         order by id asc
+    </select>
+
+    <select id="selectVideoTagRows" resultType="java.util.LinkedHashMap">
+        select video_id as videoId, name as name
+          from media_video_tag
+         order by video_id asc, name asc
+    </select>
+
+    <select id="selectAlbumRows" resultType="java.util.LinkedHashMap">
+        select id as id, title as title, coalesce(dir, '') as dir,
+               content_rating as contentRating
+          from media_album
+         where hidden = 0
+         order by id asc
+    </select>
+
+    <select id="selectAlbumPhotoRows" resultType="java.util.LinkedHashMap">
+        select album_id as albumId, rel_path as relPath
+          from media_photo
+         where hidden = 0
+         order by album_id asc, seq asc
+    </select>
+
+</mapper>

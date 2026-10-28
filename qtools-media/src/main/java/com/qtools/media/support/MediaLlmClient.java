@@ -120,6 +120,20 @@ public class MediaLlmClient
      */
     public Reply generate(String system, String prompt, int maxTokens, double temperature)
     {
+        return generate(system, prompt, maxTokens, temperature, 0);
+    }
+
+    /**
+     * 生成一段文本，并**按本次调用**缩短读超时（P6.02 自动分级：单条 15s 就要放弃，转下一条）
+     *
+     * <p>为什么需要这个重载：{@code qtools.media.llm.timeoutMs} 是给「人工点一次、等一份简介」定的
+     * （现网 60000ms）；自动分级要批量跑几百条，一条卡 60 秒会拖垮整轮。超时是<b>调用方语义</b>，
+     * 不是部署配置，所以由调用方传进来；小于 1000ms 视为「不覆盖」，沿用配置值。</p>
+     *
+     * @param timeoutMsOverride 本次调用的读超时（毫秒），{@code <1000} = 用配置里的值
+     */
+    public Reply generate(String system, String prompt, int maxTokens, double temperature, int timeoutMsOverride)
+    {
         MediaProperties.Llm cfg = properties.getLlm();
         if (!cfg.isEnabled())
         {
@@ -128,7 +142,7 @@ public class MediaLlmClient
         String provider = cfg.getEffectiveProvider();
         String url = cfg.getEffectiveBaseUrl();
         String model = cfg.getEffectiveModel();
-        int timeoutMs = cfg.getEffectiveTimeoutMs();
+        int timeoutMs = timeoutMsOverride >= 1000 ? timeoutMsOverride : cfg.getEffectiveTimeoutMs();
         String payload;
         try
         {

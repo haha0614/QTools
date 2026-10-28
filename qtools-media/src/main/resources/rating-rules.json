@@ -1,0 +1,543 @@
+{
+  "schemaVersion": 1,
+  "_about": [
+    "内容自动分级规则表（P6.02）—— 后端唯一真源。Java 侧 com.qtools.media.support.MediaRatingRules 读它，",
+    "脚本 QTools/doc/media-import/classify-rating.js 只调后端 POST /api/media/admin/rating/classify，不重复实现任何词表，",
+    "因此「脚本判定」与「管理端按钮判定」永远同一套结果（同一份 JSON + 同一段匹配代码）。",
+    "",
+    "可匹配字段：title 标题 / folder 视频所在目录名 / dir 相册目录 / path 相对路径（相册按名下每张照片的 rel_path 逐张判定后取最严） / tag 标签名。",
+    "",
+    "三条硬口径：",
+    "  1) 同一条目命中多档 → 取最严（general < guidance < restricted），与命中顺序无关；",
+    "  2) general 词与 restricted 词同时命中 → 一律 restricted（宁可高估，不可漏放）；",
+    "  3) 一条规则都不命中 = 「不确定」，交给本地模型兜底；模型失败则该条保持原值（默认 general）并写进报告。",
+    "",
+    "维护方式：改这个文件即可（开发期放在 classpath，改完重启后端生效）；也可以用 qtools.media.rating.rulesFile 指向外部同名文件，",
+    "请求时按 mtime 重新加载，不必重启。规则 id 必须稳定 —— 报告里的「命中词统计」按 id + 命中词聚合。"
+  ],
+  "defaultRating": "general",
+  "precedence": [
+    "general",
+    "guidance",
+    "restricted"
+  ],
+  "rules": [
+    {
+      "id": "restricted-masturbation",
+      "rating": "restricted",
+      "mode": "contains",
+      "pattern": "自慰",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "自慰是明确的成人性行为，与「穿着暴露」不是一回事，因此在限制级而不是家长指导级。"
+    },
+    {
+      "id": "restricted-masturbation-2",
+      "rating": "restricted",
+      "mode": "contains",
+      "pattern": "自摸",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "自摸与自慰同义，词表拆开是为了命中统计能看出是两个写法。"
+    },
+    {
+      "id": "restricted-masturbation-3",
+      "rating": "restricted",
+      "mode": "contains",
+      "pattern": "手淫",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "手淫同上；英文/日文音声素材里常与 ASMR 混排，因此优先级高于 guidance 的 ASMR 规则。"
+    },
+    {
+      "id": "restricted-oral",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "口交|口穴|口骑|舔耳|舔阴|舔舐|吸精|吞精|口腔特写",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "口交/舔/吸精等口部性行为；「口腔特写」在现有素材里专指口部性器官特写，按同档处理。"
+    },
+    {
+      "id": "restricted-ear-lick-ja",
+      "rating": "restricted",
+      "mode": "contains",
+      "pattern": "舐め",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "日文「舐め」（なめ＝舔）在音声/ASMR 标题里基本只用于「耳舐め／乳舐め」这类口部性行为，不用于普通描述，因此按限制级；与口部规则拆开是为了命中统计能分清中日两种写法。"
+    },
+    {
+      "id": "restricted-ear-lick-cn",
+      "rating": "restricted",
+      "mode": "contains",
+      "pattern": "舔耳",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "「舔耳」本来就是 restricted-oral 的口部性行为词，这里单列一条，只为让 ASMR 素材的命中统计能直接看出是舔耳；同词重复命中不影响判定（取最严）。"
+    },
+    {
+      "id": "restricted-ear-lick-cn2",
+      "rating": "restricted",
+      "mode": "contains",
+      "pattern": "耳舐",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "「耳舐」是「耳舐め」的中文写法，改动前只落在 guidance 的 ASMR 规则里（耳语级）；现按口部性行为升到限制级 —— 舔耳音声的性暗示明确，与「耳语」不是一回事。"
+    },
+    {
+      "id": "restricted-intercourse",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "性爱|做爱|床戏|性交|肛交|性器|性奋|交尾|插入|中出|骑乘|手交",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "性交与床戏是限制级的核心定义；性器（性器官）单列，因为露骨程度高于裸露。"
+    },
+    {
+      "id": "restricted-ejaculate",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "内射|射精|颜射|潮喷|潮吹|射满|精液",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "射精/内射/颜射/潮喷属于露骨性行为结果，绝不进家长指导级。"
+    },
+    {
+      "id": "restricted-nudity",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "裸舞|全裸|裸体|裸胸|裸照|裸拍|露点|下体|无码|无修正|三点全露",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "裸体与露点是裸露硬信号（「裸舞/全裸摆拍」在现有素材里都是成人内容）；「无码」直指成人影像。"
+    },
+    {
+      "id": "restricted-body-explicit",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "巨乳|爆乳|揉乳|乳房|乳头|奶子|胸部特写",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "tag"
+      ],
+      "note": "性器官特写与「巨乳/揉乳」这类成人向标签；普通「内衣」不在此列（走 guidance）。照片路径（path）刻意不参与这条：单张文件名带「巨乳女友」只是拍法描述，会让整本普通写真册升到限制级（实测误伤 1 例）；露骨词（全裸/口交/床戏）仍然全字段判，所以真正露骨的照片照样把整册顶到限制级。"
+    },
+    {
+      "id": "restricted-prostitution",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "援交|娼|妓|卖淫|嫖|包养",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "性交易相关词（含「娼仙魂/沦为妓娼」这类歌曲标题）按限制级处理，宁严勿宽。"
+    },
+    {
+      "id": "restricted-solicit",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "约炮|招嫖|一夜情|裸聊",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "约炮引流广告在现有素材里单独成组（广告/约炮引流_*），虽无裸露画面但属成人性服务引流。"
+    },
+    {
+      "id": "restricted-fetish",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "情趣|\\bSM\\b|捆绑|绳缚|拘束|肛|调教|足交|丝足|玩具",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "器具/癖好类（捆绑、绳缚、肛塞）在现有素材里与性行为同时出现，按限制级。「情趣内衣」会同时命中 guidance 的「内衣」，按最严取 restricted 是有意为之。"
+    },
+    {
+      "id": "restricted-obscene-word",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "淫|骚|荡妇|发情|色色|涩涩|色情|黄片",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "露骨淫秽用词（淫词艳曲/小骚女/淫荡魅魔）：标题即内容定性，中文素材里这几个字几乎不会出现在普通内容上。"
+    },
+    {
+      "id": "restricted-adult-marker",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "18禁|r18|nsfw|hentai|porn|adult|马赛克",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "英文/日文成人内容标记；正则大小写不敏感，所以 NSFW / Hentai / ADULT 都能命中。"
+    },
+    {
+      "id": "restricted-av-industry",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "\\bjav\\b|\\bav\\b|日本av|a片|av合集|无套|素股|エロ|\\bpmv\\b",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "成人影像产业词（JAV / A片 / 无套 / PMV 剪辑）——这些条目即使标题没写性行为，内容也必然露骨。"
+    },
+    {
+      "id": "restricted-fantasy-explicit",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "魅魔|触手|孕活|受孕|种付け|时间停止",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "魅魔/触手/孕活是成人向题材标签（吸精魅魔、精灵的异世界孕活），不是普通「cos 角色扮演」。"
+    },
+    {
+      "id": "restricted-cheating-plot",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "勾引|ntr|寝取|乱伦|近亲",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "NTR/寝取/勾引是成人向剧情标签；「未亡人」这类两可主题没有收录，避免误伤普通写真。"
+    },
+    {
+      "id": "restricted-strip",
+      "rating": "restricted",
+      "mode": "contains",
+      "pattern": "脱衣",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "脱衣舞 = 裸露表演，是裸露过程而非穿着暴露。"
+    },
+    {
+      "id": "restricted-bigscale",
+      "rating": "restricted",
+      "mode": "regex",
+      "pattern": "大尺度|福利姬|龅牙|露脸网红",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "「大尺度私拍」「福利姬」是成人私房摄影黑话；现有素材里带这两个词的条目都是成人写真。误伤代价低于漏放。"
+    },
+    {
+      "id": "guidance-photo-shoot",
+      "rating": "guidance",
+      "mode": "contains",
+      "pattern": "写真",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "写真（私房/比基尼写真）通常暴露但无性行为，是家长指导级的典型样本。"
+    },
+    {
+      "id": "guidance-swimsuit",
+      "rating": "guidance",
+      "mode": "regex",
+      "pattern": "泳装|泳衣|比基尼|水着|swimsuit",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "泳装类画面：暴露程度高但没有性行为。"
+    },
+    {
+      "id": "guidance-lingerie",
+      "rating": "guidance",
+      "mode": "regex",
+      "pattern": "内衣|蕾丝|吊带|维密|透视|胸罩|白网衫|亮片",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "内衣/蕾丝/透视属于穿着暴露；一旦同时出现裸露或行为词，按最严会被 restricted 顶掉。"
+    },
+    {
+      "id": "guidance-stocking",
+      "rating": "guidance",
+      "mode": "regex",
+      "pattern": "丝袜|黑丝|白丝|灰丝|网袜|长筒袜|吊带袜",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "丝袜/长筒袜是常见的软色情符号，单独出现只到家长指导级。"
+    },
+    {
+      "id": "guidance-cos",
+      "rating": "guidance",
+      "mode": "regex",
+      "pattern": "cos|cosplay|coser|角色扮演",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "cos 本身是中性的，但现有素材里的 cos 标题多带「白丝/内衣/热舞」，合并判定后落在指导级。"
+    },
+    {
+      "id": "guidance-suggestive",
+      "rating": "guidance",
+      "mode": "regex",
+      "pattern": "擦边|走光|若隐若现|纯欲|凹凸|性感|诱惑|暧昧|美腿|大长腿|身材|媚",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "擦边/走光/纯欲这类性暗示词：够不上限制级，但需要对家长提示。"
+    },
+    {
+      "id": "guidance-dance",
+      "rating": "guidance",
+      "mode": "regex",
+      "pattern": "热舞|艳舞|舞蹈",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "热舞/舞蹈（韩国女主播、兔女郎热舞）暴露但无性行为；「裸舞」已被 restricted 的裸露规则接住。"
+    },
+    {
+      "id": "guidance-asmr",
+      "rating": "guidance",
+      "mode": "regex",
+      "pattern": "asmr|音声|耳舐|耳语",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "ASMR / 音声内容多为耳语、双耳麦克风，性暗示强但无画面露骨；带露骨行为词的条目会被 restricted 顶掉。"
+    },
+    {
+      "id": "guidance-private-shot",
+      "rating": "guidance",
+      "mode": "regex",
+      "pattern": "私房|私影|私摄|私拍",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "私房摄影：暴露程度高于日常，但低于「大尺度私拍」（后者已在 restricted）。"
+    },
+    {
+      "id": "guidance-costume",
+      "rating": "guidance",
+      "mode": "regex",
+      "pattern": "女仆|兔女郎|旗袍|空姐|女警|秘书|制服",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "制服/角色装扮类写真常见标题；单独出现只是装扮，因此只到指导级。"
+    },
+    {
+      "id": "general-car",
+      "rating": "general",
+      "mode": "regex",
+      "pattern": "故障灯|交通标志|养车|油耗|胎压|手动挡|自动挡|车标|汽车|名车|转速|代驾|车祸|机油|轮胎",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "汽车养护/交规知识（现有 3 组「2026年9月30日 / 10月13日 / 10月20日」素材的主体）——大众级。"
+    },
+    {
+      "id": "general-tutorial",
+      "rating": "general",
+      "mode": "regex",
+      "pattern": "教程|教学|素材|演示|模板|练习|技巧|指南",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "教程/素材类内容，明确的大众级。"
+    },
+    {
+      "id": "general-wallpaper",
+      "rating": "general",
+      "mode": "regex",
+      "pattern": "壁纸|屏保|桌面|桌宠|wallpaper|screensaver",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "壁纸/桌面互动壁纸（FRAC_桌面互动壁纸 全组）是软件素材，不是成人内容——用户口径里明确列在大众级。"
+    },
+    {
+      "id": "general-vlog",
+      "rating": "general",
+      "mode": "regex",
+      "pattern": "vlog|日常|开箱|测评|探店",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "日常 vlog 类。"
+    },
+    {
+      "id": "general-business",
+      "rating": "general",
+      "mode": "regex",
+      "pattern": "营业执照|门脸|贴片|海报|文案|课件",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "经营/宣传物料（营业执照、门店门脸、直播贴片）——纯素材，大众级。"
+    },
+    {
+      "id": "general-software",
+      "rating": "general",
+      "mode": "regex",
+      "pattern": "软件|安装包|驱动|插件",
+      "fields": [
+        "title",
+        "folder",
+        "dir",
+        "path",
+        "tag"
+      ],
+      "note": "软件演示类。"
+    }
+  ]
+}

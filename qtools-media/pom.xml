@@ -23,6 +23,31 @@
             <artifactId>qtools-common</artifactId>
         </dependency>
 
+        <!--
+            单测（P6.02 起）：本模块原来没有测试源码，自动分级的规则引擎/模型回复解析是纯函数，
+            最值得单测。版本由 spring-boot-dependencies 统一管理，不写 version。
+            scope=test：不进运行时依赖，部署包不受影响。
+        -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                surefire 3.x 才认 JUnit 5（Maven 自带的老版本会「0 tests run」地静默通过）。
+                只在本模块声明，不动父 pom 的其它模块。
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>

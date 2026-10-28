@@ -158,6 +158,25 @@ public class MediaProperties
      */
     private String scanArgs = "--dir-mode=raw --allow-dup-dir";
 
+    /**
+     * 标签原子化迁移脚本（P6.03 管理端「标签规范化」按钮执行它）；留空则按钮直接报错
+     *
+     * <p>迁移逻辑只在这一份脚本里（{@code doc/media-import/normalize-tags.js}），
+     * 映射表是它同目录的 {@code tag-map.json}。后端不重写规则，只拼命令行并回传统计。</p>
+     */
+    private String tagNormalizeScript = "";
+
+    /**
+     * 标签规范化附加参数（与 {@code scanArgs} 同口径：部署环境参数写在这里）
+     *
+     * <p>需要 {@code --port=} 与 {@code --secret=}（脚本据此连库、读密码）；
+     * {@code --dry-run} / {@code --apply} / {@code --json-out=} 由后端接管，写在这里也会被忽略。</p>
+     */
+    private String tagNormalizeArgs = "";
+
+    /** 标签规范化超时（秒）：一次迁移是几百行标签行的重算，180 秒足够；超时强杀子进程 */
+    private int tagNormalizeTimeoutSeconds = 180;
+
     /** 单次扫描超时（分钟），超时强杀进程并置 failed */
     private int scanTimeoutMinutes = 10;
 
@@ -552,6 +571,98 @@ public class MediaProperties
     public void setLlm(Llm llm)
     {
         this.llm = llm;
+    }
+
+    // ------------------------------------------------------------------ 内容自动分级（P6.02）
+
+    /**
+     * 自动分级配置：{@code qtools.media.rating.*}
+     *
+     * <p>规则词表本身不在 yml 里（它在资源文件 {@code rating-rules.json}，见 {@code MediaRatingRules}）——
+     * yml 只放「用哪个文件」和「模型兜底的预算」，这样改词表不用改部署配置。</p>
+     */
+    private Rating rating = new Rating();
+
+    public Rating getRating()
+    {
+        return rating == null ? new Rating() : rating;
+    }
+
+    public void setRating(Rating rating)
+    {
+        this.rating = rating;
+    }
+
+    /**
+     * 自动分级配置（{@code qtools.media.rating.*}）
+     *
+     * <table border="1">
+     *   <caption>键 / 默认值 / 语义</caption>
+     *   <tr><th>键</th><th>默认</th><th>语义</th></tr>
+     *   <tr><td>rulesFile</td><td>空</td><td>空 = 读 classpath {@code rating-rules.json}；
+     *       非空 = 读这个外部文件（缺文件时接口直接报错，绝不静默用空词表把全站判成大众级）</td></tr>
+     *   <tr><td>llmConcurrency</td><td>2</td><td>模型兜底的并发数（本地 Ollama 单卡，2 路已经能把卡喂满）</td></tr>
+     *   <tr><td>llmTimeoutMs</td><td>15000</td><td>模型兜底<b>单条</b>超时；超时即放弃该条并保持原值</td></tr>
+     *   <tr><td>llmMaxItems</td><td>300</td><td>一轮最多送多少条给模型（防「词表漏了一个大词」时把几百条全丢给 3B 模型）</td></tr>
+     * </table>
+     */
+    public static class Rating
+    {
+        /** 外部规则文件；空 = classpath 里的 rating-rules.json */
+        private String rulesFile = "";
+
+        /** 模型兜底并发（夹到 [1,8]） */
+        private int llmConcurrency = 2;
+
+        /** 模型兜底单条超时（毫秒，夹到 >=1000） */
+        private int llmTimeoutMs = 15000;
+
+        /** 一轮里模型兜底的最大条数（夹到 [0,5000]，0 = 不限制） */
+        private int llmMaxItems = 300;
+
+        public String getRulesFile()
+        {
+            return rulesFile;
+        }
+
+        public void setRulesFile(String rulesFile)
+        {
+            this.rulesFile = rulesFile;
+        }
+
+        public int getLlmConcurrency()
+        {
+            return llmConcurrency < 1 ? 1 : Math.min(llmConcurrency, 8);
+        }
+
+        public void setLlmConcurrency(int llmConcurrency)
+        {
+            this.llmConcurrency = llmConcurrency;
+        }
+
+        public int getLlmTimeoutMs()
+        {
+            return llmTimeoutMs < 1000 ? 1000 : llmTimeoutMs;
+        }
+
+        public void setLlmTimeoutMs(int llmTimeoutMs)
+        {
+            this.llmTimeoutMs = llmTimeoutMs;
+        }
+
+        public int getLlmMaxItems()
+        {
+            if (llmMaxItems < 0)
+            {
+                return 0;
+            }
+            return Math.min(llmMaxItems, 5000);
+        }
+
+        public void setLlmMaxItems(int llmMaxItems)
+        {
+            this.llmMaxItems = llmMaxItems;
+        }
     }
 
     /**
@@ -1105,6 +1216,36 @@ public class MediaProperties
     public void setScanScript(String scanScript)
     {
         this.scanScript = scanScript;
+    }
+
+    public String getTagNormalizeScript()
+    {
+        return tagNormalizeScript;
+    }
+
+    public void setTagNormalizeScript(String tagNormalizeScript)
+    {
+        this.tagNormalizeScript = tagNormalizeScript;
+    }
+
+    public String getTagNormalizeArgs()
+    {
+        return tagNormalizeArgs;
+    }
+
+    public void setTagNormalizeArgs(String tagNormalizeArgs)
+    {
+        this.tagNormalizeArgs = tagNormalizeArgs;
+    }
+
+    public int getTagNormalizeTimeoutSeconds()
+    {
+        return tagNormalizeTimeoutSeconds;
+    }
+
+    public void setTagNormalizeTimeoutSeconds(int tagNormalizeTimeoutSeconds)
+    {
+        this.tagNormalizeTimeoutSeconds = tagNormalizeTimeoutSeconds;
     }
 
     public String getScanOutPath()

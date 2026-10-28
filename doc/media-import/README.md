@@ -12,6 +12,7 @@
 | `enrich-meta.js` | 读库调 ffprobe 补齐 `media_video` 的 `dur/fps/w/h/vcodec`（待补集合 = 任一列 NULL） | `--root=`、`--root-from-db`、`--root-id=`（只补一个库根 + 打 VERIFY 行）、`--ffprobe=`（或 `MS_FFPROBE`）、`--limit=`、`--dry-run`、`--force` |
 | `export-bundle.js` | 把一个库打成便携包目录（`manifest.json` + `media.sql.gz` + `user-state.json` + 可选 `thumbs/`） | `--root= --out=`（必填）、`--with-thumbs`、`--thumbs=`、`--with-stats`、`--dump=`、`--dry-run` |
 | `import-bundle.js` | 校验 `schemaVersion` 后把便携包导入目标库（**表级替换**），可选合并用户资产 | `--in=`（必填）、`--db=`、`--create-schema`、`--merge-user-state`、`--force`、`--dry-run` |
+| `classify-rating.js` | **内容自动分级**（P6.02）：判大众级 / 家长指导 / 限制级。**不连库改数据、也不实现规则** —— 它调后端 `POST /api/media/admin/rating/classify`，与管理端「维护 → 自动分级」按钮同一套词表与同一段判定代码 | `--dry-run`（默认）、`--apply`、`--only=video\|album\|all`、`--limit=`、`--use-llm`、`--force`、`--token=`（或 `--user= --pass=`）、`--api=`、`--json`，可选 `--mysql= --host= --port= --db= --secret=`（只用于跑完核对库里真实分布）、`--root-from-db` |
 
 每个脚本各一条最小可用示例（口令只走 `MYSQL_PWD` 或 `--secret`，见第 2 节的第 0 步）：
 
@@ -21,7 +22,13 @@ node ...\media-import\build-thumbs.js  --root='D:\我的媒体' --thumbs='D:\我
 node ...\media-import\enrich-meta.js   --root='D:\我的媒体' --port=3307
 node ...\media-import\export-bundle.js --root='D:\我的媒体' --out='D:\bundle\qtools' --with-thumbs
 node ...\media-import\import-bundle.js --in='D:\bundle\qtools' --db=qtools_new --create-schema --merge-user-state
+# 内容自动分级（P6.02）：先预览，确认分布后再 --apply；规则词表在后端 rating-rules.json
+node ...\media-import\classify-rating.js --api=http://127.0.0.1:8080 --token=<管理端 JWT> --use-llm
+node ...\media-import\classify-rating.js --api=http://127.0.0.1:8080 --token=<管理端 JWT> --use-llm --apply
 ```
+
+> `classify-rating.js` 是唯一一个**不直接连库改数据**的脚本：分级的「判定」必须只有一处（后端），
+> 否则脚本与管理端按钮的词表迟早漂移。详见 `doc/媒体库自动分级.md`。
 
 ### 1. 目录怎么摆
 
@@ -907,6 +914,32 @@ node build-thumbs.js --root-from-db --thumbs=<缩略图根>
   否则列表查询会报 `Unknown column`（脚本侧反而会整段降级，不报错）。
 
 ---
+
+### 18. 标签原子化迁移（P6.03）
+
+标签列表里曾经同时出现 `cos` / `cos热舞` / `热舞`，还有 `ASMR` / `asmr音声` / `音声`、
+`女仆` / `女仆装` / `黑色蕾丝女仆装` 这种包含链，以及同一个词挂在 `分类` / `类型` / `题材`
+三个 facet 下的重复 chip。`normalize-tags.js` 把这套标签按 `tag-map.json` 重建成「一个标签 = 一种含义 = 一个 facet」。
+
+```bash
+# 预览（默认 --dry-run，不写库不备份；--json-out 出一份机器可读统计）
+node normalize-tags.js --dry-run --mysql=<mysql.exe> --port=3307 --db=qtools --secret=<secret.yml>
+
+# 执行：先 mysqldump media_tag / media_video_tag 到 doc/backup/tags_before_<ts>.sql，再单事务写库
+node normalize-tags.js --apply   --mysql=<mysql.exe> --port=3307 --db=qtools --secret=<secret.yml>
+```
+
+- **映射表** `tag-map.json`：`facets`（每个原子标签的唯一 facet）+ `mapping`（旧标签 → 一个或多个原子标签，
+  支持链式解析与环检测）+ `drop`（直接删）+ `keep`（保留白名单，`use_count=0` 也不删）。
+  也接受最简裸映射 `{ "cos热舞": ["cos","热舞"] }`。非法值逐条报错（键名 / 下标 / 实际值都会写进信息）。
+- **做法**：不是逐条改名，而是**按视频重算目标态**（原子名 + 规范 facet + 字典 id），只重建有差异的视频；
+  于是拆分 / 合并、同概念多 facet 去重、`tag_id` 回填三件事一次做完。
+- **幂等**：第二遍 `hasWork=false` → 0 变更、不写库、不产生新备份。
+- **删除**：只删 `use_count=0` 且不在 `keep` 里的标签；删前把子标签 `parent_id` 置空。
+- **管理端**：媒体库 → 维护 → 标签体系（原子化）→ 标签规范化，先 dry-run 预览再确认执行；
+  后端入口 `POST /api/media/admin/tags/normalize`（body `{dryRun}`，缺省 true）。
+- 单测：`node --test QTools/doc/media-import/normalize-tags.test.js`（25 条）。
+- 迁移实测与决策记录见 `doc/媒体库标签原子化重构.md`。
 
 ## 历史迁移：旧 Node 站 `index.json` → MySQL（`import.js`，保留）
 

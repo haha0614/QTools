@@ -69,6 +69,14 @@ qtools:
     # 绝不可带 --truncate（会清 6 张 media_* 表）；旧脚本的 --dir-mode=raw --allow-dup-dir 已无意义，删掉
     scanArgs: '--root=E:/111/视频 --port=3307 --album-mode=prefix --secret=${qtools.home:E:/111/project/QTools}/QTools/qtools-admin/src/main/resources/secret.yml'
     scanTimeoutMinutes: 10
+    # 标签原子化迁移（P6.03）：管理端「媒体库 → 维护 → 标签规范化」按钮执行本脚本
+    #   脚本把 media_video_tag 的非原子标签按同目录 tag-map.json 重建为原子标签，
+    #   并收敛 media_tag 字典（一个标签 = 一种含义 = 一个 facet）。
+    #   后端只拼命令行 + 回传统计：--dry-run / --apply / --json-out= 由后端接管，
+    #   本行只写部署参数（--port= / --secret= / 可选 --map=）。写库前脚本自动 mysqldump 备份。
+    tagNormalizeScript: '${qtools.home:E:/111/project/QTools}/QTools/doc/media-import/normalize-tags.js'
+    tagNormalizeArgs: '--port=3307 --secret=${qtools.home:E:/111/project/QTools}/QTools/qtools-admin/src/main/resources/secret.yml'
+    tagNormalizeTimeoutSeconds: 180
     # 扫描行为细化（P6.00）：自带封面的文件名后缀集合（逗号列表，yml 写成数组）
     #   规则：同一目录里「视频名+后缀.jpg|png|...」与「视频名.mp4|mkv|...」同时存在 →
     #         这张图是该视频的自带封面：不入相册/图片站，只作为视频海报的来源
