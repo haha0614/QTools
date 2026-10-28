@@ -458,6 +458,9 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         // P5.99：人名 → 肉眼可见的视频条数。人物节点现在按「可见相册数 + 可见视频数」判定存在与否
         //（只按相册算的话，一个名下只有视频、相册全被收紧的人物会在未登录时整条消失）。
         Map<String, Integer> visibleVideosByPerson = new HashMap<>();
+        // P6.09：人名 → 分级 → 可见视频条数。人物页要按「该人物在该分级下有没有可见作品」筛选，
+        // 而 people[].count / videos 只有总数、没有分级维度，前端只能拿到名字 —— 所以判定数据在这里算好。
+        Map<String, Map<String, Integer>> videoRatingsByPerson = new HashMap<>();
         int posterCount = 0;
         for (MediaVideo video : videos)
         {
@@ -477,6 +480,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
                 if (personName != null)
                 {
                     visibleVideosByPerson.merge(personName, Integer.valueOf(1), Integer::sum);
+                    bumpPersonRating(videoRatingsByPerson, personName, video.getContentRating());
                 }
             }
         }
@@ -559,6 +563,9 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             // P5.99：可见视频条数（未登录口径）。前端人物墙仍按 videos[].persons 自行累加，
             // 这个键只服务「名下有视频但相册全不可见」的人物在站端仍能显示计数。
             node.put("videos", ownVideos);
+            // P6.09：该人物在每个分级下有多少**可见**作品（相册 + 视频合计）—— 人物页分级筛选的判定数据。
+            // 只输出 > 0 的档位（与 ratings[]「只含有条目的分级」同一约定），档位顺序 = MediaRating 展示顺序。
+            node.put("byRating", personRatingCounts(own, videoRatingsByPerson.get(person.getName())));
             node.put("photos", photos);
             node.put("albums", albumIds);
             node.put("cover", own.isEmpty() ? null : own.get(0).getCoverPath());
@@ -651,6 +658,61 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             node.put("label", MediaRating.labelOf(entry.getKey()));
             node.put("count", entry.getValue());
             out.add(node);
+        }
+        return out;
+    }
+
+    /**
+     * P6.09：单个等级的分级计数（人名 → 分级 → 件数）。只累计**已筛过可见性**的行 ——
+     * 调用方传进来的 videos / albums 本来就是「当前访客看得见」的那一份，所以这里不再判一次。
+     */
+    private static void bumpPersonRating(Map<String, Map<String, Integer>> table, String name, String rating)
+    {
+        String value = MediaRating.normalize(rating);
+        Map<String, Integer> counts = table.computeIfAbsent(name, k -> new LinkedHashMap<>());
+        Integer prev = counts.get(value);
+        counts.put(value, Integer.valueOf(prev == null ? 1 : prev.intValue() + 1));
+    }
+
+    /**
+     * P6.09：人物的分级分布 {@code {general: n, guidance: n}}（相册 + 视频合计，只含 &gt; 0 的档位）。
+     *
+     * <p>统计口径 = 「这个人在这一档下有没有东西可看」：人物页按它筛选人物，
+     * 与 {@code albums[].contentRating} / {@code videos[].contentRating} 同源，所以永远不会出现
+     * 「人物出现在某档下、点进去却一条都没有」。档位顺序跟随 {@link MediaRating#values()}，
+     * 前端 chip 顺序因此稳定。</p>
+     *
+     * @param albums        该人物名下**可见**的相册
+     * @param videoCounts   该人物名下可见视频的分级分布（可为 null）
+     * @return 有序分级计数；没有任何可见作品时是空 map（前端据此隐藏该人物）
+     */
+    private static Map<String, Integer> personRatingCounts(List<MediaAlbum> albums,
+            Map<String, Integer> videoCounts)
+    {
+        Map<String, Integer> merged = new LinkedHashMap<>();
+        for (MediaAlbum album : albums)
+        {
+            String value = MediaRating.normalize(album.getContentRating());
+            Integer prev = merged.get(value);
+            merged.put(value, Integer.valueOf(prev == null ? 1 : prev.intValue() + 1));
+        }
+        if (videoCounts != null)
+        {
+            for (Map.Entry<String, Integer> entry : videoCounts.entrySet())
+            {
+                Integer prev = merged.get(entry.getKey());
+                merged.put(entry.getKey(), Integer.valueOf((prev == null ? 0 : prev.intValue())
+                        + (entry.getValue() == null ? 0 : entry.getValue().intValue())));
+            }
+        }
+        Map<String, Integer> out = new LinkedHashMap<>();
+        for (String value : MediaRating.values())
+        {
+            Integer n = merged.get(value);
+            if (n != null && n.intValue() > 0)
+            {
+                out.put(value, n);
+            }
         }
         return out;
     }
