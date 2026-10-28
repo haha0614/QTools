@@ -680,21 +680,45 @@ public class MediaPersonServiceImpl implements IMediaPersonService
 
     // ------------------------------------------------------------------ 站端（只读）
 
+    /**
+     * 人物清单（站端 /person 列表）
+     *
+     * <p>P5.99：未登录访客（且确有收紧）时口径改成「只列有名下可见作品的人物」，
+     * 并把计数与头像换成<b>可见口径</b>（全量计数本身就是信息泄露：一个只出现在限制级内容里的人物，
+     * 名字 + 作品数都在告诉访客「这里有东西」）。</p>
+     */
     @Override
     public List<Map<String, Object>> personBriefList()
     {
+        Map<Long, Map<String, Object>> stats = guestPersonStats();
         List<Map<String, Object>> out = new ArrayList<>();
         for (MediaPerson person : mediaPersonMapper.selectPersonBriefList())
         {
+            Map<String, Object> stat = stats == null ? null : stats.get(person.getId());
+            if (stats != null && !hasVisibleWorks(stat))
+            {
+                // 名下没有任何可见作品：整条不出现（列表里消失，与详情 404 同口径）
+                continue;
+            }
             Map<String, Object> node = new LinkedHashMap<>();
             node.put("id", person.getId());
             node.put("name", person.getName());
             node.put("alias", person.getAlias());
             node.put("useCount", person.getUseCount() == null ? 0 : person.getUseCount());
             // P5.48：人物墙首屏就要头像，清单里直接把解析好的 URL 带上（否则 N 个人物 N 个详情请求）
-            node.put("avatarKind", person.getAvatarKind());
-            node.put("avatarRef", person.getAvatarRef());
-            node.put("avatarUrl", avatarUrlOf(person.getAvatarKind(), person.getAvatarRef(), person.getAvatarPath()));
+            // P5.99：头像来源（相册里的图 / 视频的帧）不可见时整组头像字段回 null，
+            // 前端自动回落到索引封面 → 视频帧 → 首字占位（那两级也已经按可见性筛过）
+            boolean avatarOk = avatarVisible(person);
+            node.put("avatarKind", avatarOk ? person.getAvatarKind() : null);
+            node.put("avatarRef", avatarOk ? person.getAvatarRef() : null);
+            node.put("avatarUrl", avatarOk ? avatarUrlOf(person.getAvatarKind(), person.getAvatarRef(),
+                    person.getAvatarPath()) : null);
+            if (stats != null && !avatarOk)
+            {
+                // 明确告诉前端「头像是被可见性挡掉的」，而不是「这个人物没设头像」——
+                // 两者的前端行为不同：前者必须显示默认头像（首字占位），后者才是逐级回退。
+                node.put("avatarHidden", Boolean.TRUE);
+            }
             // P5.89：人物墙的卡片背景按服务端值优先渲染（清单里一次带出，避免每人一次详情请求）
             putIfNotEmpty(node, "bgScale", person.getBgScale());
             putIfNotEmpty(node, "bgDx", person.getBgDx());
@@ -702,15 +726,75 @@ public class MediaPersonServiceImpl implements IMediaPersonService
             // P5.60：人物墙要能认出「不是人」的条目（如「未归类」相册容器）并过滤掉；
             // 只加键、不改既有键，老前端忽略它就等于行为不变
             node.put("isPlaceholder", isPlaceholderPerson(person));
+            if (stats != null)
+            {
+                // 未登录：这三个计数给**可见口径**（登录用户不出现这三个键，行为与改动前一致 ——
+                // 他的计数来自逐人详情接口，这里多给一份只会让排序口径与详情不一致）
+                node.put("videoCount", longOf(stat, "videoCount"));
+                node.put("albumCount", longOf(stat, "albumCount"));
+                node.put("photoCount", longOf(stat, "photoCount"));
+            }
             out.add(node);
         }
         return out;
     }
 
+    /**
+     * 人物详情（站端）
+     *
+     * <p>P5.99：未登录访客请求一个「名下没有任何可见作品」的人物 → 404（与不存在同口径）。
+     * 有可见作品时计数换成可见口径，封面换成「可见首册的封面 / 可见首视频」，
+     * 头像来源不可见时 {@code avatarUrl} 回 null（前端自动回落首字占位）。</p>
+     */
     @Override
     public Map<String, Object> personDetail(Long id)
     {
-        return personNode(requirePerson(id));
+        MediaPerson person = requirePerson(id);
+        Map<Long, Map<String, Object>> stats = guestPersonStats();
+        if (stats == null)
+        {
+            return personNode(person);
+        }
+        Map<String, Object> stat = stats.get(id);
+        if (!hasVisibleWorks(stat))
+        {
+            // 未登录 + 名下没有任何可见作品：与不存在不可区分
+            throw MediaException.notFound("人物不存在: " + id);
+        }
+        Map<String, Object> node = personNode(person);
+        node.put("videoCount", longOf(stat, "videoCount"));
+        node.put("albumCount", longOf(stat, "albumCount"));
+        node.put("photoCount", longOf(stat, "photoCount"));
+        String coverPath = textOf(stat, "coverPath");
+        if (coverPath == null)
+        {
+            node.remove("coverPath");
+        }
+        else
+        {
+            node.put("coverPath", coverPath);
+        }
+        String coverVideoId = textOf(stat, "coverVideoId");
+        if (coverVideoId == null)
+        {
+            node.remove("coverVideoId");
+        }
+        else
+        {
+            node.put("coverVideoId", coverVideoId);
+        }
+        if (!avatarVisible(person))
+        {
+            // 头像来自不可见内容：整组头像字段回 null/移除，并明确标记 avatarHidden=true ——
+            // 前端据此**直接显示默认头像（首字占位）**，不再拿相册封面 / 视频帧顶上：
+            // 站长给这个人物挑的就是这张图，它不可见时该退回默认头像，而不是换一张无关的图。
+            node.put("avatarUrl", null);
+            node.put("avatarKind", null);
+            node.put("avatarRef", null);
+            node.put("avatarPath", null);
+            node.put("avatarHidden", Boolean.TRUE);
+        }
+        return node;
     }
 
     @Override
@@ -721,8 +805,10 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         int safeSize = size < 1 ? PAGE_SIZE_DEFAULT : Math.min(size, PAGE_SIZE_MAX);
         Map<String, Object> out = new LinkedHashMap<>();
         List<Integer> guestHidden = guestHiddenRootIds();
-        out.put("rows", mediaPersonMapper.selectPersonVideoPage(id, (safePage - 1) * safeSize, safeSize, guestHidden));
-        out.put("total", mediaPersonMapper.countPersonVideos(id, guestHidden));
+        List<String> guestRatings = guestHiddenRatings();
+        out.put("rows", mediaPersonMapper.selectPersonVideoPage(id, (safePage - 1) * safeSize, safeSize,
+                guestHidden, guestRatings));
+        out.put("total", mediaPersonMapper.countPersonVideos(id, guestHidden, guestRatings));
         out.put("page", safePage);
         out.put("size", safeSize);
         return out;
@@ -736,8 +822,10 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         int safeSize = size < 1 ? PAGE_SIZE_DEFAULT : Math.min(size, PAGE_SIZE_MAX);
         Map<String, Object> out = new LinkedHashMap<>();
         List<Integer> guestHidden = guestHiddenRootIds();
-        out.put("rows", mediaPersonMapper.selectPersonAlbumPage(id, (safePage - 1) * safeSize, safeSize, guestHidden));
-        out.put("total", mediaPersonMapper.countPersonAlbums(id, guestHidden));
+        List<String> guestRatings = guestHiddenRatings();
+        out.put("rows", mediaPersonMapper.selectPersonAlbumPage(id, (safePage - 1) * safeSize, safeSize,
+                guestHidden, guestRatings));
+        out.put("total", mediaPersonMapper.countPersonAlbums(id, guestHidden, guestRatings));
         out.put("page", safePage);
         out.put("size", safeSize);
         return out;
@@ -758,6 +846,139 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         }
         Set<Integer> hidden = mediaGuestAccessService.hiddenRootIds();
         return hidden.isEmpty() ? null : new ArrayList<>(hidden);
+    }
+
+    /** 未登录访客要排除的分级值（P5.99，口径同 {@link #guestHiddenRootIds()}：登录用户恒 null） */
+    private List<String> guestHiddenRatings()
+    {
+        if (!mediaGuestAccessService.isGuest())
+        {
+            return null;
+        }
+        Set<String> hidden = mediaGuestAccessService.hiddenRatings();
+        return hidden.isEmpty() ? null : new ArrayList<>(hidden);
+    }
+
+    /**
+     * 未登录访客的人物可见口径（P5.99）
+     *
+     * @return 人物 id → {@code {videoCount, albumCount, photoCount, coverPath, coverVideoId}}；
+     *         <b>null</b> = 当前不是「有收紧的未登录访客」，所有调用方都该走改动前的全量逻辑
+     */
+    private Map<Long, Map<String, Object>> guestPersonStats()
+    {
+        if (!mediaGuestAccessService.isGuest() || !mediaGuestAccessService.hasGuestRestriction())
+        {
+            return null;
+        }
+        try
+        {
+            Map<Long, Map<String, Object>> out = new LinkedHashMap<>();
+            for (Map<String, Object> row : mediaPersonMapper.selectGuestPersonStats(guestHiddenRootIds(),
+                    guestHiddenRatings()))
+            {
+                Long personId = row.get("personId") instanceof Number num ? Long.valueOf(num.longValue()) : null;
+                if (personId != null)
+                {
+                    out.put(personId, row);
+                }
+            }
+            return out;
+        }
+        catch (RuntimeException e)
+        {
+            // 分级列 / 策略表还没迁移：退回全量逻辑（宁可多显示，也不让人物页整页 500）
+            log.warn("读取人物可见口径失败（按全量处理）: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** 名下是否还有可见作品：视频与相册任一侧 > 0 */
+    private static boolean hasVisibleWorks(Map<String, Object> stat)
+    {
+        if (stat == null)
+        {
+            return false;
+        }
+        return longOf(stat, "videoCount") > 0 || longOf(stat, "albumCount") > 0;
+    }
+
+    private static long longOf(Map<String, Object> row, String key)
+    {
+        if (row == null)
+        {
+            return 0L;
+        }
+        return longOfObject(row.get(key));
+    }
+
+    private static long longOfObject(Object value)
+    {
+        if (value instanceof Number number)
+        {
+            return number.longValue();
+        }
+        if (value == null)
+        {
+            return 0L;
+        }
+        try
+        {
+            return Long.parseLong(String.valueOf(value).trim());
+        }
+        catch (NumberFormatException e)
+        {
+            return 0L;
+        }
+    }
+
+    private static String textOf(Map<String, Object> row, String key)
+    {
+        if (row == null)
+        {
+            return null;
+        }
+        Object value = row.get(key);
+        if (value == null)
+        {
+            return null;
+        }
+        String text = String.valueOf(value).trim();
+        return text.isEmpty() ? null : text;
+    }
+
+    /**
+     * 未登录访客能不能看到这个人物的头像来源（P5.99）
+     *
+     * <p>三种来源：{@code photo} 指向某本相册里的第几张（判那本相册）、{@code frame} 指向某个视频的某一秒
+     * （判那个视频）、{@code url} 是外部 / 内联图片（恒可见）。没有手动头像（只有历史 avatarPath）时不拦 ——
+     * 那不是媒体内容，是一个已经落盘的站内图片。</p>
+     */
+    private boolean avatarVisible(MediaPerson person)
+    {
+        if (person == null || !mediaGuestAccessService.hasGuestRestriction())
+        {
+            return true;
+        }
+        String kind = person.getAvatarKind() == null ? "" : person.getAvatarKind().trim().toLowerCase(java.util.Locale.ROOT);
+        String ref = person.getAvatarRef() == null ? "" : person.getAvatarRef().trim();
+        int hash = ref.indexOf('#');
+        String body = hash < 0 ? ref : ref.substring(0, hash).trim();
+        if (AVATAR_KIND_PHOTO.equals(kind) && !body.isEmpty())
+        {
+            int colon = body.indexOf(':');
+            if (colon <= 0)
+            {
+                return true;
+            }
+            return !mediaGuestAccessService.isAlbumHidden(body.substring(0, colon).trim());
+        }
+        if (AVATAR_KIND_FRAME.equals(kind))
+        {
+            String[] parts = frameBodyOf(body);
+            return parts == null || !mediaGuestAccessService.isVideoHidden(parts[0]);
+        }
+        return true;
     }
 
     // ------------------------------------------------------------------ 输出 / 校验 / 工具

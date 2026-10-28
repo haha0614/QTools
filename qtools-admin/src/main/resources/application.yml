@@ -69,6 +69,18 @@ qtools:
     # 绝不可带 --truncate（会清 6 张 media_* 表）；旧脚本的 --dir-mode=raw --allow-dup-dir 已无意义，删掉
     scanArgs: '--root=E:/111/视频 --port=3307 --album-mode=prefix --secret=${qtools.home:E:/111/project/QTools}/QTools/qtools-admin/src/main/resources/secret.yml'
     scanTimeoutMinutes: 10
+    # 扫描行为细化（P6.00）：自带封面的文件名后缀集合（逗号列表，yml 写成数组）
+    #   规则：同一目录里「视频名+后缀.jpg|png|...」与「视频名.mp4|mkv|...」同时存在 →
+    #         这张图是该视频的自带封面：不入相册/图片站，只作为视频海报的来源
+    #         （media_video.poster_source='file' + poster_file 指向它）。
+    #   优先级：scan-media.js 的 --cover-suffixes= > 环境变量 MS_COVER_SUFFIXES（本项由 Java 注入）> 脚本默认值
+    #   大小写不敏感、前后空白忽略；留空数组 = 关闭识别（图片照旧全部入库）
+    scan:
+      coverSuffixes:
+        - '-封面'
+        - '-cover'
+        - '_cover'
+        - '_封面'
     # 扫描入库（P5.91 管理端「扫描入库」页）：同一个 scan-media.js，但 --root= / --root-id= 由页面选中的
     # media_root 行决定（不读 scanArgs 里的 --root=），开关由请求决定（--dry-run / --only-video /
     # --only-photo / --limit= / --purge-unclaimed），DB 连接仍来自上面的 scanArgs（--port= / --secret=）

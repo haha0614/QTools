@@ -24,12 +24,18 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="vcodec"     column="vcodec"      />
         <result property="browserOk"  column="browser_ok"  />
         <result property="posterPath" column="poster_path" />
+        <!-- P6.00 封面来源（doc/media_video_poster_source.sql）：frame 截帧 / file 自带封面 / manual 手动；
+             管理端媒体库列表的「封面」列据此打「自带封面」标记 -->
+        <result property="posterSource" column="poster_source" />
+        <result property="posterFile"   column="poster_file"   />
         <result property="docPath"    column="doc_path"    />
         <result property="subPath"    column="sub_path"    />
         <result property="hidden"     column="hidden"      />
         <result property="mtime"      column="mtime"       />
         <!-- M3-A 组织能力：管理端列表直接回显人工评分 0-100（P5-A 扩容；null = 未评分） -->
         <result property="rating"     column="rating"      />
+        <!-- P5.99 内容分级（doc/media_content_rating.sql）：列表里回显 + 行内下拉改它 -->
+        <result property="contentRating" column="content_rating" />
         <!-- 缺失文件（doc/media_missing.sql）：1=扫描时磁盘上不存在；last_seen=最后一次看到它 -->
         <result property="missing"    column="missing"     />
         <result property="lastSeen"   column="last_seen"   />
@@ -44,6 +50,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="bytes"      column="bytes"       />
         <result property="coverPath"  column="cover_path"  />
         <result property="note"       column="note"        />
+        <!-- P5.99 内容分级：相册列表回显 + 行内下拉改它 -->
+        <result property="contentRating" column="content_rating" />
         <result property="sort"       column="sort"        />
         <result property="hidden"     column="hidden"      />
         <result property="mtime"      column="mtime"       />
@@ -71,8 +79,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <select id="selectVideoPage" resultMap="MediaAdminVideoResult">
         select v.id, v.folder, v.rel_path, v.title, v.size, v.dur, v.w, v.h, v.vcodec,
-               v.browser_ok, v.poster_path, v.doc_path, v.sub_path, v.hidden, v.mtime, v.rating,
-               v.missing, v.last_seen
+               v.browser_ok, v.poster_path, v.poster_source, v.poster_file,
+               v.doc_path, v.sub_path, v.hidden, v.mtime, v.rating,
+               v.content_rating, v.missing, v.last_seen
         from media_video v
         <where>
             <if test="hidden != null and hidden != ''">
@@ -113,7 +122,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <select id="selectAlbumPage" resultMap="MediaAdminAlbumResult">
         select a.id, a.person_id, a.title, a.dir, a.photo_count, a.bytes, a.cover_path,
-               a.note, a.sort, a.hidden, a.mtime
+               a.note, a.content_rating, a.sort, a.hidden, a.mtime
         from media_album a
         <where>
             <if test="hidden != null and hidden != ''">
@@ -149,13 +158,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     <!-- root_id 必须取出：软删 / 恢复按记录所属根选根、选回收站桶 -->
     <select id="selectVideoAnyById" resultMap="MediaAdminVideoResult">
         select id, root_id, folder, rel_path, title, size, dur, w, h, vcodec, browser_ok,
-               poster_path, doc_path, sub_path, hidden, mtime, rating, missing, last_seen
+               poster_path, doc_path, sub_path, hidden, mtime, rating, content_rating, missing, last_seen
         from media_video
         where id = #{id}
     </select>
 
     <select id="selectAlbumAnyById" resultMap="MediaAdminAlbumResult">
-        select id, person_id, title, dir, photo_count, bytes, cover_path, note, sort, hidden, mtime
+        select id, person_id, title, dir, photo_count, bytes, cover_path, note, content_rating, sort, hidden, mtime
         from media_album
         where id = #{id}
     </select>
@@ -292,7 +301,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     <!-- 缺失视频分页 -->
     <select id="selectMissingVideoPage" resultMap="MediaAdminVideoResult">
         select v.id, v.root_id, v.folder, v.rel_path, v.title, v.size, v.dur, v.w, v.h, v.vcodec,
-               v.browser_ok, v.poster_path, v.doc_path, v.sub_path, v.hidden, v.mtime, v.rating,
+               v.browser_ok, v.poster_path, v.poster_source, v.poster_file,
+               v.doc_path, v.sub_path, v.hidden, v.mtime, v.rating,
                v.missing, v.last_seen
         from media_video v
         where v.missing = 1

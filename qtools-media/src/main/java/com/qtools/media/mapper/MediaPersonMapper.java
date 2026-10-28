@@ -148,15 +148,31 @@ public interface MediaPersonMapper
      * 「说 5 条但只列出 3 条」的错位）。null / 空 = 不过滤（登录用户与改动前逐字相同）。</p>
      */
     List<Map<String, Object>> selectPersonVideoPage(@Param("personId") Long personId, @Param("offset") int offset,
-            @Param("size") int size, @Param("hiddenRootIds") List<Integer> hiddenRootIds);
+            @Param("size") int size, @Param("hiddenRootIds") List<Integer> hiddenRootIds,
+            @Param("hiddenRatings") List<String> hiddenRatings);
 
-    long countPersonVideos(@Param("personId") Long personId, @Param("hiddenRootIds") List<Integer> hiddenRootIds);
+    long countPersonVideos(@Param("personId") Long personId, @Param("hiddenRootIds") List<Integer> hiddenRootIds,
+            @Param("hiddenRatings") List<String> hiddenRatings);
 
     /** 某人物名下的相册分页（media_album_person ∪ media_album.person_id）；hiddenRootIds 口径同上（按图片反推） */
     List<Map<String, Object>> selectPersonAlbumPage(@Param("personId") Long personId, @Param("offset") int offset,
-            @Param("size") int size, @Param("hiddenRootIds") List<Integer> hiddenRootIds);
+            @Param("size") int size, @Param("hiddenRootIds") List<Integer> hiddenRootIds,
+            @Param("hiddenRatings") List<String> hiddenRatings);
 
-    long countPersonAlbums(@Param("personId") Long personId, @Param("hiddenRootIds") List<Integer> hiddenRootIds);
+    long countPersonAlbums(@Param("personId") Long personId, @Param("hiddenRootIds") List<Integer> hiddenRootIds,
+            @Param("hiddenRatings") List<String> hiddenRatings);
+
+    /**
+     * 未登录访客的人物可见口径（P5.99）：一次算出每个人物的可见视频数 / 相册数 / 照片数 + 可见首册封面 + 可见首视频
+     *
+     * <p>返回 {@code [{personId, videoCount, albumCount, photoCount, coverPath, coverVideoId}]}。
+     * 服务层据此把「名下没有任何可见作品」的人物整条去掉、把计数换成可见口径、把头像来源不可见的换成 null。</p>
+     *
+     * @param hiddenRootIds {@code guest_visible = 0} 的根 id（null / 空 = 不过滤）
+     * @param hiddenRatings {@code guest_visible = 0} 的分级值（null / 空 = 不过滤）
+     */
+    List<Map<String, Object>> selectGuestPersonStats(@Param("hiddenRootIds") List<Integer> hiddenRootIds,
+            @Param("hiddenRatings") List<String> hiddenRatings);
 
     /** 索引用：全部视频的人物绑定 [{videoId, personId, name, role}] */
     List<Map<String, Object>> selectVideoPersonList();

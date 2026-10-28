@@ -379,20 +379,30 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <!-- ================================================================ 未登录可见性（P5.78） -->
 
-    <!-- 视频侧：root_id 落在「仅登录可见」的根下就不出现（root_id 为 NULL 的存量行走配置根，不筛） -->
+    <!-- 视频侧：root_id 落在「仅登录可见」的根下、或内容分级收紧，就不出现
+         （root_id 为 NULL 的存量行走配置根，不筛；分级列为空按 general 处理） -->
     <sql id="guestRootFilter">
         <if test="hiddenRootIds != null and hiddenRootIds.size() > 0">
             and (v.root_id is null or v.root_id not in
             <foreach collection="hiddenRootIds" item="rid" open="(" separator="," close=")">#{rid}</foreach>)
         </if>
+        <if test="hiddenRatings != null and hiddenRatings.size() > 0">
+            and (v.content_rating is null or v.content_rating not in
+            <foreach collection="hiddenRatings" item="rt" open="(" separator="," close=")">#{rt}</foreach>)
+        </if>
     </sql>
 
-    <!-- 相册侧：相册自己没有 root_id，只要它名下有图片落在收紧的根里，整册就不出现（与索引口径一致） -->
+    <!-- 相册侧：相册自己没有 root_id，只要它名下有图片落在收紧的根里，整册就不出现（与索引口径一致）；
+         P5.99 再加「相册自己的分级收紧」这一维 -->
     <sql id="guestAlbumRootFilter">
         <if test="hiddenRootIds != null and hiddenRootIds.size() > 0">
             and not exists (select 1 from media_photo gp
                              where gp.album_id = al.id and gp.root_id in
                             <foreach collection="hiddenRootIds" item="rid" open="(" separator="," close=")">#{rid}</foreach>)
+        </if>
+        <if test="hiddenRatings != null and hiddenRatings.size() > 0">
+            and (al.content_rating is null or al.content_rating not in
+            <foreach collection="hiddenRatings" item="rt" open="(" separator="," close=")">#{rt}</foreach>)
         </if>
     </sql>
 
@@ -446,6 +456,80 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         from media_video_actor a
         inner join media_person p on p.id = a.person_id
         order by a.video_id asc, a.role is null, a.role asc, p.name asc
+    </select>
+
+    <!-- ================================================================ 未登录可见性（P5.99）
+
+         人物在你「名下有没有可见作品」这件事上必须按**同一口径**判：
+         视频按 root_id + content_rating，相册按「名下图片的根」+ 自己的 content_rating。
+         这条 SQL 一次把所有人物（几十行量级）的可见计数 / 可见封面 / 可见首视频算出来，
+         服务层据此做三件事：没有可见作品的人物整条不输出、计数改用可见口径、头像来源不可见时回落默认头像。
+
+         两个 <if> 都是「只有真的收紧了才出现」：登录用户与改动前的 SQL 逐字相同（不查这一条）。 -->
+
+    <sql id="guestVideoVisible">
+        <if test="hiddenRootIds != null and hiddenRootIds.size() > 0">
+            and (v.root_id is null or v.root_id not in
+            <foreach collection="hiddenRootIds" item="rid" open="(" separator="," close=")">#{rid}</foreach>)
+        </if>
+        <if test="hiddenRatings != null and hiddenRatings.size() > 0">
+            and (v.content_rating is null or v.content_rating not in
+            <foreach collection="hiddenRatings" item="rt" open="(" separator="," close=")">#{rt}</foreach>)
+        </if>
+    </sql>
+
+    <!-- 相册可见性：根按名下图片反推（与索引 / 拦截器同口径），分级按相册自己的列 -->
+    <sql id="guestAlbumVisible">
+        <if test="hiddenRootIds != null and hiddenRootIds.size() > 0">
+            and not exists (select 1 from media_photo gp
+                             where gp.album_id = al.id and gp.root_id in
+                            <foreach collection="hiddenRootIds" item="rid" open="(" separator="," close=")">#{rid}</foreach>)
+        </if>
+        <if test="hiddenRatings != null and hiddenRatings.size() > 0">
+            and (al.content_rating is null or al.content_rating not in
+            <foreach collection="hiddenRatings" item="rt" open="(" separator="," close=")">#{rt}</foreach>)
+        </if>
+    </sql>
+
+    <select id="selectGuestPersonStats" resultType="java.util.LinkedHashMap">
+        select p.id as personId,
+               (select count(distinct a.video_id)
+                  from media_video_actor a
+                  join media_video v on v.id = a.video_id
+                 where a.person_id = p.id and v.hidden = 0
+                <include refid="guestVideoVisible"/>) as videoCount,
+               (select count(*)
+                  from media_album al
+                 where al.hidden = 0
+                   and (al.person_id = p.id
+                        or exists (select 1 from media_album_person ap
+                                    where ap.album_id = al.id and ap.person_id = p.id))
+                <include refid="guestAlbumVisible"/>) as albumCount,
+               ((select coalesce(sum(al.photo_count), 0)
+                   from media_album al
+                  where al.hidden = 0
+                    and (al.person_id = p.id
+                         or exists (select 1 from media_album_person ap
+                                     where ap.album_id = al.id and ap.person_id = p.id))
+                <include refid="guestAlbumVisible"/>)) as photoCount,
+               (select al.cover_path
+                  from media_album al
+                 where al.hidden = 0
+                   and (al.person_id = p.id
+                        or exists (select 1 from media_album_person ap
+                                    where ap.album_id = al.id and ap.person_id = p.id))
+                <include refid="guestAlbumVisible"/>
+                 order by al.sort asc, al.id asc
+                 limit 1) as coverPath,
+               (select v.id
+                  from media_video v
+                 where v.hidden = 0
+                   and exists (select 1 from media_video_actor a where a.video_id = v.id and a.person_id = p.id)
+                <include refid="guestVideoVisible"/>
+                 order by v.folder asc, v.title asc, v.id asc
+                 limit 1) as coverVideoId
+          from media_person p
+         where p.hidden = 0
     </select>
 
     <!-- 索引 albums[].persons（多对多 ∪ 单选镜像列） -->

@@ -30,6 +30,7 @@ import com.qtools.media.mapper.MediaRootMapper;
 import com.qtools.media.service.IMediaFileService;
 import com.qtools.media.service.IMediaGuestAccessService;
 import com.qtools.media.support.BearerTokens;
+import com.qtools.media.support.MediaRating;
 
 /**
  * 未登录可见性判定实现（P5.78）
@@ -138,6 +139,45 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
         return hiddenRootIds().contains(rootId);
     }
 
+    // ------------------------------------------------------------------ 内容分级（P5.99）
+
+    @Override
+    public boolean hasGuestRestriction()
+    {
+        Snapshot current = snapshot();
+        return !current.hidden.isEmpty() || !current.hiddenRatings.isEmpty();
+    }
+
+    @Override
+    public Set<String> hiddenRatings()
+    {
+        return snapshot().hiddenRatings;
+    }
+
+    @Override
+    public boolean isRatingHidden(String rating)
+    {
+        Set<String> hidden = hiddenRatings();
+        if (hidden.isEmpty())
+        {
+            return false;
+        }
+        // 脏值 / 未迁移行按 general 处理（与 MediaRating.normalize 同一方向：放宽可见）
+        return hidden.contains(MediaRating.normalize(rating));
+    }
+
+    @Override
+    public boolean isVideoHidden(String videoId)
+    {
+        return videoBlocked(videoId);
+    }
+
+    @Override
+    public boolean isAlbumHidden(String albumId)
+    {
+        return albumBlocked(albumId);
+    }
+
     @Override
     public void invalidateRoots()
     {
@@ -187,9 +227,9 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
             return false;
         }
         Set<Integer> hidden = hiddenRootIds();
-        if (hidden.isEmpty())
+        if (hidden.isEmpty() && hiddenRatings().isEmpty())
         {
-            // 没有任何根收紧（默认状态）：连点查都不做
+            // 库根与分级都没收紧（默认状态）：连点查都不做
             return false;
         }
         String pathVar = vars == null ? null : vars.getOrDefault("id", null);
@@ -206,7 +246,7 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
                 case "/media/sprite/{id}":
                 case "/media/preview/{id}":
                 case "/media/frame/{id}":
-                    return isRootHidden(mediaGuestMapper.selectRootIdOfVideo(pathVar));
+                    return videoBlocked(pathVar);
                 // ---- 相册：整册详情
                 case "/media/album/{id}":
                     return albumBlocked(pathVar);
@@ -279,6 +319,7 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
             {
                 return false;
             }
+            // P5.99：图片继承所属相册的分级，与 /thumb/p/<album>/<seq> 完全同口径
             return photoSeqBlocked(body.substring(0, colon).trim(), body.substring(colon + 1).trim());
         }
         if ("frame".equals(kind))
@@ -288,17 +329,41 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
             {
                 return false;
             }
-            return isRootHidden(mediaGuestMapper.selectRootIdOfVideo(parts[1].trim()));
+            return videoBlocked(parts[1].trim());
         }
         return false;
     }
 
-    /** 相册对未登录访客是否隐藏：它的图片里<b>有任何一张</b>落在收紧的根下就整册藏（保守方向） */
+    /**
+     * 视频对未登录访客是否隐藏：所在根收紧 <b>或</b> 内容分级收紧（P5.99 新增后者）
+     *
+     * <p>两个维度是「与」关系里的「任一条即不可见」：既要库根可见，也要分级可见，访客才看得到。</p>
+     */
+    private boolean videoBlocked(String videoId)
+    {
+        if (StringUtils.isEmpty(videoId))
+        {
+            return false;
+        }
+        return isRootHidden(mediaGuestMapper.selectRootIdOfVideo(videoId))
+                || isRatingHidden(mediaGuestMapper.selectRatingOfVideo(videoId));
+    }
+
+    /**
+     * 相册对未登录访客是否隐藏
+     *
+     * <p>两个维度：<b>它的图片里有任何一张落在收紧的根下</b>（保守方向，宁可多藏），
+     * 或<b>它自己的内容分级收紧</b>（P5.99：整册一个分级，册内图片继承）。</p>
+     */
     private boolean albumBlocked(String albumId)
     {
         if (StringUtils.isEmpty(albumId))
         {
             return false;
+        }
+        if (isRatingHidden(mediaGuestMapper.selectRatingOfAlbum(albumId)))
+        {
+            return true;
         }
         for (Integer rootId : mediaGuestMapper.selectRootIdsOfAlbum(albumId))
         {
@@ -310,21 +375,26 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
         return false;
     }
 
-    /** 内容寻址缩略图：同一份内容只有在<b>所有</b>副本都落在收紧的根下时才藏（多根同一份文件是正常的） */
+    /**
+     * 内容寻址缩略图：同一份内容只有在<b>所有</b>副本都不可见时才藏（多根 / 多册同一份文件是正常的）
+     *
+     * <p>P5.99 起「不可见」是两维的：副本所在根收紧<b>或</b>副本所属相册的分级收紧。
+     * 只要有一个副本两维都通过，这张图就是可见的。</p>
+     */
     private boolean photoHashBlocked(String hash)
     {
         if (StringUtils.isEmpty(hash))
         {
             return false;
         }
-        List<Integer> roots = mediaGuestMapper.selectRootIdsOfPhotoByHash(hash);
-        if (roots == null || roots.isEmpty())
+        List<Map<String, Object>> copies = mediaGuestMapper.selectCopiesOfPhotoByHash(hash);
+        if (copies == null || copies.isEmpty())
         {
             return false;
         }
-        for (Integer rootId : roots)
+        for (Map<String, Object> copy : copies)
         {
-            if (!isRootHidden(rootId))
+            if (!isRootHidden(intOf(copy.get("rootId"))) && !isRatingHidden(stringOf(copy.get("rating"))))
             {
                 return false;
             }
@@ -332,7 +402,11 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
         return true;
     }
 
-    /** 老序号 URL：{@code /thumb/p/<albumId>/<seq>}，序号定位到具体一行 */
+    /**
+     * 老序号 URL：{@code /thumb/p/<albumId>/<seq>}，序号定位到具体一行
+     *
+     * <p>P5.99：图片继承<b>所属相册</b>的分级，所以这里按 albumId 判分级，按行的 root_id 判根。</p>
+     */
     private boolean photoSeqBlocked(String albumId, String index)
     {
         if (StringUtils.isEmpty(albumId) || StringUtils.isEmpty(index))
@@ -349,32 +423,68 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
             // 序号位传的是内容哈希（老 HTML 两种写法都有）：退回按哈希判定
             return photoHashBlocked(index);
         }
-        return isRootHidden(mediaGuestMapper.selectRootIdOfPhotoBySeq(albumId, seq));
+        return isRootHidden(mediaGuestMapper.selectRootIdOfPhotoBySeq(albumId, seq))
+                || isRatingHidden(mediaGuestMapper.selectRatingOfAlbum(albumId));
     }
 
-    /** {@code /media/file|stream|sub?p=&r=}：显式 root id 直接判，否则把 p 解析成真实路径再反查根 */
+    /**
+     * {@code /media/file|stream|sub?p=&r=}：显式 root id 直接判，否则把 p 解析成真实路径再反查根
+     *
+     * <p>P5.99 追加分级维度：这条 URL 不按 id 定位，只能用相对路径反查「它是哪个视频 / 哪本册的图」。
+     * 两条查询都走索引（{@code media_video.rel_path} 唯一索引、{@code media_photo.rel_path} 前缀索引），
+     * 且只在确实有收紧时才执行。查不到（文档 / 字幕这类非媒体文件）按可见处理。</p>
+     */
     private boolean pathBlocked(HttpServletRequest request)
     {
+        String rel = request.getParameter("p");
+        boolean rootHidden;
         Integer rootId = intParam(request.getParameter("r"));
         if (rootId != null)
         {
-            return isRootHidden(rootId);
+            rootHidden = isRootHidden(rootId);
         }
-        String rel = request.getParameter("p");
-        if (StringUtils.isEmpty(rel))
+        else if (StringUtils.isEmpty(rel))
         {
             return false;
         }
-        try
+        else
         {
-            Path resolved = mediaFileService.resolveMedia(rel, null);
-            return isRootHidden(rootIdOfPath(resolved));
+            try
+            {
+                Path resolved = mediaFileService.resolveMedia(rel, null);
+                rootHidden = isRootHidden(rootIdOfPath(resolved));
+            }
+            catch (MediaException e)
+            {
+                // 404 / 403 是 controller 本来就会给的结果，这里不重复判定
+                return false;
+            }
         }
-        catch (MediaException e)
+        if (rootHidden)
         {
-            // 404 / 403 是 controller 本来就会给的结果，这里不重复判定
+            return true;
+        }
+        return StringUtils.isNotEmpty(rel) && ratingBlockedByRelPath(rel);
+    }
+
+    /** 相对路径属于哪个视频 / 哪本册的图 → 那一档分级是否收紧（都没有命中 = 非媒体文件，放行） */
+    private boolean ratingBlockedByRelPath(String rel)
+    {
+        if (hiddenRatings().isEmpty())
+        {
             return false;
         }
+        String key = rel.trim();
+        if (key.startsWith("/") || key.startsWith("\\"))
+        {
+            key = key.substring(1);
+        }
+        String videoRating = mediaGuestMapper.selectRatingOfVideoByRelPath(key);
+        if (videoRating != null)
+        {
+            return isRatingHidden(videoRating);
+        }
+        return isRatingHidden(mediaGuestMapper.selectRatingOfAlbumByPhotoRelPath(key));
     }
 
     private boolean isRootHidden(Integer rootId)
@@ -408,6 +518,7 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
     private Snapshot load()
     {
         Set<Integer> hidden = new HashSet<>();
+        Set<String> hiddenRatings = new HashSet<>();
         List<RootBase> bases = new ArrayList<>();
         try
         {
@@ -416,6 +527,18 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
                 if (id != null)
                 {
                     hidden.add(id);
+                }
+            }
+            // P5.99：分级策略表；表还没建 / 读不到时同样按「全部可见」兜住（见 catch）
+            List<String> ratings = mediaGuestMapper.selectGuestHiddenRatings();
+            if (ratings != null)
+            {
+                for (String rating : ratings)
+                {
+                    if (StringUtils.isNotEmpty(rating))
+                    {
+                        hiddenRatings.add(MediaRating.normalize(rating));
+                    }
                 }
             }
             for (MediaRoot root : mediaRootMapper.selectRootList())
@@ -433,12 +556,14 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
         }
         catch (RuntimeException e)
         {
-            // 列还没迁移 / 库读不到：当成「没有收紧的根」，站点照旧可用
-            warnOnce("读取库根可见性失败（按全部可见处理）: {}", e.getMessage());
+            // 列还没迁移 / 库读不到：当成「没有收紧的根，也没有收紧的分级」，站点照旧可用
+            warnOnce("读取未登录可见性失败（按全部可见处理）: {}", e.getMessage());
             hidden = new HashSet<>();
+            hiddenRatings = new HashSet<>();
             bases = new ArrayList<>();
         }
-        return new Snapshot(System.currentTimeMillis(), Collections.unmodifiableSet(hidden), bases);
+        return new Snapshot(System.currentTimeMillis(), Collections.unmodifiableSet(hidden),
+                Collections.unmodifiableSet(hiddenRatings), bases);
     }
 
     /** 一次告警最多每 60 秒一行，避免列未迁移时把日志刷满 */
@@ -505,6 +630,26 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
         return text;
     }
 
+    private static String stringOf(Object value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        String text = String.valueOf(value).trim();
+        return text.isEmpty() ? null : text;
+    }
+
+    /** map 行里的数字列（MySQL 驱动给 Integer / Long / BigDecimal，统一收成 Integer） */
+    private static Integer intOf(Object value)
+    {
+        if (value instanceof Number number)
+        {
+            return Integer.valueOf(number.intValue());
+        }
+        return intParam(stringOf(value));
+    }
+
     private static Integer intParam(String value)
     {
         if (StringUtils.isEmpty(value))
@@ -535,19 +680,23 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
         }
     }
 
-    /** 根缓存快照（不可变；换新值靠整体替换） */
+    /** 根 / 分级策略缓存快照（不可变；换新值靠整体替换） */
     private static final class Snapshot
     {
         private final long builtAt;
 
         private final Set<Integer> hidden;
 
+        /** P5.99：{@code media_rating_policy.guest_visible = 0} 的分级值 */
+        private final Set<String> hiddenRatings;
+
         private final List<RootBase> roots;
 
-        private Snapshot(long builtAt, Set<Integer> hidden, List<RootBase> roots)
+        private Snapshot(long builtAt, Set<Integer> hidden, Set<String> hiddenRatings, List<RootBase> roots)
         {
             this.builtAt = builtAt;
             this.hidden = hidden;
+            this.hiddenRatings = hiddenRatings;
             this.roots = roots;
         }
     }

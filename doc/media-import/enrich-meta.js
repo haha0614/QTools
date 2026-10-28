@@ -54,6 +54,12 @@ const PROBE_TIMEOUT_MS = 60000;
 
 const DEFAULTS = {
   root: null,
+  // --root-from-db：每条视频按自己的 media_video.root_id 去 media_root 取媒体根（P5.96 多库根）；
+  // root_id 为空 / 查不到时回落到 --root（或 media_root 第一条）
+  rootFromDb: false,
+  // --root-id=N：只处理这个库根的行（扫描入库扫完立刻补元数据时用）
+  rootId: null,
+  rootIdIsDefault: false,
   ffprobe: null,
   mysql: null,
   secret: null,
@@ -71,6 +77,10 @@ const HELP = `
 
   --root=<dir>        媒体根，rel_path 相对它解析；默认取环境变量 MS_MEDIA_ROOT，
                       再退到 media_root 表里 kind='root' 的第一条
+  --root-from-db      按每行的 media_video.root_id 去 media_root 取媒体根逐条解析（多库根必带）；
+                      root_id 为空 / 查不到时回落到 --root
+  --root-id=<n>       只看这个库根的行（root_id = n；n 是默认根时连带 root_id IS NULL 的存量行），
+                      跑完额外打一行 VERIFY root_id=n total=.. missing_dur=..
   --ffprobe=<exe>     ffprobe，优先级：--ffprobe > 环境变量 MS_FFPROBE > PATH
   --mysql=<exe>       mysql 客户端，优先级：--mysql > 环境变量 MS_MYSQL > PATH
   --db=<name>         默认 qtools
@@ -106,6 +116,7 @@ const HELP = `
   DRY <rel_path> dur=.. w=.. h=.. vcodec=.. fps=..   （仅 --dry-run）
   FAIL <rel_path>: <原因>
   PENDING <n>
+  VERIFY root_id=<n> total=<n> missing_dur=<n> missing_fps=<n>   （仅 --root-id）
   enrich ok=<n> skip=<n> fail=<n> seconds=<n>
 `;
 
@@ -115,6 +126,8 @@ function parseArgs(argv) {
   const o = Object.assign({}, DEFAULTS, { ignored: [] });
   for (const a of argv) {
     if (a === '--force') o.force = true;
+    else if (a === '--root-from-db') o.rootFromDb = true;
+    else if (a.startsWith('--root-id=')) o.rootId = Number(a.slice('--root-id='.length));
     else if (a === '--dry-run' || a === '--dry') o.dry = true;
     else if (a === '--help' || a === '-h') o.help = true;
     else if (a.startsWith('--root=')) o.root = a.slice('--root='.length);
@@ -129,6 +142,9 @@ function parseArgs(argv) {
     else o.ignored.push(a); // 管理端可能沿用旧参数：忽略而不是报错
   }
   if (!Number.isFinite(o.limit) || o.limit < 0) throw new Error('--limit 必须是 >= 0 的整数');
+  if (o.rootId !== null && (!Number.isInteger(o.rootId) || o.rootId <= 0)) {
+    throw new Error('--root-id 必须是正整数（media_root.id）');
+  }
   o.limit = Math.trunc(o.limit);
   o.port = String(o.port);
   return o;
@@ -313,8 +329,9 @@ function hasFpsCol(o, mysqlExe, password) {
 }
 
 function readCounts(o, mysqlExe, password, hasFps) {
+  const scope = o.rootId !== null ? ' WHERE ' + rootFilterSql(o) : '';
   const rows = queryRows(o, mysqlExe, password,
-    'SELECT COUNT(*), SUM(' + pendingSql(hasFps) + ') FROM media_video;');
+    'SELECT COUNT(*), SUM(' + pendingSql(hasFps) + ') FROM media_video' + scope + ';');
   const cols = rows.length ? rows[0] : ['0', 'NULL'];
   const total = Number(cols[0]) || 0;
   // 空表时 SUM 返回 NULL
@@ -326,15 +343,25 @@ function readCounts(o, mysqlExe, password, hasFps) {
  * keyset 分页取一页待办行。--force 时不加待补过滤（全部重探）。
  * 用 id > 游标 而不是 OFFSET：补齐的行会退出待补集合，OFFSET 会漏行。
  */
+/** --root-id 的行过滤（n 是默认根时连带 root_id IS NULL 的存量行，与 scan-media.js 的 sqlRoot 同口径） */
+function rootFilterSql(o) {
+  if (!o.rootIdIsDefault) return 'root_id = ' + o.rootId;
+  return '(root_id = ' + o.rootId + ' OR root_id IS NULL)';
+}
+
 function fetchPage(o, mysqlExe, password, cursor, size, hasFps) {
   const where = [];
   if (!o.force) where.push(pendingSql(hasFps));
+  if (o.rootId !== null) where.push(rootFilterSql(o));
   if (cursor !== null) where.push('id > ' + sqlStr(cursor));
-  const sql = 'SELECT id,rel_path,dur,w,h,vcodec' + (hasFps ? ',fps' : '') + ' FROM media_video' +
+  const sql = 'SELECT id,rel_path,dur,w,h,vcodec' + (hasFps ? ',fps' : '') +
+    ',IFNULL(root_id,0) FROM media_video' +
     (where.length ? ' WHERE ' + where.join(' AND ') : '') +
     ' ORDER BY id LIMIT ' + size + ';';
+  const width = hasFps ? 7 : 6;
   return queryRows(o, mysqlExe, password, sql).map((c) => ({
     id: c[0], rel: c[1], dur: c[2], w: c[3], h: c[4], vcodec: c[5], fps: hasFps ? c[6] : 'NULL',
+    rootId: c[width] === undefined || c[width] === 'NULL' ? 0 : Number(c[width]) || 0,
   }));
 }
 
@@ -428,25 +455,120 @@ function parseProbe(stdout) {
 
 // ---------------------------------------------------------------- 媒体根
 
+/**
+ * 兜底媒体根（--root > MS_MEDIA_ROOT > media_root 第一条）
+ *
+ * <p>--root-from-db 时它只是「root_id 为空 / 查不到」的兜底，允许为 null；
+ * 不带 --root-from-db 时保持原语义（确定不了就报错退出）。</p>
+ */
 function resolveRoot(o, mysqlExe, password) {
+  const optional = !!o.rootFromDb;
   let raw = o.root || process.env.MS_MEDIA_ROOT || null;
   if (!raw) {
-    const rows = queryRows(o, mysqlExe, password,
-      "SELECT path FROM media_root WHERE kind='root' ORDER BY id LIMIT 1;");
-    if (rows.length && !isNullish(rows[0][0]) && String(rows[0][0]).trim() !== '') {
-      raw = String(rows[0][0]).trim();
-      warn('未传 --root / MS_MEDIA_ROOT，按 media_root 表的 path 解析：' + raw);
+    if (!optional) {
+      const rows = queryRows(o, mysqlExe, password,
+        "SELECT path FROM media_root WHERE kind='root' ORDER BY id LIMIT 1;");
+      if (rows.length && !isNullish(rows[0][0]) && String(rows[0][0]).trim() !== '') {
+        raw = String(rows[0][0]).trim();
+        warn('未传 --root / MS_MEDIA_ROOT，按 media_root 表的 path 解析：' + raw);
+      }
+    }
+    if (!raw && !optional) {
+      throw new Error('无法确定媒体根：请传 --root=<dir>、设置环境变量 MS_MEDIA_ROOT，' +
+        '或确保 media_root 表里有一条 kind=root 的记录');
     }
   }
-  if (!raw) {
-    throw new Error('无法确定媒体根：请传 --root=<dir>、设置环境变量 MS_MEDIA_ROOT，' +
-      '或确保 media_root 表里有一条 kind=root 的记录');
-  }
+  if (!raw) return null;
   const abs = path.resolve(raw.replace(/[\\/]+/g, path.sep));
   if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
     throw new Error('媒体根不存在或不是目录：' + abs);
   }
   return abs;
+}
+
+/**
+ * media_root 的媒体根（kind='root'）：root_id -> { id, name, path }
+ *
+ * <p>多库根（P5.96）：每条 media_video 的源文件在<b>自己</b>那个根里。
+ * 读不到（表没建 / 库异常）只 WARN 并返回空表，全部回落到兜底根——与改动前同行为。</p>
+ */
+function loadRoots(o, mysqlExe, password) {
+  const roots = new Map();
+  let rows;
+  try {
+    rows = queryRows(o, mysqlExe, password,
+      "SELECT id,IFNULL(name,''),path FROM media_root WHERE kind='root' ORDER BY id;");
+  } catch (e) {
+    warn('--root-from-db 读 media_root 失败，全部按兜底根解析：' + e.message);
+    return roots;
+  }
+  for (const c of rows) {
+    const id = Number(c[0]);
+    const p = String(c[2] || '').trim();
+    if (!Number.isFinite(id) || p === '') continue;
+    roots.set(id, { id: id, name: c[1] || '', path: path.resolve(p.replace(/[\\/]+/g, path.sep)) });
+  }
+  return roots;
+}
+
+/** 这一行该用哪个媒体根：root_id 命中就用它，否则兜底根；两者都没有返回 null（调用方记 FAIL） */
+function rootForRow(roots, fallback, row) {
+  const hit = row && row.rootId ? roots.get(row.rootId) : null;
+  if (hit) return hit.path;
+  return fallback || null;
+}
+
+/** --root-id 是不是「默认根」（media_root 第一条 kind='root'）：是就带上 root_id IS NULL 的存量行 */
+function isDefaultRoot(o, mysqlExe, password) {
+  try {
+    const rows = queryRows(o, mysqlExe, password,
+      "SELECT id FROM media_root WHERE kind='root' ORDER BY id LIMIT 1;");
+    return rows.length > 0 && Number(rows[0][0]) === o.rootId;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * VERIFY 行（仅 --root-id）：这个库根下多少行、还有几行 dur / fps 是 NULL
+ *
+ * <p>扫描入库扫完立刻跑一遍补元数据，后端就是按这行判「ffprobe 有没有生效」：
+ * missing_dur &gt; 0 说明本根的视频还没拿到时长，日志必须明确报警。</p>
+ */
+function verifyLine(o, mysqlExe, password, hasFps) {
+  const rows = queryRows(o, mysqlExe, password,
+    'SELECT COUNT(*), SUM(dur IS NULL), ' + (hasFps ? 'SUM(fps IS NULL)' : '0') +
+    ' FROM media_video WHERE ' + rootFilterSql(o) + ';');
+  const c = rows.length ? rows[0] : ['0', 'NULL', 'NULL'];
+  const num = (v) => Number(v === 'NULL' || v === undefined ? 0 : v) || 0;
+  return 'VERIFY root_id=' + o.rootId + ' total=' + num(c[0]) +
+    ' missing_dur=' + num(c[1]) + ' missing_fps=' + num(c[2]);
+}
+
+/**
+ * 工具缺失 / 口令缺失时的兜底 VERIFY 行（仅 --root-id）
+ *
+ * <p>此时库还读得到（mysql 在），但 ffprobe 不在，本根的待补行不会变少：把当前统计打出来，
+ * 让后端在日志里给出「N 条视频缺少时长元数据（ffprobe 未生效）」。读库也失败时静默放弃。</p>
+ */
+function reportVerifyOnFailure(o, error) {
+  if (o.rootId === null) return;
+  try {
+    const mysqlExe = resolveTool(o.mysql, 'MS_MYSQL', 'mysql', '--mysql');
+    const password = readPassword(o);
+    const hasFps = hasFpsCol(o, mysqlExe, password);
+    o.rootIdIsDefault = isDefaultRoot(o, mysqlExe, password);
+    log(verifyLine(o, mysqlExe, password, hasFps));
+    warn('补元数据未执行（' + (error && error.message ? oneLine(error.message) : '工具缺失') + '）：上面的 VERIFY 是当前库里的统计');
+  } catch (inner) {
+    warn('工具缺失且无法读库统计 VERIFY：' + inner.message);
+  }
+}
+
+/** 失败原因压成单行（VERIFY 相关告警用） */
+function oneLine(text) {
+  const out = String(text == null ? '' : text).replace(/\s+/g, ' ').trim().slice(0, 200);
+  return out === '' ? '-' : out;
 }
 
 /** rel_path 存的是相对媒体根的正斜杠路径 */
@@ -471,6 +593,9 @@ function updateRow(o, mysqlExe, password, id, meta, hasFps) {
 
 function enrichOne(o, mysqlExe, password, ffprobe, root, row, hasFps) {
   if (!o.force && isComplete(row)) return { ok: true, skip: true };
+  if (!root) {
+    return { ok: false, reason: 'root_id=' + (row.rootId || 0) + ' 在 media_root 里查不到，也没有 --root 兜底' };
+  }
   const file = srcPathOf(root, row.rel);
   if (!fs.existsSync(file)) return { ok: false, reason: '源文件不存在：' + file };
   const p = runProbe(ffprobe, file);
@@ -503,11 +628,26 @@ function main() {
   }
   for (const a of o.ignored) warn('已忽略无法识别的参数（管理端/旧脚本兼容）：' + a);
 
-  // ffprobe / mysql 不可用直接退出码 1：后面的每一条都会失败，没有继续的意义
-  const ffprobe = resolveTool(o.ffprobe, 'MS_FFPROBE', 'ffprobe', '--ffprobe');
-  const mysqlExe = resolveTool(o.mysql, 'MS_MYSQL', 'mysql', '--mysql');
+  // ffprobe / mysql 不可用直接退出码 1：后面的每一条都会失败，没有继续的意义。
+  // 但 --root-id（扫描入库的补元数据阶段）还要先把 VERIFY 行打出来：后端靠它把
+  // 「N 条视频缺少时长元数据（ffprobe 未生效）」写进任务日志，否则只剩一句 ERROR 看不到 N。
+  let ffprobe;
+  let mysqlExe;
+  try {
+    ffprobe = resolveTool(o.ffprobe, 'MS_FFPROBE', 'ffprobe', '--ffprobe');
+    mysqlExe = resolveTool(o.mysql, 'MS_MYSQL', 'mysql', '--mysql');
+  } catch (e) {
+    reportVerifyOnFailure(o, e);
+    throw e;
+  }
   const password = readPassword(o);
   const root = resolveRoot(o, mysqlExe, password);
+  // 多库根（P5.96）：--root-from-db 逐条按 root_id 解析；--root-id 只处理该根的行，收尾再打 VERIFY
+  const roots = o.rootFromDb ? loadRoots(o, mysqlExe, password) : null;
+  if (o.rootFromDb && roots.size === 0) {
+    warn('--root-from-db 没取到任何媒体根（media_root 空 / 读不到），全部按兜底根解析：' + (root || '(无)'));
+  }
+  if (o.rootId !== null) o.rootIdIsDefault = isDefaultRoot(o, mysqlExe, password);
 
   // fps 列是 P5.16 才加的（doc/media_fps.sql）：老库没这列时只补四列，不因缺列整批报错
   const hasFps = hasFpsCol(o, mysqlExe, password);
@@ -520,7 +660,9 @@ function main() {
   const c = { ok: 0, skip: 0, fail: 0 };
   log('START total=' + counts.total + ' pending=' + counts.pending +
     ' force=' + (o.force ? 1 : 0) + ' dry=' + (o.dry ? 1 : 0) + ' fps=' + (hasFps ? 1 : 0) +
-    ' root=' + root);
+    ' rootfromdb=' + (o.rootFromDb ? 1 : 0) + ' roots=' + (roots ? roots.size : 0) +
+    ' root_id=' + (o.rootId === null ? '-' : o.rootId) +
+    ' root=' + (root || '(按 root_id 逐条解析)'));
 
   // 全库已补齐（非 --force）：没有待办行，不必扫全表；已补齐的行就是本次的 skip
   if (!o.force && counts.pending === 0) {
@@ -536,7 +678,8 @@ function main() {
       for (const row of rows) {
         cursor = row.id;
         examined += 1;
-        const res = enrichOne(o, mysqlExe, password, ffprobe, root, row, hasFps);
+        const rowRoot = roots ? rootForRow(roots, root, row) : root;
+        const res = enrichOne(o, mysqlExe, password, ffprobe, rowRoot, row, hasFps);
         if (!res.ok) {
           c.fail += 1;
           log('FAIL ' + row.rel + ': ' + res.reason);
@@ -556,6 +699,14 @@ function main() {
       log('PENDING ' + readCounts(o, mysqlExe, password, hasFps).pending);
     } catch (e) {
       warn('回读剩余条数失败：' + e.message);
+    }
+  }
+  // 本根的校验行放在 PENDING 之后、enrich 收尾行之前：后端按它判「ffprobe 是否生效」
+  if (!o.dry && o.rootId !== null) {
+    try {
+      log(verifyLine(o, mysqlExe, password, hasFps));
+    } catch (e) {
+      warn('VERIFY 统计失败：' + e.message);
     }
   }
   log('enrich ok=' + c.ok + ' skip=' + c.skip + ' fail=' + c.fail +

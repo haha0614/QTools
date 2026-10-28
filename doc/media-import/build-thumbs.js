@@ -70,6 +70,9 @@ const { spawnSync } = require('child_process');
 
 const DEFAULTS = {
   root: null,
+  // --root-from-db：每条视频 / 图片按自己的 media_* 行 root_id 去 media_root 取媒体根，
+  // 多库根场景下 --root 只当「root_id 为空 / 查不到」的兜底（P5.96）
+  rootFromDb: false,
   thumbs: null,
   ffmpeg: null,
   mysql: null,
@@ -120,6 +123,8 @@ const HELP = `
 用法：node build-thumbs.js --thumbs=<缩略图根> [--root=<媒体根>] [选项]
 
   --root=<dir>        媒体根（用于定位源文件），默认取环境变量 MS_MEDIA_ROOT，再退到当前目录
+  --root-from-db      按每行的 media_video.root_id / media_photo.root_id 去 media_root 取媒体根
+                      逐条解析源文件（多库根必带）；root_id 为空或查不到时回落到 --root
   --thumbs=<dir>      缩略图根（必填，也认环境变量 MS_THUMBS）
   --ffmpeg=<exe>      ffmpeg，优先级：--ffmpeg > 环境变量 MS_FFMPEG > PATH
   --mysql=<exe>       mysql 客户端，优先级：--mysql > 环境变量 MS_MYSQL > PATH
@@ -128,6 +133,9 @@ const HELP = `
   --host=<host>       默认 127.0.0.1
   --port=<n>          默认 3306
   --force             无条件重建全部产物（忽略 mtime 与存在性）
+  封面来源（P6.00，无需开关）：media_video.poster_source='file' 且 poster_file 存在时，
+                      直接用那张自带封面派生 v/<hash>.jpg（不跑 ffmpeg 截帧）；
+                      文件不存在或老库没这两列时照旧截帧（stderr WARN 一行）
   --no-fresh          关闭新鲜度检查：产物存在即跳过（等价改动前的旧语义）
   --limit=<n>         只处理前 n 条（调试用）
   --only=<task[,task]> 只跑这一档产物：videos|sprites|pvclips|photos|previews
@@ -211,6 +219,7 @@ function parseArgs(argv) {
     else if (a === '--yes' || a === '-y') o.gcYes = true;
     else if (a === '--help' || a === '-h') o.help = true;
     else if (a.startsWith('--root=')) o.root = a.slice('--root='.length);
+    else if (a === '--root-from-db') o.rootFromDb = true;
     else if (a.startsWith('--thumbs=')) o.thumbs = a.slice('--thumbs='.length);
     else if (a.startsWith('--ffmpeg=')) o.ffmpeg = a.slice('--ffmpeg='.length);
     else if (a.startsWith('--mysql=')) o.mysql = a.slice('--mysql='.length);
@@ -413,18 +422,93 @@ function selectedVideoIds(o) {
   return out;
 }
 
+/**
+ * media_video 的封面来源两列（P6.00 / doc/media_video_poster_source.sql）
+ *
+ * <p>老库还没执行那个迁移时这两列不存在，硬查会直接报 1054 Unknown column：所以先探一次，
+ * 没有就整段退化成「全部按截帧」——与 scan-media.js 的降级口径一致。</p>
+ */
+function posterColumnsReady(mysqlExe, o, password) {
+  try {
+    const rows = query(mysqlExe, o, password,
+      "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() " +
+      "AND table_name = 'media_video' AND column_name IN ('poster_source','poster_file');");
+    const n = rows.length && rows[0] && rows[0].length ? Number(rows[0][0]) : 0;
+    if (n === 2) return true;
+  } catch (e2) {
+    warn('探测 poster_source / poster_file 失败，按「没有这两列」处理：' + oneLine(e2.message));
+    return false;
+  }
+  warn('media_video 还没有 poster_source / poster_file（先执行 doc/media_video_poster_source.sql）：' +
+    '封面一律按 ffmpeg 截帧生成');
+  return false;
+}
+
+/** 视频 SELECT 的列：缺列时不多这两项（见 posterColumnsReady） */
+function videoSelectCols(o) {
+  return 'id,rel_path,content_hash,dur,IFNULL(root_id,0)' +
+    (o.posterEnabled ? ",IFNULL(poster_source,'frame'),IFNULL(poster_file,'')" : '');
+}
+
 /** 只查选中的 id：--video 时不再把全库视频拉进内存 */
 function queryVideosByIds(mysqlExe, o, password, ids) {
   const list = ids.map((id) => "'" + id.replace(/'/g, "''") + "'").join(',');
   return query(mysqlExe, o, password,
-    'SELECT id,rel_path,content_hash,dur FROM media_video WHERE id IN (' + list + ') ORDER BY id;');
+    'SELECT ' + videoSelectCols(o) + ' FROM media_video WHERE id IN (' + list + ') ORDER BY id;');
+}
+
+/**
+ * 库里所有视频（不带 --video 时）
+ *
+ * <p>root_id 一起取：多库根下每条视频的源文件在<b>自己</b>那个媒体根里，
+ * 拿单一 --root 拼路径就会把「非默认根」的条目全判成「源文件不存在」。</p>
+ */
+function queryAllVideos(mysqlExe, o, password) {
+  return query(mysqlExe, o, password,
+    'SELECT ' + videoSelectCols(o) + ' FROM media_video ORDER BY id;');
 }
 
 /** mysql 行 -> 视频对象（NULL 还原成 null，免得拿字面量 "NULL" 当哈希拼文件名） */
 function mapVideoRows(rows) {
   return rows.map((c) => ({
     id: c[0], rel: c[1], hash: c[2] === 'NULL' ? null : c[2], dur: c[3] === 'NULL' ? null : c[3],
+    rootId: c[4] === undefined || c[4] === 'NULL' ? 0 : Number(c[4]) || 0,
+    // P6.00：file = 同目录「视频名-封面」自带封面（poster_file 指向它），frame = 老行为截帧
+    poster: c[5] === undefined || c[5] === 'NULL' ? 'frame' : String(c[5]).trim() || 'frame',
+    cover: c[6] === undefined || c[6] === 'NULL' ? '' : String(c[6]),
   }));
+}
+
+/**
+ * media_root 里的媒体根（{@code kind='root'}）：root_id -> 绝对路径（P5.96 多库根）
+ *
+ * <p>返回 Map&lt;number, {id,name,path}&gt;。表不存在 / 读库失败只 WARN 并返回空表：
+ * 那时全部回落到 --root，等价改动前的单根行为，不该因为一条查询把整批缩略图挡下来。</p>
+ */
+function loadRoots(mysqlExe, o, password) {
+  const roots = new Map();
+  let rows;
+  try {
+    rows = query(mysqlExe, o, password,
+      "SELECT id,IFNULL(name,''),path FROM media_root WHERE kind='root' ORDER BY id;");
+  } catch (e) {
+    warn('--root-from-db 读 media_root 失败，全部按 --root 解析：' + oneLine(e.message));
+    return roots;
+  }
+  for (const c of rows) {
+    const id = Number(c[0]);
+    const p = String(c[2] || '').trim();
+    if (!Number.isFinite(id) || p === '') continue;
+    roots.set(id, { id: id, name: c[1] || '', path: path.resolve(p.replace(/[\\/]+/g, path.sep)) });
+  }
+  return roots;
+}
+
+/** 一条记录（视频 / 图片）该用哪个媒体根：root_id 命中 media_root 就用它，否则 null（调用方回落 --root） */
+function rootOfRecord(record, roots) {
+  if (!record || !roots) return null;
+  const hit = roots.get(record.rootId);
+  return hit ? hit.path : null;
 }
 
 // ---------------------------------------------------------------- 任务清单
@@ -456,34 +540,60 @@ function photoOutPath(thumbs, p, preview) {
 
 function planTasks(videos, photos, o) {
   const t = [];
+  // 多库根（P5.96）：每条记录带自己的媒体根，源文件按它解析；o.roots 为空时 root=null，
+  // srcPathOf 照旧回落到 --root（单根部署行为不变）
+  const roots = o.roots && typeof o.roots.get === 'function' ? o.roots : null;
   for (const v of videos) {
+    const root = rootOfRecord(v, roots);
+    const rootId = v.rootId || 0;
+    // P6.00：自带封面（poster_source='file'）→ 直接拿那张图派生，不再跑 ffmpeg 截帧。
+    // 两种退化都回到截帧：库里没记封面路径（老数据），或文件已经不在磁盘上（被用户删了）——
+    // 后一种还要 WARN，否则「海报怎么变了」会变成一条无迹可寻的怪现象。
+    let src = v.rel;
+    let kind = 'video';
+    if (v.poster === 'file' && v.cover) {
+      const coverAbs = srcPathOf({ root: root, src: v.cover }, root);
+      if (fs.existsSync(coverAbs)) {
+        src = v.cover;
+        kind = 'cover';
+        o.coverUsed = (o.coverUsed || 0) + 1;
+      } else {
+        o.coverMissing = (o.coverMissing || 0) + 1;
+        if (o.coverMissing <= 5) {
+          warn('自带封面文件不存在，退回截帧：' + coverAbs + '（视频 ' + v.id + ' ' + v.rel + '）');
+        }
+      }
+    }
     // 内容寻址：同一份内容改名 / 移动后 content_hash 不变，仍复用同一张封面
     // videoId 只用于 ITEM 行（后端按它汇总「哪几条生成了」），不参与落盘路径
     t.push({
-      task: 'videos', videoId: v.id, src: v.rel, kind: 'video',
+      task: 'videos', videoId: v.id, src: src, kind: kind, root: root, rootId: rootId,
       out: path.join(o.thumbs, 'v', thumbName(v) + '.jpg'),
     });
     // 精灵图 / 预览视频紧跟同一条视频：两者都要重建时主流程会把它们合并成一次 ffmpeg
     if (o.sprite) {
       t.push({
-        task: 'sprites', videoId: v.id, src: v.rel, kind: 'sprite', dur: v.dur,
+        task: 'sprites', videoId: v.id, src: v.rel, kind: 'sprite', dur: v.dur, root: root, rootId: rootId,
         out: path.join(o.thumbs, 's', thumbName(v) + '.jpg'),
       });
     }
     if (o.preview) {
       t.push({
-        task: 'pvclips', videoId: v.id, src: v.rel, kind: 'pvclip', dur: v.dur,
+        task: 'pvclips', videoId: v.id, src: v.rel, kind: 'pvclip', dur: v.dur, root: root, rootId: rootId,
         out: path.join(o.thumbs, 'pv2', thumbName(v) + '.' + (o.previewEncoder || {}).ext),
       });
     }
   }
   for (const p of photos) {
+    const root = rootOfRecord(p, roots);
+    const rootId = p.rootId || 0;
     // 内容寻址：相册内加图后 seq 会整体后移，按 <content_hash>.jpg 落盘才不会张冠李戴
-    t.push({ task: 'photos', src: p.rel, out: photoOutPath(o.thumbs, p, false), kind: 'photo' });
+    t.push({ task: 'photos', src: p.rel, out: photoOutPath(o.thumbs, p, false), kind: 'photo', root: root, rootId: rootId });
   }
   for (const p of photos) {
     if (String(p.isBig) !== '1') continue;
-    t.push({ task: 'previews', src: p.rel, out: photoOutPath(o.thumbs, p, true), kind: 'preview' });
+    t.push({ task: 'previews', src: p.rel, out: photoOutPath(o.thumbs, p, true), kind: 'preview',
+      root: rootOfRecord(p, roots), rootId: p.rootId || 0 });
   }
   return o.limit > 0 ? t.slice(0, o.limit) : t;
 }
@@ -497,9 +607,13 @@ function alreadyDone(out) {
   }
 }
 
-/** 源文件绝对路径（库里存的是相对媒体根的正斜杠路径） */
+/**
+ * 源文件绝对路径（库里存的是相对媒体根的正斜杠路径）
+ *
+ * <p>媒体根优先用记录自己的（多库根 / --root-from-db），没有再回落到调用方传的单一根。</p>
+ */
 function srcPathOf(item, root) {
-  return path.resolve(root, item.src.replace(/[\\/]+/g, path.sep));
+  return path.resolve(item && item.root ? item.root : root, item.src.replace(/[\\/]+/g, path.sep));
 }
 
 /**
@@ -559,10 +673,45 @@ function outRel(thumbs, out) {
   return rel === '' ? '-' : rel;
 }
 
+/** 可读单行文本（保留单个空格，只压掉换行 / 连续空白）：ROOTFAIL 的明细行用它 */
+function oneLineText(text) {
+  const out = String(text == null ? '' : text).replace(/\s+/g, ' ').trim().slice(0, 240);
+  return out === '' ? '-' : out;
+}
+
 /** 失败原因压成单行单词（ITEM 行按空白切字段，reason 里不能有空格） */
 function oneLine(reason) {
   const text = String(reason == null ? '' : reason).replace(/\s+/g, '_').slice(0, 200);
   return text === '' ? '-' : text;
+}
+
+/** ROOTFAIL 每根最多列几条失败原因（够定位就行，别把日志撑爆） */
+const ROOT_FAIL_REASONS = 3;
+
+/**
+ * 每根汇总（P5.96，只有 --root-from-db 才打）
+ *
+ * <pre>
+ * ROOTSUMS root_id=1 name=主库 ok=176 skip=0 fail=0 root=E:/111/视频
+ * ROOTSUMS root_id=3 name=剪辑视频 ok=0 skip=0 fail=63 root=E:/视频
+ * ROOTFAIL root_id=3 name=剪辑视频 fail=63 shown=3
+ *   - 源文件不存在：E:/111/视频/a.mp4
+ * </pre>
+ *
+ * <p>ROOTSUMS 的 root= 放行尾且 root_id / name 在它前面：路径里有空格也不会把前面的键切歪；
+ * ROOTFAIL 的明细行是可读文本（保留空格），后端 / 人都能直接看出「哪个根、为什么失败」。</p>
+ */
+function emitRootSums(perRoot) {
+  const list = Array.from(perRoot.values()).sort((a, b) => a.rootId - b.rootId);
+  for (const r of list) {
+    log('ROOTSUMS root_id=' + r.rootId + ' name=' + oneLine(r.name || '-') +
+      ' ok=' + r.ok + ' skip=' + r.skip + ' fail=' + r.fail + ' root=' + r.root);
+    if (r.fail > 0) {
+      log('ROOTFAIL root_id=' + r.rootId + ' name=' + oneLine(r.name || '-') +
+        ' fail=' + r.fail + ' shown=' + r.reasons.length);
+      for (const reason of r.reasons) log('  - ' + oneLineText(reason));
+    }
+  }
 }
 
 /** DONE ids= 的取值：逗号分隔的已处理 videoId，超过 200 个截断并注明 truncated=1 */
@@ -585,6 +734,9 @@ function runFfmpeg(ffmpeg, args) {
 function ffmpegArgsFor(item, src, o) {
   const base = ['-y', '-loglevel', 'error'];
   if (item.kind === 'video') return base.concat(['-ss', '3', '-i', src, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', item.out]);
+  // P6.00 自带封面：静态图，没有 -ss（对图片 seek 会抽不到帧），参数其余与视频封面一致，
+  // 这样「截帧封面」和「自带封面」落盘的分辨率/质量完全一样，换来源时视觉上不跳。
+  if (item.kind === 'cover') return base.concat(['-i', src, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', item.out]);
   if (item.kind === 'photo') return base.concat(['-i', src, '-frames:v', '1', '-vf', 'scale=400:-2', '-q:v', '4', item.out]);
   if (item.kind === 'sprite') return base.concat(['-i', src, '-vf', spriteFilter(item, o), '-frames:v', '1', '-q:v', '4', item.out]);
   if (item.kind === 'pvclip') return base.concat(pvclipArgs(item, src, o));
@@ -951,6 +1103,9 @@ function startLine(o, total, taskNames, root) {
     ' fresh=' + (o.fresh ? 1 : 0) + ' sprite=' + (o.sprite ? 1 : 0) +
     ' spritegrid=' + g.cols + 'x' + g.rows +
     ' preview=' + (o.preview ? 1 : 0) + ' gc=' + (o.gc ? 1 : 0) +
+    // P5.96：rootfromdb=1 表示源文件按每行自己的 media_root 解析（root= 只作兜底），
+    // roots= 是本次用到的媒体根个数——多根部署出问题时先看这两格
+    ' rootfromdb=' + (o.rootFromDb ? 1 : 0) + ' roots=' + (o.roots ? o.roots.size : 0) +
     ' root=' + root + ' thumbs=' + o.thumbs;
 }
 
@@ -977,6 +1132,15 @@ function main() {
   const mysqlExe = resolveTool(o.mysql, 'MS_MYSQL', 'mysql', '--mysql');
   const password = readPassword(o);
 
+  // 多库根（P5.96）：--root-from-db 时先取 media_root，逐条按 root_id 解析媒体根；
+  // --root 退化成「root_id 为空 / 查不到这个根」的兜底，单根部署行为不变
+  if (o.rootFromDb) {
+    o.roots = loadRoots(mysqlExe, o, password);
+    if (o.roots.size === 0) {
+      warn('--root-from-db 没取到任何媒体根（media_root 空 / 读不到），全部按 --root 解析：' + root);
+    }
+  }
+
   // 预览视频的编码器只探测一次（--preview 没开就不花这次子进程）
   if (o.preview) {
     o.previewEncoder = detectPreviewEncoder(ffmpeg);
@@ -987,25 +1151,41 @@ function main() {
     warn('预览视频编码器：' + o.previewEncoder.name + ' -> pv2/<hash>.' + o.previewEncoder.ext);
   }
 
+  // P6.00：封面来源两列在不在（不在就整段按截帧，绝不因为缺列让派生整批失败）
+  o.posterEnabled = posterColumnsReady(mysqlExe, o, password);
+
   // 指定了 videoId 就只查这几行（IN (...)），不再把全库视频拉进来
   const wanted = selectedVideoIds(o);
   const videos = wanted.length
     ? mapVideoRows(queryVideosByIds(mysqlExe, o, password, wanted))
-    : mapVideoRows(query(mysqlExe, o, password,
-      'SELECT id,rel_path,content_hash,dur FROM media_video ORDER BY id;'));
+    : mapVideoRows(queryAllVideos(mysqlExe, o, password));
   // 指定 videoId 时图片缩略图 / 大图一律不碰：调用方要的是「这几条视频的派生产物」
   const photoRows = wanted.length ? [] : query(mysqlExe, o, password,
-    'SELECT album_id,seq,rel_path,is_big,content_hash FROM media_photo ORDER BY album_id,seq;');
+    'SELECT album_id,seq,rel_path,is_big,content_hash,IFNULL(root_id,0) FROM media_photo ORDER BY album_id,seq;');
   const photos = photoRows.map((c) => ({
     albumId: c[0], seq: Number(c[1]), rel: c[2], isBig: c[3],
     hash: c[4] === undefined || c[4] === 'NULL' ? null : c[4],
+    rootId: c[5] === undefined || c[5] === 'NULL' ? 0 : Number(c[5]) || 0,
   }));
   // 请求了但库里没有的 id：不算错，WARN + 计入 skipped（调用方的 ids 可能已被删/改名）
   const found = {};
   for (const v of videos) found[v.id] = true;
   const missingIds = wanted.filter((id) => !found[id]);
 
+  // root_id 指向 media_root 里不存在的行（被删的根 / 手改的 root_id）：一条 WARN 说清有几条，
+  // 它们的源文件按 --root 解析（多半找不到，会逐条报「源文件不存在」）
+  if (o.roots && o.roots.size > 0) {
+    const orphan = videos.filter((v) => v.rootId && !o.roots.has(v.rootId)).length;
+    if (orphan > 0) {
+      warn(orphan + ' 个视频的 root_id 在 media_root 里查不到，按 --root 解析源文件：' + root);
+    }
+  }
+
   const planned = planTasks(videos, photos, o);
+  // P6.00：封面来源统计（管理端日志里一眼看出这批封面有多少来自自带封面文件）
+  if (o.coverUsed || o.coverMissing) {
+    log('cover 自带封面=' + (o.coverUsed || 0) + ' 回退截帧=' + (o.coverMissing || 0));
+  }
   // --only：按档过滤（未知档名静默忽略，与「管理端可能传旧参数」的一致处理）
   const tasks = o.only && o.only.length ? planned.filter((t) => o.only.indexOf(t.task) >= 0) : planned;
   // 库里有不存在的 id 时它们也各占一条（打 ITEM skip + PROGRESS），total 因此按 tasks + missing 算
@@ -1033,6 +1213,21 @@ function main() {
 
   let done = 0;
   const perTask = {};
+  // 每根一份计数（P5.96）：多库根时「成功 0 / 跳过 176 / 失败 63」这种总数看不出是哪个根坏了
+  const perRoot = new Map();
+  const rootStatOf = (item) => {
+    const rootId = item.rootId || 0;
+    if (!perRoot.has(rootId)) {
+      const hit = o.roots ? o.roots.get(rootId) : null;
+      perRoot.set(rootId, {
+        rootId: rootId,
+        name: hit ? hit.name : '',
+        root: item.root || (hit ? hit.path : root),
+        ok: 0, skip: 0, fail: 0, reasons: [],
+      });
+    }
+    return perRoot.get(rootId);
+  };
   // 出过 ITEM 行的 videoId（去重保序）：DONE ids= 用它，后端据此知道「跑了哪几条」
   const processedIds = [];
   // 指定了 id 但库里没有：WARN 一行（stderr）+ ITEM skip 一行（stdout，机器可解析），计入 skipped
@@ -1065,16 +1260,21 @@ function main() {
         result = { ok: r.ok, skip: false, reason: r.reason };
       }
     }
+    const rootStat = rootStatOf(t);
     if (!result.ok) {
       counts.fail += 1;
       perTask[t.task].fail += 1;
+      rootStat.fail += 1;
+      if (rootStat.reasons.length < ROOT_FAIL_REASONS) rootStat.reasons.push(result.reason);
       log('FAIL ' + t.src + ': ' + result.reason);
     } else if (result.skip) {
       counts.skip += 1;
       perTask[t.task].skip += 1;
+      rootStat.skip += 1;
     } else {
       counts.ok += 1;
       perTask[t.task].ok += 1;
+      rootStat.ok += 1;
     }
     // 逐条结果行（机器可解析，后端 MediaScanServiceImpl 按它汇总 RESULT）：
     // 视频的三档各打一行，图片任务不打（它们的 id 是 albumId/seq，不在本行的契约里）
@@ -1094,6 +1294,11 @@ function main() {
     const c = perTask[task];
     if (!c) continue;
     log('TASK ' + task + ' total=' + c.total + ' ok=' + c.ok + ' skip=' + c.skip + ' fail=' + c.fail);
+  }
+  // 每根分别的数字（P5.96）：ROOTSUMS 一行一根，ROOTFAIL 再跟最多 3 条失败原因。
+  // 只有 --root-from-db 时才打（单根 + 不带该参数的老调用输出一个字节都不变）
+  if (o.rootFromDb) {
+    emitRootSums(perRoot);
   }
   // 内容寻址的产物比行数少是正常的（重复内容共用一个文件）：missing 才是真缺
   for (const task of ['photos', 'previews']) {

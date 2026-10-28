@@ -35,6 +35,31 @@ public class MediaScanIngestRequest
      */
     private Boolean force;
 
+    /**
+     * 是否跑完整条流水线（P5.97，缺省 true）
+     *
+     * <p>true = 扫描成功后自动接上「补哈希 → 补元数据 → 封面缩略图 → 重建索引快照」；
+     * false = 只扫盘写库（老行为，给命令行 / 排障用）。dry-run 恒为 false：预演什么都不写。</p>
+     */
+    private Boolean pipeline;
+
+    /** 是否补 content_hash（缺省 true）：脚本只补空值，扫描阶段已写入时这一阶段自动跳过 */
+    private Boolean hash;
+
+    /** 是否在最后重建索引快照（缺省 true）：失效 + 立刻重算一次，站端下一次请求就是新内容 */
+    private Boolean rebuildIndex;
+
+    /**
+     * 派生资源档位（缺省 {@code thumb}）
+     *
+     * <ul>
+     *   <li>{@code none}：不生成任何派生资源（只入库）；</li>
+     *   <li>{@code thumb}：封面 + 图片缩略图（默认，最省时间）；</li>
+     *   <li>{@code full}：再加精灵图 + 预览片段（全片解码，慢两个数量级）。</li>
+     * </ul>
+     */
+    private String derive;
+
     public Long getRootId()
     {
         return rootId;
@@ -93,5 +118,45 @@ public class MediaScanIngestRequest
     public void setForce(Boolean force)
     {
         this.force = force;
+    }
+
+    public Boolean getPipeline()
+    {
+        return pipeline;
+    }
+
+    public void setPipeline(Boolean pipeline)
+    {
+        this.pipeline = pipeline;
+    }
+
+    public Boolean getHash()
+    {
+        return hash;
+    }
+
+    public void setHash(Boolean hash)
+    {
+        this.hash = hash;
+    }
+
+    public Boolean getRebuildIndex()
+    {
+        return rebuildIndex;
+    }
+
+    public void setRebuildIndex(Boolean rebuildIndex)
+    {
+        this.rebuildIndex = rebuildIndex;
+    }
+
+    public String getDerive()
+    {
+        return derive;
+    }
+
+    public void setDerive(String derive)
+    {
+        this.derive = derive;
     }
 }

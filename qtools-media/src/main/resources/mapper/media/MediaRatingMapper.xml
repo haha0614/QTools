@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    内容分级（P5.99）：media_video / media_album 的 content_rating + media_rating_policy。
+
+    表与列由 doc/media_content_rating.sql 建立（幂等，可反复执行）。
+    这里只有读写语句，没有任何判定逻辑 —— 未登录可见性统一在 IMediaGuestAccessService。
+-->
+<mapper namespace="com.qtools.media.mapper.MediaRatingMapper">
+
+    <select id="selectPolicyList" resultType="java.util.LinkedHashMap">
+        select rating as rating, guest_visible as guestVisible, note as note
+        from media_rating_policy
+        order by rating asc
+    </select>
+
+    <update id="updatePolicy">
+        update media_rating_policy
+           set guest_visible = #{guestVisible}
+         where rating = #{rating}
+    </update>
+
+    <insert id="insertPolicy">
+        insert ignore into media_rating_policy (rating, guest_visible, note)
+        values (#{rating}, #{guestVisible}, #{note})
+    </insert>
+
+    <update id="updateVideoRating">
+        update media_video set content_rating = #{rating} where id = #{id}
+    </update>
+
+    <update id="updateAlbumRating">
+        update media_album set content_rating = #{rating} where id = #{albumId}
+    </update>
+
+    <update id="updateVideosRating">
+        update media_video set content_rating = #{rating}
+        where id in
+        <foreach collection="ids" item="vid" open="(" separator="," close=")">#{vid}</foreach>
+    </update>
+
+    <update id="updateAlbumsRating">
+        update media_album set content_rating = #{rating}
+        where id in
+        <foreach collection="ids" item="aid" open="(" separator="," close=")">#{aid}</foreach>
+    </update>
+
+    <select id="countVideosByIds" resultType="long">
+        select count(*) from media_video
+        where id in
+        <foreach collection="ids" item="vid" open="(" separator="," close=")">#{vid}</foreach>
+    </select>
+
+    <select id="countAlbumsByIds" resultType="long">
+        select count(*) from media_album
+        where id in
+        <foreach collection="ids" item="aid" open="(" separator="," close=")">#{aid}</foreach>
+    </select>
+
+</mapper>

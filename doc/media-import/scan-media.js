@@ -29,6 +29,11 @@
  *         被复用也不会被删——P5.43 起改为「不许静默并存」：本次没被任何分组认领、且册内 0 图、dir_key
  *         又落在本次产物里的旧行，默认直接报错退出（不写库），加 --purge-unclaimed 才在同一事务里删掉；
  *         存量清理见 doc/media_album_dedupe.sql（先预览再删、幂等）
+ *   自带封面（P6.00）：同目录「视频名-封面.jpg」这类图片**不算相册照片**——同目录存在同名视频
+ *         （B-封面.jpg / B.mp4，后缀集合默认 -封面,-cover,_cover,_封面，见 --cover-suffixes /
+ *         MS_COVER_SUFFIXES）时，这张图不入 media_photo / media_album，只作为视频海报的来源：
+ *         media_video.poster_source='file' + poster_file=封面相对路径（列见 doc/media_video_poster_source.sql）。
+ *         已入库的封面图用 --detect-covers 纠正；派生侧 build-thumbs.js 认 poster_source='file' 直接用它出图
  *   people 恒为 0：通用扫描不生成人物（media_album.person_id 留 NULL）
  *
  * 身份（可移植性，配合 doc/media_portability.sql）：
@@ -71,6 +76,27 @@ const VIDEO_EXT = new Set(['.mp4', '.webm', '.mkv', '.mov', '.m4v', '.avi']);
 const PHOTO_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp']);
 const BROWSER_OK_EXT = new Set(['.mp4', '.webm']);
 
+/**
+ * 「自带封面」的宿主视频扩展名：比入库的 VIDEO_EXT 宽
+ *
+ * <p>P6.00：判断「这张图是不是某个视频的封面」只看磁盘上有没有同名视频，
+ * 与「这个视频这次会不会入库」是两件事——手机/剪辑软件常导出 .wmv/.flv/.ts，
+ * 它们暂时不入 media_video，但同目录的「xxx-封面.jpg」依然是封面，不该进相册。</p>
+ */
+const COVER_HOST_EXT = new Set([...VIDEO_EXT, '.wmv', '.flv', '.ts']);
+
+/**
+ * 自带封面的文件名后缀默认集合（P6.00）
+ *
+ * <p>命中规则：同目录存在图片 {@code B + 后缀 + .jpg|...} 且存在视频 {@code B + .mp4|...}，
+ * 后缀去空白后属于本集合 → 该图是那个视频的自带封面。集合可配：
+ * {@code --cover-suffixes=a,b} &gt; 环境变量 {@code MS_COVER_SUFFIXES}（管理端按
+ * {@code qtools.media.scan.coverSuffixes} 注入）&gt; 这里的默认值。</p>
+ */
+const COVER_SUFFIX_DEFAULT = ['-封面', '-cover', '_cover', '_封面'];
+/** media_video.poster_file VARCHAR(700) */
+const MAX_POSTER_FILE = 700;
+
 /** media_*.rel_path VARCHAR(700)，超长直接跳过（写入会报 1406） */
 const MAX_REL = 700;
 
@@ -100,6 +126,8 @@ const DEFAULTS = {
   hashBytes: 65536,
   albumMode: 'dir',
   exclude: ['_媒体站', 'trash', '.git', 'node_modules', 'thumbs', 'pv'],
+  // null = 「没给 --cover-suffixes」：由 MS_COVER_SUFFIXES 或 COVER_SUFFIX_DEFAULT 决定
+  coverSuffixes: null,
 };
 
 const HELP = `
@@ -144,6 +172,21 @@ const HELP = `
                       再执行本模式；封面文件还是 <id>.jpg 时刷完会指向不存在的文件
   --only-video        只扫视频：图片/相册一律不看（也不会把库里的图片标成缺失）
   --only-photo        只扫图片/相册：视频一律不看（也不会把库里的视频标成缺失）
+  --cover-suffixes=<a,b>
+                      自带封面的文件名后缀集合，默认 -封面,-cover,_cover,_封面
+                      比较口径：小写 + 忽略空白（'A - 封面' / 'A- 封面' 都算 -封面）
+                      （同目录「视频名+后缀」的图片算该视频的自带封面：不入相册/图片站，
+                      只把视频的 poster_source 置 file、poster_file 指向它）
+                      优先级：本参数 > 环境变量 MS_COVER_SUFFIXES > 默认值
+  --no-cover-scan     关闭自带封面识别（等于 --cover-suffixes= 空集合）：图片照旧全部入库
+  --detect-covers     纠正存量（要连库）：扫库内视频，按磁盘同目录命中自带封面的，
+                      poster_source 置 file；并从 media_photo 删掉这些封面行、重算相册计数。
+                      只跑这一件事，不写视频/相册/照片索引。可配 --dry-run 只看清单
+  --root-from-db      --detect-covers 用：按每行的 media_video.root_id 去 media_root 取媒体根
+                      （多库根安全；缺 --root 时也靠它）
+  --purge-empty       --detect-covers 用：把「因为封面被剔除而变成 0 图」的相册行一并删掉
+                      （与 --purge-unclaimed 同一套动作：先删人物关联行；额外要求册内
+                       确实 NOT EXISTS 任何图片才删）。不加就只把 photo_count/bytes 归零
   --limit=<n>         本次最多写多少个视频 / 多少张图片（默认不限）；--backfill-hash 时是最多处理多少行
   --prune-missing     扫完把 media_photo / media_video 里 missing=1 的行真删（默认只标记不删）；
                       删除前先打印 TOP 10 与总数，必须同时给 --yes 才真删
@@ -168,6 +211,10 @@ const HELP = `
   node scan-media.js --root=D:\\我的媒体 --backfill-hash [--limit=N] [--dry-run]
   node scan-media.js --root=D:\\我的媒体 --backfill-hash --secret=D:\\cfg\\secret.yml
 
+自带封面（P6.00；存量纠正一定先 --dry-run 看清单，再摘掉 --dry-run）：
+  node scan-media.js --detect-covers --root-from-db --dry-run [--secret=D:\cfg\secret.yml]
+  node scan-media.js --detect-covers --root-from-db [--secret=D:\cfg\secret.yml]
+
  相册 mtime（P5.59；SQL 只能给近似值，这里写磁盘真值，幂等可反复跑）：
   node scan-media.js --root=D:\\我的媒体 --backfill-album-mtime [--dry-run]
   node scan-media.js --root=D:\\我的媒体 --backfill-album-mtime --secret=D:\\cfg\\secret.yml
@@ -180,6 +227,7 @@ const HELP = `
                                                        revived=本次「磁盘又有了」复活的行数
   ALIAS <hash> 主=<path> 别名=<path>                   同内容副本：主文件留在主表，这条进别名表
   DUP <hash> 保留=<path> 忽略=<path>                   同上，但别名表未建时退回老行为（副本被丢弃）
+  自带封面 视频=<n> 封面图=<n> 已剔除照片=<n>           本次识别到的自带封面（P6.00）
   回填 videos=<n> photos=<n> missing=<n>               --backfill-hash 的计数
   回填 album-mtime 更新=<n> 相同=<n> 目录不存在=<n>     --backfill-album-mtime 的计数
 
@@ -200,6 +248,7 @@ function parseArgs(argv) {
     ignored: [], noHash: false, backfillHash: false, fixPosterPath: false, limit: null, rootId: null,
     onlyVideo: false, onlyPhoto: false,
     pruneMissing: false, purgeUnclaimed: false, backfillAlbumMtime: false,
+    detectCovers: false, rootFromDb: false, purgeEmpty: false,
   });
   for (const a of argv) {
     if (a === '--truncate') o.truncate = true;
@@ -214,6 +263,13 @@ function parseArgs(argv) {
     else if (a === '--purge-unclaimed') o.purgeUnclaimed = true;
     else if (a === '--only-video') o.onlyVideo = true;
     else if (a === '--only-photo') o.onlyPhoto = true;
+    else if (a === '--detect-covers') o.detectCovers = true;
+    else if (a === '--purge-empty') o.purgeEmpty = true;
+    else if (a === '--root-from-db') o.rootFromDb = true;
+    else if (a === '--no-cover-scan') o.coverSuffixes = [];
+    else if (a.startsWith('--cover-suffixes=')) {
+      o.coverSuffixes = a.slice('--cover-suffixes='.length).split(',');
+    }
     else if (a.startsWith('--root=')) o.root = a.slice('--root='.length);
     else if (a.startsWith('--db=')) o.db = a.slice('--db='.length);
     else if (a.startsWith('--user=')) o.user = a.slice('--user='.length);
@@ -249,9 +305,49 @@ function parseArgs(argv) {
   if (o.onlyVideo && o.onlyPhoto) {
     throw new Error('--only-video 与 --only-photo 只能二选一（两个都不给 = 视频 + 图片一起扫）');
   }
+  if (o.noHash && o.detectCovers) {
+    throw new Error('--no-hash 与 --detect-covers 无关：纠正模式不重新扫盘哈希，去掉 --no-hash');
+  }
+  // 自带封面后缀：--cover-suffixes > MS_COVER_SUFFIXES（管理端按 qtools.media.scan.coverSuffixes 注入）> 默认
+  if (o.coverSuffixes === null) {
+    const env = (process.env.MS_COVER_SUFFIXES || '').trim();
+    o.coverSuffixes = env === '' ? COVER_SUFFIX_DEFAULT.slice() : env.split(',');
+  }
+  o.coverSuffixes = normalizeSuffixes(o.coverSuffixes);
   o.port = String(o.port);
   o.excludeSet = new Set(o.exclude.map((s) => s.toLowerCase()));
   return o;
+}
+
+/**
+ * 后缀集合规范化：去空白、去空项、按小写去重、长后缀优先
+ *
+ * <p>长后缀优先是为了「-封面」和「 - 封面」这类同时命中时取更具体的那个；
+ * 后缀本身只在「图片名以它结尾」时被切成视频名，顺序只影响谁先匹配。</p>
+ */
+/**
+ * 别名比较口径：小写 + 去掉所有空白
+ *
+ * <p>自带封面的命名在真实磁盘上有三种写法：`A-封面.jpg` / `A - 封面.jpg` / `A- 封面.jpg`——
+ * 中间到底几个空格、空格放在哪，剪辑软件不统一。所以「后缀」和「文件名」都按
+ * 「小写 + 无空白」比较：`A - 封面` 与后缀 `-封面` 会被认成同一件事（唯一会因此多认的，
+ * 是同目录里「视频名 + 只差空白的后缀」的图片，那本来就是封面）。</p>
+ */
+function nameKey(s) {
+  return String(s).replace(/\s+/g, '').toLowerCase();
+}
+
+function normalizeSuffixes(list) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of list || []) {
+    const s = String(raw).trim();
+    if (s === '' || seen.has(s.toLowerCase())) continue;
+    seen.add(s.toLowerCase());
+    out.push(s);
+  }
+  out.sort((a, b) => b.length - a.length);
+  return out;
 }
 
 // ---------------------------------------------------------------- 工具
@@ -532,6 +628,74 @@ function dirTitleOf(dirKey, rootTitle) {
   return dirKey.slice(dirKey.lastIndexOf('/') + 1);
 }
 
+/**
+ * 自带封面识别（P6.00）：同目录「视频名-封面.jpg」这类图片
+ *
+ * <p>规则：同一目录下，图片文件 {@code B + e + .jpg|jpeg|png|webp|gif|bmp} 与视频文件
+ * {@code B + v + .mp4|mkv|webm|avi|mov|m4v|wmv|flv|ts} 同时存在，且 {@code e} 去首尾空白后属于
+ * 后缀集合（默认 {@code -封面 / -cover / _cover / _封面}）→ 该图片是那个视频的自带封面。
+ * 大小写不敏感（Windows 上 COVER.JPG 与 cover.jpg 是同一类命名）。</p>
+ *
+ * <p>为什么只做「同目录 + 同名」：这正是用户命名约定的边界。跨目录去猜封面（比如
+ * {@code 输出/A.mp4} 配 {@code 封面/A.jpg}）会把正常图片误判成封面，代价是图片站少一张图，
+ * 比多一张难看得多的封面照片严重。</p>
+ *
+ * @param files   walk() 收集到的文件清单（只读，不含被 exclude 的目录）
+ * @param suffixes 已规范化的后缀集合；空集合 = 关闭识别
+ * @returns {{byPhoto: Map<string,{videoRel,suffix}>, videoCover: Map<string,string>}}
+ *          byPhoto: 图片 rel -> 宿主视频；videoCover: 视频 rel -> 封面图片 rel（同视频多张取文件名序第一张）
+ */
+function detectCovers(files, suffixes) {
+  const byPhoto = new Map();
+  const videoCover = new Map();
+  if (!suffixes || !suffixes.length) return { byPhoto, videoCover };
+
+  // 目录 -> (视频名 -> 视频 rel)，键用 nameKey（小写 + 去空白）。
+  // 同目录同名的不同容器（A.mp4 / A.mkv）取先遍历到的
+  const dirVideos = new Map();
+  for (const f of files) {
+    if (!COVER_HOST_EXT.has(f.ext)) continue;
+    const cut = f.rel.lastIndexOf('/');
+    const dirKey = cut < 0 ? '' : f.rel.slice(0, cut);
+    const base = f.name.slice(0, f.name.length - f.ext.length);
+    const key = nameKey(base);
+    if (key === '') continue;
+    let m = dirVideos.get(dirKey);
+    if (!m) {
+      m = new Map();
+      dirVideos.set(dirKey, m);
+    }
+    if (!m.has(key)) m.set(key, f.rel);
+  }
+  if (!dirVideos.size) return { byPhoto, videoCover };
+
+  for (const f of files) {
+    if (!PHOTO_EXT.has(f.ext)) continue;
+    const cut = f.rel.lastIndexOf('/');
+    const dirKey = cut < 0 ? '' : f.rel.slice(0, cut);
+    const vids = dirVideos.get(dirKey);
+    if (!vids) continue;
+    const base = f.name.slice(0, f.name.length - f.ext.length);
+    const key = nameKey(base);
+    let hit = null;
+    for (const s of suffixes) {
+      const ks = nameKey(s);
+      if (ks !== '' && key.length > ks.length && key.endsWith(ks)) {
+        hit = s;
+        break;
+      }
+    }
+    if (!hit) continue;
+    const stem = key.slice(0, key.length - nameKey(hit).length);
+    if (stem === '') continue;
+    const videoRel = vids.get(stem);
+    if (!videoRel) continue;
+    byPhoto.set(f.rel, { videoRel, suffix: hit });
+    if (!videoCover.has(videoRel)) videoCover.set(videoRel, f.rel);
+  }
+  return { byPhoto, videoCover };
+}
+
 function scanDisk(root, o) {
   const sink = { files: [], errors: [], skippedLinks: 0, dirMtime: new Map() };
   walk(root, o.excludeSet, sink);
@@ -545,8 +709,13 @@ function scanDisk(root, o) {
   const videos = [];
   const groups = new Map();
   const warnings = [];
+  const coverPhotos = [];      // 本次判定的自带封面图片（不入相册；旧行由 buildSql 删掉）
   let skipped = 0;
   let longPath = 0;
+
+  // 自带封面先整体判定一次：它是「文件名层面」的事实，不需要 stat / 哈希，
+  // 排在主循环前面才能让这些图片连 present.photo 都不登记（它们本来就不是相册照片）
+  const coverScan = detectCovers(sink.files, o.coverSuffixes);
 
   for (const f of sink.files) {
     const isVideo = VIDEO_EXT.has(f.ext);
@@ -554,6 +723,12 @@ function scanDisk(root, o) {
     if (!isVideo && !isPhoto) continue;
     // 只扫一类时，被排除的那一类连 present 都不登记：missing 同步只处理本次真的看过的那张表
     if (isVideo ? o.onlyPhoto : o.onlyVideo) continue;
+    if (isPhoto && coverScan.byPhoto.has(f.rel)) {
+      // 自带封面：不进 media_photo / media_album（也不参与 missing 判定——
+      // 它的旧行会被 DELETE 真删掉，标成 missing 只会让管理端多一堆「缺失」噪音）
+      coverPhotos.push(f.rel);
+      continue;
+    }
     if (isVideo) present.video.add(f.rel);
     else present.photo.add(f.rel);
     if (f.rel.length > MAX_REL) {
@@ -590,6 +765,8 @@ function scanDisk(root, o) {
         mtimeMs: st.mtimeMs,
         browserOk: BROWSER_OK_EXT.has(f.ext) ? 1 : 0,
         movedFrom: null,
+        // 自带封面（P6.00）：poster_source='file' + poster_file=这张图
+        poster: coverScan.videoCover.get(f.rel) || null,
       });
       continue;
     }
@@ -659,7 +836,7 @@ function scanDisk(root, o) {
     warnings.push('--limit=' + o.limit + '：本次最多写 ' + o.limit + ' 个视频 / ' + o.limit + ' 张图片' +
       '（其余文件仍按「磁盘上还在」登记，不会被标成缺失）');
   }
-  return { videos, groups: list, warnings, skipped, rootTitle, present };
+  return { videos, groups: list, warnings, skipped, rootTitle, present, coverPhotos };
 }
 
 // ---------------------------------------------------------------- 库内状态
@@ -1016,6 +1193,16 @@ function planImport(scan, state, o) {
     staleAlbums.push({ id: a.id, dirKey: a.dirKey, title: a.title });
   }
 
+  // 自带封面（P6.00）：这些图片的旧 media_photo 行要真删，所在相册的计数要重算
+  const coverPhotos = scan.coverPhotos || [];
+  const coverAlbumIds = [];
+  if (coverPhotos.length) {
+    const rels = new Set(coverPhotos);
+    for (const [albumId, rows] of state.photoByAlbum) {
+      if (rows.some((r) => rels.has(r.rel))) coverAlbumIds.push(albumId);
+    }
+  }
+
   return {
     albums,
     staleAlbums,
@@ -1027,6 +1214,9 @@ function planImport(scan, state, o) {
     aliasList: ctx.list,
     dupList,
     stats,
+    coverPhotos,
+    coverAlbumIds,
+    posterVideos: [...videoPlan.rows, ...videoPlan.moves].filter((v) => v.poster).length,
   };
 }
 
@@ -1051,6 +1241,46 @@ function missingTouch(o) {
   return o.missingEnabled ? ',missing=0,last_seen=NOW()' : '';
 }
 
+/**
+ * poster_source / poster_file 两列（P6.00）：老库还没执行 doc/media_video_poster_source.sql 时
+ * 一律退化成空串，生成的 SQL 与改动前逐字相同，不会因为缺列让整次扫描失败。
+ */
+function posterCols(o) {
+  return o.posterEnabled ? ',poster_source,poster_file' : '';
+}
+
+/** INSERT 的新行值：自动截帧 = frame + NULL；自带封面 = file + 封面相对路径 */
+function posterValues(v, o) {
+  if (!o.posterEnabled) return '';
+  return ', ' + sqlStr(v.poster ? 'file' : 'frame') + ', ' + sqlStr(posterFileOf(v));
+}
+
+/** media_video.poster_file VARCHAR(700) */
+function posterFileOf(v) {
+  if (!v.poster) return null;
+  return String(v.poster).slice(0, MAX_POSTER_FILE);
+}
+
+/**
+ * INSERT ... ON DUPLICATE KEY UPDATE 里两列的赋值片段
+ *
+ * <p>三态收敛规则（重扫必须幂等，且不能把人工设置的 manual 冲掉）：</p>
+ * <ul>
+ *   <li>本次命中自带封面 -> file + 封面路径；</li>
+ *   <li>本次没命中、库里原本是 manual -> 保持 manual + 原路径；</li>
+ *   <li>其余（含「封面文件被删了」这种 file -> 应该退回截帧）-> frame + NULL。</li>
+ * </ul>
+ * <p>赋值顺序：poster_file 写在 poster_source 之前——MySQL 按从左到右求值，
+ * 先写 poster_source 会让 poster_file 的 IF 读到新值而不是旧值。</p>
+ */
+function posterTouch(o) {
+  if (!o.posterEnabled) return '';
+  return ",poster_file=IF(n.poster_source='file',n.poster_file," +
+    "IF(media_video.poster_source='manual',media_video.poster_file,NULL))" +
+    ",poster_source=IF(n.poster_source='file','file'," +
+    "IF(media_video.poster_source='manual','manual','frame'))";
+}
+
 function buildSql(model, o) {
   const lines = [
     '-- 由 media-import/scan-media.js 生成，请勿手工编辑',
@@ -1063,6 +1293,26 @@ function buildSql(model, o) {
     lines.push('DELETE FROM media_photo;');
     lines.push('DELETE FROM media_album;');
     lines.push('DELETE FROM media_video;');
+  }
+
+  // 0) 自带封面（P6.00）：这些图片不是相册照片。放在最前面的两个理由：
+  //    ① 旧行必须真删，否则它继续占着 (album_id, seq) 槽位，本次同序号的新图会被
+  //       INSERT ... ON DUPLICATE KEY UPDATE 写成它的路径（占位串图）；
+  //    ② 删完要立刻重算它所在相册的张数/体积，否则「只含一张封面」的单图相册
+  //       会留下 photo_count=1 却 0 行的幽灵册。
+  //    --only-video 不动图片表（该模式的约定），此时只识别视频侧的封面。
+  if (model.coverPhotos.length && !o.onlyVideo) {
+    for (const part of chunks(model.coverPhotos.map((r) => sqlStr(r)), 200)) {
+      lines.push('DELETE FROM media_photo WHERE rel_path IN (' + part.join(',') + ');');
+    }
+  }
+  if (model.coverAlbumIds.length && !o.onlyVideo) {
+    for (const part of chunks(model.coverAlbumIds.map((id) => sqlStr(id)), 200)) {
+      lines.push('UPDATE media_album SET' +
+        ' photo_count = (SELECT COUNT(*) FROM media_photo p WHERE p.album_id = media_album.id),' +
+        ' bytes = (SELECT IFNULL(SUM(p.bytes),0) FROM media_photo p WHERE p.album_id = media_album.id)' +
+        ' WHERE id IN (' + part.join(',') + ');');
+    }
   }
 
   // 1) 改名/移动：先腾出被占用的唯一键（rel_path / (album_id,seq)），避免两句 UPDATE 互相撞键
@@ -1092,16 +1342,16 @@ function buildSql(model, o) {
   const videoRows = model.videoRows.map((v) => '(' + [
     sqlStr(v.id), sqlStr(v.folder), sqlStr(v.rel), sqlStr(v.title), sqlInt(v.size),
     'NULL', 'NULL', 'NULL', 'NULL', sqlInt(v.browserOk), sqlStr(posterPathOf(v.id, v.hash)), '0',
-    sqlDateTime(v.mtimeMs), sqlStr(v.hash), sqlRoot(o.rootId) + missingValues(o, true),
+    sqlDateTime(v.mtimeMs), sqlStr(v.hash), sqlRoot(o.rootId) + missingValues(o, true) + posterValues(v, o),
   ].join(',') + ')');
   for (const part of chunks(videoRows, o.batch)) {
     lines.push('INSERT INTO media_video (id,folder,rel_path,title,size,dur,w,h,vcodec,browser_ok,poster_path,hidden,mtime,content_hash,root_id' +
-      missingCols(o, true) + ') VALUES ' +
+      missingCols(o, true) + posterCols(o) + ') VALUES ' +
       part.join(',') +
       // dur/w/h/vcodec 不覆盖：本脚本不跑 ffprobe，别把别的工具填好的元数据清空
       ' AS n ON DUPLICATE KEY UPDATE folder=n.folder,rel_path=n.rel_path,title=n.title,' +
       'size=n.size,browser_ok=n.browser_ok,poster_path=n.poster_path,mtime=n.mtime,' +
-      'content_hash=n.content_hash,root_id=n.root_id' + missingTouch(o) + ';');
+      'content_hash=n.content_hash,root_id=n.root_id' + posterTouch(o) + missingTouch(o) + ';');
   }
 
   // 3) 视频改名/移动：UPDATE 同一行，id 保持不变
@@ -1110,6 +1360,11 @@ function buildSql(model, o) {
       ',folder=' + sqlStr(v.folder) + ',title=' + sqlStr(v.title) +
       ',size=' + sqlInt(v.size) + ',browser_ok=' + sqlInt(v.browserOk) +
       ',poster_path=' + sqlStr(posterPathOf(v.id, v.hash)) +
+      (o.posterEnabled
+        // 与 posterTouch 同一套三态规则；poster_file 先写，poster_source 后写（见 posterTouch 注释）
+        ? ',poster_file=' + (v.poster ? sqlStr(posterFileOf(v)) : "IF(poster_source='manual',poster_file,NULL)") +
+          ',poster_source=' + (v.poster ? sqlStr('file') : "IF(poster_source='manual','manual','frame')")
+        : '') +
       ',mtime=' + sqlDateTime(v.mtimeMs) + ',content_hash=' + sqlStr(v.hash) +
       ',root_id=' + sqlRoot(o.rootId) + (o.missingEnabled ? ',missing=0,last_seen=NOW()' : '') +
       ' WHERE id=' + sqlStr(v.id) + ';');
@@ -1711,6 +1966,274 @@ function pruneMissingRows(o, mysqlExe, password) {
   return out;
 }
 
+// ---------------------------------------------------------------- 自带封面纠正（--detect-covers）
+
+/** media_video.poster_source / poster_file 两列（老库可能还没建）：缺任一个就整段降级 */
+function posterColumnsReady(o, mysqlExe, password) {
+  const rows = queryRows(o, mysqlExe, password,
+    "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() " +
+    "AND table_name = 'media_video' AND column_name IN ('poster_source','poster_file');");
+  const n = rows.length && rows[0].length ? Number(rows[0][0]) : 0;
+  if (n === 2) return true;
+  warn('media_video 还没有 poster_source / poster_file（先执行 doc/media_video_poster_source.sql）：' +
+    '本次仍识别自带封面并从相册剔除，但不写这两列（封面照旧靠 ffmpeg 截帧）');
+  return false;
+}
+
+/** media_root 里的媒体根（kind='root'）：root_id -> 绝对路径；读不到就返回空表（回落 --root） */
+function loadRoots(o, mysqlExe, password) {
+  const roots = new Map();
+  let rows;
+  try {
+    rows = queryRows(o, mysqlExe, password,
+      "SELECT id, IFNULL(name,''), path FROM media_root WHERE kind='root' ORDER BY id;");
+  } catch (e) {
+    warn('--root-from-db 读 media_root 失败，全部按 --root 解析：' + (e.message || e));
+    return roots;
+  }
+  for (const c of rows) {
+    const id = Number(c[0]);
+    const p = String(c[2] || '').trim();
+    if (!Number.isFinite(id) || p === '') continue;
+    roots.set(id, { id, name: c[1] || '', path: path.resolve(p.split(/[\\/]+/).join(path.sep)) });
+  }
+  return roots;
+}
+
+/**
+ * 目录里「视频名 + 后缀」的封面文件
+ *
+ * <p>与 detectCovers 同一条规则，只是数据源从「本次扫盘清单」换成「库里某一行的 rel_path」：
+ * 纠正模式不扫盘，只按视频自己的媒体根去 readdir 它所在目录。</p>
+ *
+ * @param images 目录内图片：小写「去扩展名文件名」-> 相对媒体根的 rel
+ * @param base   视频名（去扩展名，已 trim）
+ */
+function coverRelOf(images, base, suffixes) {
+  const key = nameKey(base);
+  if (key === '') return null;
+  for (const s of suffixes) {
+    const hit = images.get(key + nameKey(s));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function dirOfRel(rel) {
+  const cut = rel.lastIndexOf('/');
+  return cut < 0 ? '' : rel.slice(0, cut);
+}
+
+function baseOfRel(rel) {
+  const name = rel.slice(rel.lastIndexOf('/') + 1);
+  const dot = name.lastIndexOf('.');
+  return dot < 0 ? name : name.slice(0, dot);
+}
+
+/**
+ * 库存纠正：把「视频自带封面」这件事补到已有数据上（--detect-covers）
+ *
+ * <p>为什么需要它：识别规则只在扫描时生效，而库里的 {@code xxx-封面.jpg} 早就作为照片入库了
+ * （一个目录一张封面的单图相册）。这里只做三件事，都是可幂等重跑的：</p>
+ * <ol>
+ *   <li>命中 → 视频 poster_source='file'、poster_file=封面相对路径（manual 的行跳过，不冲人工设置）；</li>
+ *   <li>从 media_photo 删掉这些封面行（它们本来就不该是照片）；</li>
+ *   <li>受影响相册的张数 / 体积重算（删空的册计数归 0，不删相册行——册行由
+ *       --purge-unclaimed 或 doc/media_album_dedupe.sql 处置，避免这条纠正命令顺手动生产结构）。</li>
+ * </ol>
+ *
+ * <p>序号空洞：删掉册内第 N 张后不会重排后面的 seq（SQL 里做需要窗口函数 + 唯一键腾挪），
+ * 下一次正式扫描会按磁盘顺序重写，空洞自然消失。</p>
+ */
+function runDetectCovers(o) {
+  const mysqlExe = resolveExe(o.mysql, 'MS_MYSQL', 'mysql', 'mysql 客户端');
+  const password = readPassword(o);
+  if (!posterColumnsReady(o, mysqlExe, password)) {
+    throw new Error('media_video 缺 poster_source / poster_file：先执行 doc/media_video_poster_source.sql 再跑 --detect-covers');
+  }
+  if (!o.coverSuffixes.length) {
+    throw new Error('--cover-suffixes 为空集合：纠正模式没有可匹配的后缀（去掉 --no-cover-scan）');
+  }
+  const roots = loadRoots(o, mysqlExe, password);
+  const fallbackRoot = o.root ? path.resolve(o.root) : null;
+  if (!fallbackRoot && !roots.size) {
+    throw new Error('--detect-covers 需要 --root=<媒体根> 或 --root-from-db（media_root 里没有任何 kind=root 的根）');
+  }
+  const rootOf = (rootId) => {
+    const hit = roots.get(Number(rootId));
+    return hit ? hit.path : fallbackRoot;
+  };
+
+  log('== 自带封面纠正（--detect-covers）' + (o.dryRun ? '：dry-run，只打印清单不写库' : '：将写库'));
+  log('   db=' + o.db + '@' + o.host + ':' + o.port + ' 后缀=' + o.coverSuffixes.join(',') +
+    ' 根=' + (o.rootFromDb ? '按 root_id 取 media_root' : String(fallbackRoot)) +
+    (o.rootFromDb && fallbackRoot ? '（回落 ' + fallbackRoot + '）' : ''));
+  for (const r of roots.values()) log('   root-id=' + r.id + ' ' + r.path + (r.name ? '（' + r.name + '）' : ''));
+
+  const videos = queryRows(o, mysqlExe, password,
+    "SELECT id, rel_path, IFNULL(content_hash,''), IFNULL(root_id,0), IFNULL(poster_source,'frame') " +
+    'FROM media_video ORDER BY root_id, rel_path;');
+
+  // 目录缓存：一次 readdirSync 换「这条视频所在目录里有哪些图片」
+  const dirCache = new Map();
+  const imagesOf = (rootAbs, dirRel) => {
+    const key = rootAbs + '\u0000' + dirRel;
+    const cached = dirCache.get(key);
+    if (cached) return cached;
+    const images = new Map();
+    const dirAbs = dirRel === '' ? rootAbs : path.resolve(rootAbs, dirRel.split('/').join(path.sep));
+    try {
+      for (const ent of fs.readdirSync(dirAbs)) {
+        const ext = path.extname(ent).toLowerCase();
+        if (!PHOTO_EXT.has(ext)) continue;
+        const stem = ent.slice(0, ent.length - ext.length);
+        const k = nameKey(stem);
+        if (k !== '' && !images.has(k)) images.set(k, (dirRel === '' ? '' : dirRel + '/') + ent);
+      }
+    } catch (e) {
+      warn('目录读取失败，跳过该目录：' + dirAbs + '（' + (e.code || e.message) + '）');
+    }
+    dirCache.set(key, images);
+    return images;
+  };
+
+  const hits = [];
+  let noRoot = 0;
+  let manual = 0;
+  for (const [id, rel, hash, rootId, source] of videos) {
+    if (source === 'manual') {
+      manual += 1;
+      continue;
+    }
+    const rootAbs = rootOf(rootId);
+    if (!rootAbs) {
+      noRoot += 1;
+      continue;
+    }
+    const images = imagesOf(rootAbs, dirOfRel(rel));
+    const cover = coverRelOf(images, baseOfRel(rel), o.coverSuffixes);
+    if (!cover) continue;
+    hits.push({ id, rel, hash, cover, rootId: Number(rootId) || null });
+  }
+
+  // 库里这些封面图落在哪些相册（要删的行 + 要重算的册）
+  const rowsByRel = new Map();
+  for (const part of chunks(hits.map((h) => sqlStr(h.cover)), 200)) {
+    const rows = queryRows(o, mysqlExe, password,
+      'SELECT id, album_id, rel_path FROM media_photo WHERE rel_path IN (' + part.join(',') + ');');
+    for (const [pid, albumId, rel] of rows) rowsByRel.set(rel, { id: pid, albumId });
+  }
+  const toDelete = hits.filter((h) => rowsByRel.has(h.cover));
+  const albumIds = [...new Set(toDelete.map((h) => rowsByRel.get(h.cover).albumId))];
+  const suffixed = hits.length;
+
+  // 哪些相册会因为这次剔除而变成空册：册内行数 === 本次要删的行数。
+  // 这类册几乎总是「一个目录只放了视频 + 它的封面」→ 封面走了，册就空了。
+  const deletedPerAlbum = new Map();
+  for (const h of toDelete) {
+    const id = rowsByRel.get(h.cover).albumId;
+    deletedPerAlbum.set(id, (deletedPerAlbum.get(id) || 0) + 1);
+  }
+  const albumRowCounts = new Map();
+  for (const part of chunks(albumIds.map((id) => sqlStr(id)), 200)) {
+    const rows = queryRows(o, mysqlExe, password,
+      'SELECT album_id, COUNT(*) FROM media_photo WHERE album_id IN (' + part.join(',') + ') GROUP BY album_id;');
+    for (const [aid, n] of rows) albumRowCounts.set(aid, Number(n) || 0);
+  }
+  const emptiedAlbums = albumIds.filter((id) => albumRowCounts.get(id) === deletedPerAlbum.get(id));
+
+  // --purge-empty 还要能「补刀」：上一次纠正没带这个开关、册已经空在那里时，
+  // 按「命中封面的视频所在目录 + 册内一张图都没有」认出同一批空册（幂等重跑，第二次也能清干净）
+  if (o.purgeEmpty) {
+    const dirs = [...new Set(hits.map((h) => dirOfRel(h.rel)))];
+    for (const part of chunks(dirs.map((d) => sqlStr(d)), 200)) {
+      let rows;
+      try {
+        rows = queryRows(o, mysqlExe, password,
+          'SELECT a.id FROM media_album a WHERE a.dir_key IN (' + part.join(',') + ')' +
+          ' AND NOT EXISTS (SELECT 1 FROM media_photo p WHERE p.album_id = a.id);');
+      } catch (e2) {
+        warn('按 dir_key 找空册失败（老库没有 media_album.dir_key？）：' + (e2.message || e2));
+        break;
+      }
+      for (const [aid] of rows) if (emptiedAlbums.indexOf(aid) < 0) emptiedAlbums.push(aid);
+    }
+  }
+
+  log('命中自带封面=' + suffixed + ' 其中库里已有照片行=' + toDelete.length +
+    ' 涉及相册=' + albumIds.length + ' 将删除照片行=' + toDelete.length +
+    ' 变空相册=' + emptiedAlbums.length);
+  if (manual) log('  跳过 poster_source=manual 的视频=' + manual + '（人工封面不覆盖）');
+  if (noRoot) warn(noRoot + ' 条视频取不到媒体根（root_id 不在 media_root 且没给 --root），未参与判定');
+  for (const h of hits.slice(0, 50)) {
+    const row = rowsByRel.get(h.cover);
+    log('COVER ' + h.id + ' ' + h.rel + (row ? ' album=' + row.albumId : ' （未入库，只更新视频）'));
+    log('      <- ' + h.cover);
+  }
+  if (hits.length > 50) log('  …还有 ' + (hits.length - 50) + ' 条，见数据库');
+
+  const sql = [];
+  sql.push('SET NAMES utf8mb4;');
+  sql.push('START TRANSACTION;');
+  for (const h of hits) {
+    const poster = posterPathOf(h.id, h.hash);
+    sql.push('UPDATE media_video SET poster_source=' + sqlStr('file') +
+      ',poster_file=' + sqlStr(String(h.cover).slice(0, MAX_POSTER_FILE)) +
+      ',poster_path=' + sqlStr(poster) +
+      " WHERE id=" + sqlStr(h.id) + ';');
+  }
+  for (const part of chunks(toDelete.map((h) => sqlStr(h.cover)), 200)) {
+    sql.push('DELETE FROM media_photo WHERE rel_path IN (' + part.join(',') + ');');
+  }
+  for (const part of chunks(albumIds.map((id) => sqlStr(id)), 200)) {
+    sql.push('UPDATE media_album SET' +
+      ' photo_count = (SELECT COUNT(*) FROM media_photo p WHERE p.album_id = media_album.id),' +
+      ' bytes = (SELECT IFNULL(SUM(p.bytes),0) FROM media_photo p WHERE p.album_id = media_album.id)' +
+      ' WHERE id IN (' + part.join(',') + ');');
+  }
+  // --purge-empty：与 --purge-unclaimed 同一套动作（先删人物关联行，再删册行），
+  // 但加了 NOT EXISTS 兜底——只删「确实一张图都不剩」的册，绝不按名单盲删
+  if (o.purgeEmpty && emptiedAlbums.length) {
+    if (o.albumPersonEnabled) {
+      for (const part of chunks(emptiedAlbums.map((id) => sqlStr(id)), 200)) {
+        sql.push('DELETE FROM media_album_person WHERE album_id IN (' + part.join(',') + ');');
+      }
+    }
+    for (const part of chunks(emptiedAlbums.map((id) => sqlStr(id)), 200)) {
+      sql.push('DELETE a FROM media_album a WHERE a.id IN (' + part.join(',') + ')' +
+        ' AND NOT EXISTS (SELECT 1 FROM media_photo p WHERE p.album_id = a.id);');
+    }
+  }
+  sql.push('COMMIT;');
+
+  if (o.dumpSql) {
+    const file = path.resolve(o.dumpSql);
+    fs.writeFileSync(file, sql.join('\n') + '\n', 'utf8');
+    log('== SQL 已写入 ' + file + '（' + sql.length + ' 行），未执行');
+  }
+  if (o.dryRun || o.dumpSql) {
+    log('== 汇总（未写库）：命中自带封面=' + suffixed + ' 涉及相册=' + albumIds.length +
+      ' 将删除照片行=' + toDelete.length + ' 将更新视频=' + hits.length);
+    return 0;
+  }
+  if (!hits.length) {
+    log('== 汇总：没有命中，库未改动');
+    return 0;
+  }
+  const r = runMysql(o, mysqlExe, password, sql.join('\n') + '\n');
+  if (r.status !== 0) {
+    throw new Error('纠正失败（mysql 退出码 ' + r.status + '）：\n' + (r.stderr || '').trim());
+  }
+  log('== 汇总（已写库）：命中自带封面=' + suffixed + ' 涉及相册=' + albumIds.length +
+    ' 已删除照片行=' + toDelete.length + ' 已更新视频=' + hits.length);
+  const left = queryRows(o, mysqlExe, password,
+    "SELECT COUNT(*) FROM media_video WHERE poster_source='file';");
+  log('  库里 poster_source=file 的视频=' + (left.length && left[0].length ? left[0][0] : '?'));
+  log('== 下一步：node build-thumbs.js --root=<媒体根> --thumbs=<缩略图根> --root-from-db' +
+    '（海报改用封面文件派生，不再跑截帧）');
+  return 0;
+}
+
 // ---------------------------------------------------------------- 主流程
 
 /**
@@ -1743,6 +2266,8 @@ function main() {
   }
   // 补救模式只动 poster_path 一列，不扫盘也不需要 --root
   if (o.fixPosterPath) return runFixPosterPath(o);
+  // 自带封面纠正：不扫盘，按库里的 rel_path + 磁盘目录判定；媒体根来自 --root-from-db 或 --root
+  if (o.detectCovers) return runDetectCovers(o);
   if (!o.root) throw new Error('缺少必填参数 --root=<媒体根>（--help 看用法）');
   const root = path.resolve(o.root);
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
@@ -1772,6 +2297,8 @@ function main() {
     o.missingEnabled = o.truncate ? false : missingReady(o, mysqlExe, password);
     // 相册 mtime 列（历史行回填由 --backfill-album-mtime 负责，缺列时两处一起降级）
     o.albumMtimeEnabled = albumMtimeReady(o, mysqlExe, password);
+    // 封面来源两列（doc/media_video_poster_source.sql）：没建就整段降级，视频照旧只写 poster_path
+    o.posterEnabled = posterColumnsReady(o, mysqlExe, password);
   } else {
     // dry-run / dump-sql 不连库：按「别名表 / missing 列已建」生成 SQL
     // （执行前请确认已 source media_dup_alias.sql 与 doc/media_missing.sql）
@@ -1779,6 +2306,7 @@ function main() {
     o.missingEnabled = true;
     o.albumPersonEnabled = true;
     o.albumMtimeEnabled = true;
+    o.posterEnabled = true;
   }
 
   const scan = scanDisk(root, o);
@@ -1793,6 +2321,9 @@ function main() {
     (o.limit !== null ? ' limit=' + o.limit : '') +
     ' hash=' + (o.noHash ? 'off' : o.hashBytes + 'B') +
     ' exclude=' + o.exclude.join(',') + (o.truncate ? ' truncate=1' : ''));
+  log('自带封面 视频=' + model.posterVideos + ' 封面图=' + model.coverPhotos.length +
+    ' 已剔除照片=' + model.coverPhotos.length +
+    (o.coverSuffixes.length ? ' suffixes=' + o.coverSuffixes.join(',') : ' 识别=off（--no-cover-scan）'));
   for (const a of model.albums.slice(0, 20)) {
     log('  album ' + a.id + ' dir="' + a.dirKey + '" photos=' + a.photoCount +
       ' bytes=' + a.bytes + ' title="' + a.title + '"' + (a.reused ? ' (复用)' : ' (新建)'));

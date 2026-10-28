@@ -27,6 +27,7 @@ import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import com.qtools.common.utils.DateUtils;
@@ -41,6 +42,8 @@ import com.qtools.media.service.IMediaIndexService;
 import com.qtools.media.service.IMediaScanService;
 import com.qtools.media.support.MediaScanArgs;
 import com.qtools.media.support.MediaScanGate;
+import com.qtools.media.support.MediaDataSourceTarget;
+import com.qtools.media.support.MediaToolEnv;
 
 /**
  * 重建索引 / 维护类任务 服务实现
@@ -78,6 +81,12 @@ public class MediaScanServiceImpl implements IMediaScanService
 
     private static final String STATUS_FAILED = "failed";
 
+    /** 协作式取消后的终态（P5.97）：任务行照样落库、监听器照样收到事件，只是结论是「被取消」 */
+    private static final String STATUS_CANCELLED = "cancelled";
+
+    /** 取消后等子进程退出的宽限（超时再 destroyForcibly） */
+    private static final long CANCEL_GRACE_MILLIS = 3000L;
+
     /** 日志尾部保留行数（GET /scan/{id} 只回这么多行） */
     private static final int LOG_MAX_LINES = 200;
 
@@ -108,9 +117,17 @@ public class MediaScanServiceImpl implements IMediaScanService
     private static final Pattern THUMB_ITEM = Pattern.compile(
             "^ITEM\\s+video=(\\S+)\\s+task=(\\S+)\\s+result=(\\S+)\\s+out=(\\S+)");
 
-    /** 任务结束的回写行：RESULT ok=3 skip=1 fail=0 ids=id1,id2 [failIds=id3] */
+    /** 任务结束的回写行：RESULT ok=3 skip=1 fail=0 ids=id1,id2 [failIds=id3] [roots=1:176/0/0;3:0/0/63] */
     private static final Pattern THUMB_RESULT = Pattern.compile(
             "^RESULT\\s+ok=(\\d+)\\s+skip=(\\d+)\\s+fail=(\\d+)\\s+ids=(\\S+)");
+
+    /**
+     * build-thumbs.js 每根汇总行（P5.96）：{@code ROOTSUMS root_id=3 name=剪辑视频 ok=0 skip=0 fail=63 root=E:/视频}
+     *
+     * <p>root= 放在行尾（路径里可能有空格），所以这里只匹配到 fail= 为止。</p>
+     */
+    private static final Pattern THUMB_ROOT_SUM = Pattern.compile(
+            "^ROOTSUMS\\s+root_id=(\\d+)\\s+name=(\\S*)\\s+ok=(\\d+)\\s+skip=(\\d+)\\s+fail=(\\d+)");
 
     /** videoIds 上限：与脚本 --video= 的命令行长度上限对齐（管理端列表一页最大 200 条） */
     private static final int MAX_VIDEO_IDS = 200;
@@ -155,9 +172,14 @@ public class MediaScanServiceImpl implements IMediaScanService
 
     private static final String TYPE_EXPORT = "export";
 
-    /** 缩略图脚本的受管开关：一律由 buildThumbCommand 按 mode 追加，配置里写了也过滤 */
+    /**
+     * 缩略图脚本的受管开关：一律由 buildThumbCommand 按 mode 追加，配置里写了也过滤
+     *
+     * <p>{@code --root-from-db}（P5.96）也在受管之列：源文件按 media_video.root_id 逐个解析是
+     * 「多库根能不能重建」的前提，不能被某个部署的 thumbArgs 关掉。</p>
+     */
     private static final List<String> THUMB_MANAGED_ARGS =
-            List.of("--force", "--no-fresh", "--sprite", "--preview", "--gc", "--yes", "-y");
+            List.of("--force", "--no-fresh", "--sprite", "--preview", "--gc", "--yes", "-y", "--root-from-db");
 
     /** 扫描脚本的禁用参数：--truncate 会清掉 hidden 与收藏引用 */
     private static final List<String> SCAN_FORBIDDEN_ARGS = List.of("--truncate");
@@ -200,8 +222,25 @@ public class MediaScanServiceImpl implements IMediaScanService
     @Autowired
     private MediaScanGate mediaScanGate;
 
+    /**
+     * 后端自己的 JDBC URL：每个 node 子进程都必须连<b>同一个库</b>
+     *
+     * <p>P5.97：这条修复从扫描入库推广到维护任务。以前只有扫描入库显式传 {@code --db}，
+     * 缩略图 / 补元数据只用 {@code thumbArgs/enrichArgs} 里的连接参数——部署层没写 {@code --db} 时
+     * 子进程默认连 {@code qtools}，克隆库 / 灾备库环境里就会「父进程读 A 库、子进程写 B 库」。
+     * 验收时真实踩到过：克隆库上跑缩略图，任务数却按生产库的 10637 条算。</p>
+     */
+    @Value("${spring.datasource.druid.master.url:}")
+    private String datasourceUrl;
+
     /** 本 JVM 正在跑的任务 id（重启后为 null，由 DB running 计数兜底） */
     private final AtomicLong runningJobId = new AtomicLong(0L);
+
+    /** 正在跑的子进程（协作式取消要打它；同一时刻只有一个任务，所以不需要按 id 存表） */
+    private volatile Process currentProcess;
+
+    /** 当前任务是否已收到取消请求：收尾时据此把结论落成 cancelled */
+    private volatile boolean cancelRequested;
 
     @PreDestroy
     public void shutdown()
@@ -248,6 +287,12 @@ public class MediaScanServiceImpl implements IMediaScanService
             if (mediaScanGate.isIngestRunning())
             {
                 throw MediaException.conflict("已有扫描入库任务在运行（" + mediaScanGate.getIngestJobId()
+                        + "），请等待结束或先取消");
+            }
+            // P5.97：扫描入库是一条流水线，阶段间隙里 runJobId 可能刚好归零——这时也不能让人插进来
+            if (mediaScanGate.isPipelineRunning())
+            {
+                throw MediaException.conflict("已有扫描入库流水线在运行（" + mediaScanGate.getPipelineJobId()
                         + "），请等待结束或先取消");
             }
             if (runningJobId.get() != 0L || mediaScanJobMapper.countRunning() > 0)
@@ -481,6 +526,54 @@ public class MediaScanServiceImpl implements IMediaScanService
         return out;
     }
 
+    /**
+     * 协作式取消（P5.97）：destroy 当前子进程，任务线程收尾时把结论落成 {@code cancelled}
+     *
+     * <p>为什么要有它：扫描入库流水线把「补哈希 / 缩略图 / 精灵图预览」整段交给本服务跑，
+     * 流水线的「停止」按钮必须能停到<b>当前阶段</b>。以前只有扫描入库那一条路能取消，
+     * 维护任务一旦开跑就只能等它自己结束（精灵图全片解码是按小时算的）。</p>
+     *
+     * <p>只认本进程正在跑的任务：{@code runningJobId} 为空说明任务行是进程重启前的残骸，
+     * 这时没有任何子进程可杀，回 409 并说清楚原因，而不是回一个假的 cancelled。</p>
+     */
+    @Override
+    public Map<String, Object> cancel(long jobId)
+    {
+        synchronized (mediaScanGate.lock)
+        {
+            long running = runningJobId.get();
+            if (running == 0L || running != jobId)
+            {
+                MediaScanJob job = mediaScanJobMapper.selectJobById(jobId);
+                if (job == null)
+                {
+                    throw MediaException.notFound("扫描任务不存在: " + jobId);
+                }
+                throw MediaException.conflict("任务 #" + jobId + " 不在本进程运行（状态 " + job.getStatus()
+                        + "）：进程重启过的任务没有子进程可杀，无法取消");
+            }
+            cancelRequested = true;
+            Process process = currentProcess;
+            if (process != null)
+            {
+                process.destroy();
+                try
+                {
+                    if (!process.waitFor(CANCEL_GRACE_MILLIS, TimeUnit.MILLISECONDS))
+                    {
+                        process.destroyForcibly();
+                    }
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    process.destroyForcibly();
+                }
+            }
+        }
+        return getJob(jobId);
+    }
+
     // ------------------------------------------------------------------ 执行
 
     private void runJob(Long jobId, MediaScanRequest req)
@@ -517,8 +610,12 @@ public class MediaScanServiceImpl implements IMediaScanService
             applyToolEnv(builder);
             // 每个脚本都可能读库（scan / build-thumbs / enrich-meta / export-bundle），mysql 不在 PATH 时必须靠 MS_MYSQL
             applyMysqlEnv(builder);
+            // 自带封面后缀集合（P6.00 qtools.media.scan.coverSuffixes -> MS_COVER_SUFFIXES）：
+            // 只对 scan 系脚本有意义，其它脚本会忽略这个变量
+            MediaToolEnv.applyScan(builder, mediaProperties);
             appendLine(tail, "== 开始执行 " + String.join(" ", builder.command()));
             Process process = builder.start();
+            currentProcess = process;
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8)))
             {
@@ -587,7 +684,13 @@ public class MediaScanServiceImpl implements IMediaScanService
             }
         }
 
-        String status = exit == 0 ? STATUS_DONE : STATUS_FAILED;
+        currentProcess = null;
+        String status = cancelRequested ? STATUS_CANCELLED : (exit == 0 ? STATUS_DONE : STATUS_FAILED);
+        if (cancelRequested)
+        {
+            appendLine(tail, "== 已按取消请求终止（子进程被 destroy）");
+        }
+        cancelRequested = false;
         if (STATUS_DONE.equals(status) && counters[1] == 0)
         {
             counters[1] = counters[0];
@@ -686,6 +789,9 @@ public class MediaScanServiceImpl implements IMediaScanService
 
         private final Set<String> skipIds = new LinkedHashSet<>();
 
+        /** 每根的数字（脚本的 ROOTSUMS 行，P5.96）：rootId → 名称与三档计数，按出现顺序 */
+        private final Map<Integer, RootSum> rootSums = new LinkedHashMap<>();
+
         private int ok;
 
         private int skip;
@@ -694,6 +800,14 @@ public class MediaScanServiceImpl implements IMediaScanService
 
         private void accept(String line)
         {
+            Matcher sum = THUMB_ROOT_SUM.matcher(line);
+            if (sum.find())
+            {
+                rootSums.put(Integer.parseInt(sum.group(1)), new RootSum(sum.group(2),
+                        Integer.parseInt(sum.group(3)), Integer.parseInt(sum.group(4)),
+                        Integer.parseInt(sum.group(5))));
+                return;
+            }
             Matcher matcher = THUMB_ITEM.matcher(line);
             if (!matcher.find())
             {
@@ -727,6 +841,11 @@ public class MediaScanServiceImpl implements IMediaScanService
         {
             StringBuilder sb = new StringBuilder("RESULT ok=").append(ok).append(" skip=").append(skip)
                     .append(" fail=").append(fail).append(" ids=").append(joinCapped(ids));
+            // 每根的数字（P5.96）：多库根时「成功 0 / 跳过 176 / 失败 63」这种总数看不出是哪个根坏了
+            if (!rootSums.isEmpty())
+            {
+                sb.append(" roots=").append(joinRootSums(rootSums));
+            }
             if (!failIds.isEmpty())
             {
                 sb.append(" failIds=").append(joinCapped(failIds));
@@ -741,6 +860,47 @@ public class MediaScanServiceImpl implements IMediaScanService
             }
             return sb.toString();
         }
+    }
+
+    /** 一个库根的三档计数（ROOTSUMS 行解析结果）：只用于日志汇总，不落库 */
+    private static final class RootSum
+    {
+        private final String name;
+
+        private final int ok;
+
+        private final int skip;
+
+        private final int fail;
+
+        private RootSum(String name, int ok, int skip, int fail)
+        {
+            this.name = name == null || name.isEmpty() ? "-" : name;
+            this.ok = ok;
+            this.skip = skip;
+            this.fail = fail;
+        }
+
+        /** {@code <rootId>:<ok>/<skip>/<fail>}：RESULT 行里每根一段，逗号/空格都不出现（便于整行解析） */
+        private String textOf(int rootId)
+        {
+            return rootId + ":" + ok + "/" + skip + "/" + fail;
+        }
+    }
+
+    /** 每根计数 → {@code 1:176/0/0;3:0/0/63}（分号分隔，单根时只有一段） */
+    private static String joinRootSums(Map<Integer, RootSum> rootSums)
+    {
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<Integer, RootSum> entry : rootSums.entrySet())
+        {
+            if (sb.length() > 0)
+            {
+                sb.append(';');
+            }
+            sb.append(entry.getValue().textOf(entry.getKey()));
+        }
+        return sb.length() == 0 ? "-" : sb.toString();
     }
 
     /** 逗号拼接并截断到 MAX_VIDEO_IDS 个（超出部分丢掉，由调用方标 truncated=1） */
@@ -931,6 +1091,15 @@ public class MediaScanServiceImpl implements IMediaScanService
         // --video= / --ids-file= 属于「本次请求勾选了哪几条」：配置里写了也丢掉，避免按钮与配置静默分叉
         MediaScanArgs.appendConfigured(command, mediaProperties.getThumbArgs(), THUMB_MANAGED_ARGS, List.of(),
                 List.of("--video=", "--ids-file="));
+        // 连接参数放在配置项之后（同名后者优先）：子进程必须连父进程同一个库
+        for (String arg : MediaDataSourceTarget.arguments(datasourceUrl))
+        {
+            command.add(arg);
+        }
+        // P5.96：缩略图 / 精灵图 / 预览片段一律按每条视频自己的 root_id 解析源文件。
+        // 之前只传配置里的单一 --root（默认根），别的库根的条目全部「源文件不存在」——
+        // 实测 239 条里 63 条失败，正好等于新库根的行数。--root 仍传，作为 root_id 为空的兜底。
+        command.add("--root-from-db");
         // jobType 是 normalizeMode 归一化后的逗号拼接值：sprite,preview 两个开关都会带上
         if (jobType.contains("sprite"))
         {
@@ -975,6 +1144,9 @@ public class MediaScanServiceImpl implements IMediaScanService
      *
      * <p>ffprobe 与 mysql 的路径走环境变量（{@code MS_FFPROBE} / {@code MS_MYSQL}），参数里不必写；
      * 请求侧只开放 {@code --limit=}（调试用），{@code --dry-run} / {@code --force} 仍属于配置项的事。</p>
+     *
+     * <p>P5.96：{@code --root-from-db} 与缩略图同理——待补的行分布在多个库根里，只传单一
+     * {@code --root} 会让其它根的源文件全部「不存在」。配置里写了这个开关也会被过滤掉。</p>
      */
     private String[] buildEnrichCommand(MediaScanRequest req)
     {
@@ -982,8 +1154,15 @@ public class MediaScanServiceImpl implements IMediaScanService
         command.add(requireNode());
         command.add(requireScript(mediaProperties.getEnrichScript(), "enrichScript"));
         Integer limit = req == null ? null : req.getLimit();
-        MediaScanArgs.appendConfigured(command, mediaProperties.getEnrichArgs(), List.of(), List.of(),
+        MediaScanArgs.appendConfigured(command, mediaProperties.getEnrichArgs(), List.of(),
+                List.of("--root-from-db"),
                 limit != null && limit > 0 ? List.of("--limit=") : List.of());
+        // 连接参数必须与父进程同库（见 datasourceUrl 的注释）
+        for (String arg : MediaDataSourceTarget.arguments(datasourceUrl))
+        {
+            command.add(arg);
+        }
+        command.add("--root-from-db");
         if (limit != null && limit > 0)
         {
             command.add("--limit=" + limit);
@@ -1212,16 +1391,8 @@ public class MediaScanServiceImpl implements IMediaScanService
      */
     private void applyToolEnv(ProcessBuilder builder)
     {
-        String ffmpeg = mediaProperties.getFfmpeg();
-        if (StringUtils.isNotEmpty(ffmpeg))
-        {
-            builder.environment().put("MS_FFMPEG", ffmpeg.trim());
-        }
-        String ffprobe = mediaProperties.getFfprobe();
-        if (StringUtils.isNotEmpty(ffprobe))
-        {
-            builder.environment().put("MS_FFPROBE", ffprobe.trim());
-        }
+        // P5.96：注入点收进 MediaToolEnv，扫描入库那边用的是同一个（之前那边根本没注入 ffprobe）
+        MediaToolEnv.applyTools(builder, mediaProperties);
     }
 
     /**
@@ -1233,12 +1404,7 @@ public class MediaScanServiceImpl implements IMediaScanService
      */
     private void applyMysqlEnv(ProcessBuilder builder)
     {
-        String mysql = mediaProperties.getMysqlClient();
-        if (mysql == null || mysql.trim().isEmpty())
-        {
-            return;
-        }
-        builder.environment().put("MS_MYSQL", mysql.trim());
+        MediaToolEnv.applyMysql(builder, mediaProperties);
     }
 
     /** 从一行输出里解析 4 个条数并求和；不匹配返回 null */
@@ -1347,6 +1513,42 @@ public class MediaScanServiceImpl implements IMediaScanService
         out.put("failIds", splitIds(fieldOf(found, "failIds=")));
         out.put("skipIds", splitIds(fieldOf(found, "skipIds=")));
         out.put("truncated", found.contains("truncated=1"));
+        // 每根的数字（P5.96）：前端可直接按 rootId 打一张「哪个根坏了几条」的表
+        List<Map<String, Object>> roots = parseRootSums(fieldOf(found, "roots="));
+        if (!roots.isEmpty())
+        {
+            out.put("roots", roots);
+        }
+        return out;
+    }
+
+    /**
+     * {@code 1:176/0/0;3:0/0/63} → [{rootId, ok, skip, fail}, ...]
+     *
+     * <p>形状不对的段落直接跳过（旧日志 / 手工改过的行不该让接口报错）。</p>
+     */
+    private static List<Map<String, Object>> parseRootSums(String text)
+    {
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (StringUtils.isEmpty(text) || "-".equals(text))
+        {
+            return out;
+        }
+        Pattern part = Pattern.compile("^(\\d+):(\\d+)/(\\d+)/(\\d+)$");
+        for (String token : text.split(";"))
+        {
+            Matcher matcher = part.matcher(token.trim());
+            if (!matcher.find())
+            {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("rootId", Integer.parseInt(matcher.group(1)));
+            row.put("ok", Integer.parseInt(matcher.group(2)));
+            row.put("skip", Integer.parseInt(matcher.group(3)));
+            row.put("fail", Integer.parseInt(matcher.group(4)));
+            out.add(row);
+        }
         return out;
     }
 

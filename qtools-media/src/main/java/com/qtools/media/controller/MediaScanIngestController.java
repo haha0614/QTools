@@ -6,11 +6,14 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import com.qtools.common.annotation.Log;
 import com.qtools.common.enums.BusinessType;
+import static com.qtools.media.support.MediaBodyParser.parseObject;
+import static com.qtools.media.support.MediaBodyParser.stringValue;
 import com.qtools.media.service.IMediaScanIngestService;
 
 /**
@@ -32,6 +35,39 @@ public class MediaScanIngestController
 {
     @Autowired
     private IMediaScanIngestService mediaScanIngestService;
+
+    /**
+     * 新增库根前的预演：{@code POST /api/media/admin/scan/preview {path}}
+     *
+     * <p>为什么单列一条路径：{@code POST /scan} 认的是 {@code rootId}（媒体根只能来自
+     * {@code media_root.path}），而这里库根<b>还没建</b>。预演只读——脚本 dry-run 不连库不写库，
+     * 后端也不写 {@code media_root}；权限按写操作要（{@code media:admin:edit}），因为它透露
+     * 服务器磁盘上的文件清单。</p>
+     *
+     * <p>回包见 {@link IMediaScanIngestService#preview(String)}；路径不存在 / 不是目录 / 无权限 → 400。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @PostMapping("/scan/preview")
+    public Map<String, Object> preview(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaScanIngestService.preview(stringValue(body.get("path")));
+    }
+
+    /**
+     * 单步重试：{@code POST /api/media/admin/scan/jobs/{jobId}/retry?phase=thumb}
+     *
+     * <p>阶段键：scan / hash / meta / thumb / sprite / index。成功后自动把后面还没成功的阶段接上
+     * （阶段动作全部幂等）。任务正在运行 → 409。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-扫描入库单步重试", businessType = BusinessType.OTHER)
+    @PostMapping("/scan/jobs/{jobId}/retry")
+    public Map<String, Object> retry(@PathVariable("jobId") String jobId,
+            @RequestParam(value = "phase", required = false) String phase)
+    {
+        return mediaScanIngestService.retryPhase(jobId, phase);
+    }
 
     /** 当前正在跑的扫描入库任务；没有任务时回 null（前端拿它做「进页面自动接管」） */
     @PreAuthorize("@ss.hasPermi('media:admin:list')")

@@ -39,6 +39,7 @@ import com.qtools.media.mapper.MediaVideoMapper;
 import com.qtools.media.service.IMediaFileService;
 import com.qtools.media.service.IMediaGuestAccessService;
 import com.qtools.media.service.IMediaIndexService;
+import com.qtools.media.support.MediaRating;
 
 /**
  * 媒体索引聚合 服务实现
@@ -351,6 +352,12 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         return rootId != null && !hidden.isEmpty() && hidden.contains(rootId);
     }
 
+    /** P5.99：该行所属的内容分级是否对未登录访客隐藏（脏值按 general 处理，与访客判定同口径） */
+    private static boolean isHiddenRating(String rating, Set<String> hiddenRatings)
+    {
+        return !hiddenRatings.isEmpty() && hiddenRatings.contains(MediaRating.normalize(rating));
+    }
+
     // ------------------------------------------------------------------ 构建
 
     /**
@@ -368,14 +375,15 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     {
         Boolean keepMissing = Boolean.valueOf(includeMissing);
         Set<Integer> hidden = guest ? mediaGuestAccessService.hiddenRootIds() : Set.of();
+        Set<String> hiddenRatings = guest ? mediaGuestAccessService.hiddenRatings() : Set.of();
         List<MediaVideo> videoRows = mediaVideoMapper.selectVideoList(keepMissing);
         List<MediaVideo> videos = videoRows;
-        if (!hidden.isEmpty())
+        if (!hidden.isEmpty() || !hiddenRatings.isEmpty())
         {
             videos = new ArrayList<>(videoRows.size());
             for (MediaVideo row : videoRows)
             {
-                if (!isHiddenRoot(row.getRootId(), hidden))
+                if (!isHiddenRoot(row.getRootId(), hidden) && !isHiddenRating(row.getContentRating(), hiddenRatings))
                 {
                     videos.add(row);
                 }
@@ -447,6 +455,9 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         Map<Long, Date> albumMtimeByPerson = new HashMap<>();
 
         List<Map<String, Object>> videoNodes = new ArrayList<>(videos.size());
+        // P5.99：人名 → 肉眼可见的视频条数。人物节点现在按「可见相册数 + 可见视频数」判定存在与否
+        //（只按相册算的话，一个名下只有视频、相册全被收紧的人物会在未登录时整条消失）。
+        Map<String, Integer> visibleVideosByPerson = new HashMap<>();
         int posterCount = 0;
         for (MediaVideo video : videos)
         {
@@ -462,16 +473,37 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             for (Map<String, Object> bound : personsByVideo.getOrDefault(video.getId(), List.of()))
             {
                 putLater(videoMtimeByPerson, stringOf(bound.get("name")), video.getMtime());
+                String personName = stringOf(bound.get("name"));
+                if (personName != null)
+                {
+                    visibleVideosByPerson.merge(personName, Integer.valueOf(1), Integer::sum);
+                }
             }
         }
 
         List<MediaAlbum> albums = mediaAlbumMapper.selectAlbumList();
         Map<String, List<Map<String, Object>>> photosByAlbum = new HashMap<>();
         // 未登录时「含隐藏根图片」的相册整册不输出（相册自己没有 root_id，只能由图片反推）
+        // P5.99：分级收紧的相册同样整册不输出（整册一个分级，册内图片继承它）
         Set<String> hiddenAlbums = new HashSet<>();
+        if (!hiddenRatings.isEmpty())
+        {
+            for (MediaAlbum album : albums)
+            {
+                if (isHiddenRating(album.getContentRating(), hiddenRatings))
+                {
+                    hiddenAlbums.add(album.getId());
+                }
+            }
+        }
         int photoCount = 0;
         for (MediaPhoto photo : mediaPhotoMapper.selectPhotoList(keepMissing))
         {
+            if (hiddenAlbums.contains(photo.getAlbumId()))
+            {
+                // 整册已因分级收紧被筛掉：它的图片也不该进 stats.photos
+                continue;
+            }
             if (isHiddenRoot(photo.getRootId(), hidden))
             {
                 hiddenAlbums.add(photo.getAlbumId());
@@ -501,6 +533,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         }
 
         List<Map<String, Object>> personNodes = new ArrayList<>();
+        boolean anyRestriction = !hidden.isEmpty() || !hiddenRatings.isEmpty();
         int personCount = 0;
         for (MediaPerson person : mediaPersonMapper.selectPersonList())
         {
@@ -512,14 +545,20 @@ public class MediaIndexServiceImpl implements IMediaIndexService
                 albumIds.add(album.getId());
                 photos += album.getPhotoCount() == null ? 0 : album.getPhotoCount();
             }
-            if (!hidden.isEmpty() && albumIds.isEmpty())
+            int ownVideos = visibleVideosByPerson.getOrDefault(person.getName(), Integer.valueOf(0))
+                    .intValue();
+            if (anyRestriction && albumIds.isEmpty() && ownVideos == 0)
             {
-                // 未登录且该人物名下没有任何可见相册：整条不输出（否则「人名的存在」本身也会泄出去）
+                // 未登录且该人物名下没有任何可见作品（相册与视频都 0）：整条不输出
+                //（否则「人名的存在」本身也会泄出去）
                 continue;
             }
             Map<String, Object> node = new LinkedHashMap<>();
             node.put("name", person.getName());
             node.put("count", own.size());
+            // P5.99：可见视频条数（未登录口径）。前端人物墙仍按 videos[].persons 自行累加，
+            // 这个键只服务「名下有视频但相册全不可见」的人物在站端仍能显示计数。
+            node.put("videos", ownVideos);
             node.put("photos", photos);
             node.put("albums", albumIds);
             node.put("cover", own.isEmpty() ? null : own.get(0).getCoverPath());
@@ -541,6 +580,11 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         stats.put("posters", posterCount);
         stats.put("people", personCount);
 
+        // P5.99：分级筛选条的数据源 —— 只输出「当前访客可见 + 确实有条目」的分级。
+        // 只有 1 项时前端不渲染筛选（站长把某档关成未登录不可见后，访客这边就不该看到那一档，
+        // 更不该看到一个必然为空的筛选按钮）。
+        List<Map<String, Object>> ratingNodes = buildRatingNodes(videoNodes, albumNodes, hiddenRatings);
+
         List<String> facetOrder = new ArrayList<>(FACET_ORDER);
         for (String facet : facets)
         {
@@ -554,11 +598,71 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         out.put("built", formatBuilt(maxMtime()));
         out.put("root", displayRoot());
         out.put("stats", stats);
+        out.put("ratings", ratingNodes);
         out.put("facetOrder", facetOrder);
         out.put("videos", videoNodes);
         out.put("albums", albumNodes);
         out.put("people", personNodes);
         return out;
+    }
+
+    /**
+     * 分级筛选条节点（P5.99）：{@code [{value,label,count}]}
+     *
+     * <p>口径两条：</p>
+     * <ol>
+     *   <li><b>只含当前访客可见的分级</b>（{@code media_rating_policy.guest_visible=0} 的那一档不出现）——
+     *       否则筛选器会暴露「这一档存在但你看不到」；</li>
+     *   <li><b>只含有条目的分级</b>（该档在当前可见集合里一条视频 / 相册都没有就不出现）——
+     *       一个必然为空的筛选项只是死 UI。</li>
+     * </ol>
+     * <p>{@code count} = 该档可见视频数 + 可见相册数（两种条目在站上是并列的两块内容，
+     * 计数只服务「这一档有多少东西」的直觉，不参与任何判定）。</p>
+     */
+    private static List<Map<String, Object>> buildRatingNodes(List<Map<String, Object>> videoNodes,
+            List<Map<String, Object>> albumNodes, Set<String> hiddenRatings)
+    {
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        for (String value : MediaRating.values())
+        {
+            counts.put(value, Integer.valueOf(0));
+        }
+        for (Map<String, Object> node : videoNodes)
+        {
+            bumpRating(counts, node.get("contentRating"));
+        }
+        for (Map<String, Object> node : albumNodes)
+        {
+            bumpRating(counts, node.get("contentRating"));
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map.Entry<String, Integer> entry : counts.entrySet())
+        {
+            if (isHiddenRating(entry.getKey(), hiddenRatings))
+            {
+                continue;
+            }
+            if (entry.getValue() == null || entry.getValue().intValue() <= 0)
+            {
+                continue;
+            }
+            Map<String, Object> node = new LinkedHashMap<>();
+            node.put("value", entry.getKey());
+            node.put("label", MediaRating.labelOf(entry.getKey()));
+            node.put("count", entry.getValue());
+            out.add(node);
+        }
+        return out;
+    }
+
+    private static void bumpRating(Map<String, Integer> counts, Object rating)
+    {
+        String value = MediaRating.normalize(rating == null ? null : String.valueOf(rating));
+        Integer prev = counts.get(value);
+        if (prev != null)
+        {
+            counts.put(value, Integer.valueOf(prev.intValue() + 1));
+        }
     }
 
     /**
@@ -715,6 +819,9 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         {
             node.put("rating", video.getRating());
         }
+        // P5.99 内容分级：恒输出（列 NOT NULL 默认 general）。注意键名是 contentRating ——
+        // 上面的 rating 是人工评分 0-100，两者不是一回事，站端筛选按这一档走。
+        node.put("contentRating", MediaRating.normalize(video.getContentRating()));
         // 人物（P3-A）：非空才输出，没绑人物的视频索引体积一个字节都不涨
         if (persons != null && !persons.isEmpty())
         {
@@ -776,6 +883,8 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         node.put("bytes", album.getBytes());
         node.put("cover", album.getCoverPath());
         node.put("note", album.getNote());
+        // P5.99 内容分级：恒输出（与视频条目同名同义）
+        node.put("contentRating", MediaRating.normalize(album.getContentRating()));
         // 人物（P3-A）：只给名字数组，非空才输出（前端人物页按名字匹配 albums[].persons）
         if (persons != null && !persons.isEmpty())
         {

@@ -29,6 +29,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="mtime"      column="mtime"       />
         <!-- M3-A 组织能力：人工评分 0-100（P5-A 扩容；null = 未评分），索引条目按需输出 -->
         <result property="rating"     column="rating"      />
+        <!-- P5.99 内容分级：general 大众 / guidance 家长指导 / restricted 限制级（列 NOT NULL 默认 general） -->
+        <result property="contentRating" column="content_rating" />
         <!-- P5.38 作品简介 / 剧情梗概（doc/media_synopsis.sql）：TEXT，>6 行前端折叠；
              只有单片详情与简介接口取这一列，列表 / 索引查询刻意不带（见 selectVideoVo 注释） -->
         <result property="synopsis"   column="synopsis"    />
@@ -61,7 +63,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     -->
     <sql id="videoColumns">
         id, content_hash, root_id, folder, rel_path, title, size, dur, w, h, vcodec, fps, browser_ok,
-        poster_path, doc_path, sub_path, mtime, rating, missing, last_seen
+        poster_path, doc_path, sub_path, mtime, rating, content_rating, missing, last_seen
     </sql>
 
     <sql id="selectVideoVo">

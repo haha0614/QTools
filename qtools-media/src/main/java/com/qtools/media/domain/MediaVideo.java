@@ -58,6 +58,23 @@ public class MediaVideo
     /** 相对 media 根的海报路径，如 thumbs/v/xxx.jpg */
     private String posterPath;
 
+    /**
+     * 封面来源（P6.00，{@code doc/media_video_poster_source.sql}）：
+     * {@code frame} 自动截帧（默认 / 历史行为）· {@code file} 同目录自带封面 · {@code manual} 手动指定
+     *
+     * <p>{@code posterPath} 始终是<b>派生产物</b>路径（thumbs/v/&lt;key&gt;.jpg，后端按内容寻址落盘文件），
+     * 与这一列无关地保持可用；{@code file} 时 {@link #posterFile} 指向源封面文件。</p>
+     */
+    private String posterSource;
+
+    /**
+     * 自带封面文件（相对媒体根、正斜杠；仅 {@code posterSource=file} 时有值）
+     *
+     * <p>{@code doc/media-import/build-thumbs.js} 拿它直接派生封面缩略图，不再跑 ffmpeg 截帧；
+     * 文件被删掉时自动退回截帧。手工设置的 {@code manual} 不会被重扫覆盖。</p>
+     */
+    private String posterFile;
+
     /** 相对 media 根的文档路径 */
     private String docPath;
 
@@ -90,6 +107,18 @@ public class MediaVideo
      * 扫描脚本从不写这一列，因此重建索引不会冲掉人工评分。</p>
      */
     private Integer rating;
+
+    /**
+     * 内容分级（P5.99）：{@code general} 大众 / {@code guidance} 家长指导 / {@code restricted} 限制级
+     *
+     * <p>由 {@code media_video.content_rating}（VARCHAR(16) NOT NULL DEFAULT 'general'）承载，
+     * 值域与校验集中在 {@link com.qtools.media.support.MediaRating}；与 {@link #rating}
+     * （人工评分 0-100）是<b>两个不同的东西</b>，接口出参里分级恒叫 {@code contentRating}。</p>
+     *
+     * <p>未登录访客能否看到这一条，取决于「它在不在收紧的库根里」<b>且</b>「它的分级在
+     * {@code media_rating_policy} 里是不是 guest_visible=0」——两者都通过才可见。</p>
+     */
+    private String contentRating;
 
     /**
      * 作品简介 / 剧情梗概（P5.38，长文本，保留换行；{@code null} = 没有简介）
@@ -245,6 +274,26 @@ public class MediaVideo
         this.posterPath = posterPath;
     }
 
+    public String getPosterSource()
+    {
+        return posterSource;
+    }
+
+    public void setPosterSource(String posterSource)
+    {
+        this.posterSource = posterSource;
+    }
+
+    public String getPosterFile()
+    {
+        return posterFile;
+    }
+
+    public void setPosterFile(String posterFile)
+    {
+        this.posterFile = posterFile;
+    }
+
     public String getDocPath()
     {
         return docPath;
@@ -293,6 +342,16 @@ public class MediaVideo
     public void setRating(Integer rating)
     {
         this.rating = rating;
+    }
+
+    public String getContentRating()
+    {
+        return contentRating;
+    }
+
+    public void setContentRating(String contentRating)
+    {
+        this.contentRating = contentRating;
     }
 
     public String getSynopsis()

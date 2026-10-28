@@ -47,6 +47,37 @@ public interface IMediaGuestAccessService
     /** 这个根是否对未登录访客隐藏；{@code rootId} 为 null（存量行 / 配置默认根无对应行）时返回 false */
     boolean isHidden(Integer rootId);
 
+    // ------------------------------------------------------------------ 内容分级（P5.99）
+
+    /**
+     * 当前是否有<b>任何</b>收紧：有根 {@code guest_visible=0} 或有分级 {@code guest_visible=0}
+     *
+     * <p>拦截器 / 索引构建的快速短路闸：两者都空 = 站点对未登录访客与改动前完全一致，
+     * 连一次点查都不做。P5.78 时这个闸只看根集合，P5.99 起必须加上分级。</p>
+     */
+    boolean hasGuestRestriction();
+
+    /** {@code guest_visible = 0} 的分级值集合（恒非 null；空集合 = 三档都对未登录可见） */
+    Set<String> hiddenRatings();
+
+    /** 这个分级值是否对未登录访客隐藏；{@code null} / 未知值按 {@code general} 处理（不隐藏） */
+    boolean isRatingHidden(String rating);
+
+    /**
+     * 视频在<b>两个维度</b>上是否对未登录访客隐藏（所在根收紧 或 内容分级收紧）
+     *
+     * <p>只答「配置层面收不收」，<b>不看本次请求的登录态</b> —— 调用方（拦截器 / 索引 / 人物页）
+     * 自己按 {@link #isGuest()} 决定要不要用它。视频不存在时返回 false（不存在本来就会 404）。</p>
+     */
+    boolean isVideoHidden(String videoId);
+
+    /**
+     * 相册在两个维度上是否对未登录访客隐藏（它的图片有任何一张在收紧的根里，或它自己的分级收紧）
+     *
+     * <p>与索引 / 人物页 / 拦截器同一条口径（宁可多藏，不漏）。</p>
+     */
+    boolean isAlbumHidden(String albumId);
+
     /** 根列表被改过（{@code guest_visible} 等）：清掉本类的缓存，下一次请求立即按新值判定 */
     void invalidateRoots();
 

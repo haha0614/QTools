@@ -63,9 +63,9 @@ public class MediaGuestInterceptor implements HandlerInterceptor
         {
             return true;
         }
-        if (mediaGuestAccessService.hiddenRootIds().isEmpty())
+        if (!mediaGuestAccessService.hasGuestRestriction())
         {
-            // 默认状态（没有任何根收紧）：不解析目标、不查库
+            // 默认状态（既没有收紧的库根，也没有收紧的分级）：不解析目标、不查库
             return true;
         }
         Object varsAttr = request.getAttribute(HandlerMapping.URI_TEMPLATE_VARIABLES_ATTRIBUTE);

@@ -49,6 +49,7 @@ import com.qtools.media.service.IMediaAdminService;
 import com.qtools.media.service.IMediaFileService;
 import com.qtools.media.service.IMediaIndexService;
 import com.qtools.media.service.IMediaOrganizeService;
+import com.qtools.media.support.MediaRating;
 import com.qtools.media.support.MediaTranscodeProbe;
 import com.qtools.media.support.MediaTrashSupport;
 
@@ -1387,6 +1388,8 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         node.put("browserOk", video.getBrowserOk() != null && video.getBrowserOk() != 0);
         node.put("poster", video.getPosterPath());
         node.put("hidden", video.getHidden() != null && video.getHidden() != 0);
+        // P5.99 内容分级：列表行内下拉就靠这个键回显（行整形是显式白名单，漏了这里 = 列永远空）
+        node.put("contentRating", MediaRating.normalize(video.getContentRating()));
         node.put("mtime", formatDate(video.getMtime()));
         // 缺失文件（P2-D）：管理端列表据此标红点；用户端默认仍带出，由前端自行过滤
         node.put("missing", video.getMissing() != null && video.getMissing() != 0);
@@ -1406,6 +1409,8 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         node.put("bytes", album.getBytes());
         node.put("hidden", album.getHidden() != null && album.getHidden() != 0);
         node.put("cover", album.getCoverPath());
+        // P5.99 内容分级（整册一个值）：相册列表行内下拉的回显字段
+        node.put("contentRating", MediaRating.normalize(album.getContentRating()));
         return node;
     }
 

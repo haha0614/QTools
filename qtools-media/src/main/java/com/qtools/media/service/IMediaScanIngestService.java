@@ -44,4 +44,32 @@ public interface IMediaScanIngestService
      * @throws com.qtools.media.exception.MediaException 404 任务不存在 / 409 任务已经结束
      */
     Map<String, Object> cancel(String jobId);
+
+    /**
+     * 单步重试（P5.97）：只重跑指定的阶段，成功后自动把后面还没成功的阶段接上
+     *
+     * <p>为什么允许「指定任意阶段」而不只是失败的那一段：阶段动作全部幂等，管理员看到
+     * 「缩略图跳过了 100 条」也会想单独再来一遍。</p>
+     *
+     * @param jobId    任务 id（{@code scn-<n>}）
+     * @param phaseKey 阶段键：scan / hash / meta / thumb / sprite / index
+     * @return 任务视图（该阶段已重置为 pending）
+     * @throws com.qtools.media.exception.MediaException 404 任务不存在 / 400 阶段不存在或在 dry-run 任务上重试
+     *         / 409 任务正在运行或有别的扫描任务在跑
+     */
+    Map<String, Object> retryPhase(String jobId, String phaseKey);
+
+    /**
+     * 新增库根前的预演（P5.97）：{@code node scan-media.js --root=<path> --dry-run}
+     *
+     * <p><b>只读</b>：脚本在 dry-run 下不连库、不写库（{@code needDb = !(dryRun||dumpSql)}），本方法也不写
+     * {@code media_root}。因此它接受一个<b>不在库里</b>的路径——这是「建根之前先看清下面有多少东西」的
+     * 唯一办法；真实扫描仍然只认 {@code media_root.path}。</p>
+     *
+     * @param path 服务器上的绝对路径（存在、是目录、可读；含 {@code ..} 一律 400）
+     * @return {@code {path, videos, albums, photos, files, bytes, ignored:{ext:count}, ignoredTotal,
+     *         dryRunMs, estimateSeconds, walkTruncated, command}}
+     * @throws com.qtools.media.exception.MediaException 400 路径非法 / 不存在 / 无权限 / 脚本失败
+     */
+    Map<String, Object> preview(String path);
 }

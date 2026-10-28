@@ -1,5 +1,9 @@
 package com.qtools.media.config;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
@@ -265,6 +269,14 @@ public class MediaProperties
      */
     private Watch watch = new Watch();
 
+    /**
+     * 扫描行为细化（{@code qtools.media.scan.*}，P6.00）
+     *
+     * <p>为什么单独成类：{@code scanArgs} 是「一行字符串参数」，列表型配置塞不进去（逗号会被
+     * 脚本自己的 --exclude 语义吃掉），而自带封面的后缀集合天生是一个可扩展列表。</p>
+     */
+    private Scan scan = new Scan();
+
     /** 便携根 {@code qtools.home}（空 = 未配置，此时只认配置里的绝对路径） */
     public String getHome()
     {
@@ -331,6 +343,16 @@ public class MediaProperties
         this.maxFrame = maxFrame;
     }
 
+    public Scan getScan()
+    {
+        return scan;
+    }
+
+    public void setScan(Scan scan)
+    {
+        this.scan = scan;
+    }
+
     public Transcode getTranscode()
     {
         return transcode;
@@ -369,6 +391,35 @@ public class MediaProperties
      * <p>三项都很小，但仍然单独成类：以后要加 {@code lookAhead} / {@code tune} 这类编码器参数时，
      * 不该继续往 {@code qtools.media.*} 顶层堆平铺字段。</p>
      */
+    /**
+     * 扫描行为细节（{@code qtools.media.scan.*}，P6.00）
+     */
+    public static class Scan
+    {
+        /**
+         * 自带封面的文件名后缀集合（默认 {@code -封面 / -cover / _cover / _封面}）
+         *
+         * <p>规则：同一目录里 {@code 视频名 + 后缀 + .jpg|png|...} 与 {@code 视频名 + .mp4|...} 同时存在，
+         * 该图片即那个视频的自带封面——它<b>不入相册 / 图片站</b>，只作为视频海报的来源
+         * （{@code media_video.poster_source='file'}）。大小写不敏感，前后空白忽略。</p>
+         *
+         * <p>注入方式：{@code MediaToolEnv.applyScan} 把它拼成逗号串写进子进程环境变量
+         * {@code MS_COVER_SUFFIXES}（scan-media.js 认这个变量）；命令行的
+         * {@code --cover-suffixes=} 优先级更高。留空 = 用脚本内置默认值。</p>
+         */
+        private List<String> coverSuffixes = new ArrayList<>(Arrays.asList("-封面", "-cover", "_cover", "_封面"));
+
+        public List<String> getCoverSuffixes()
+        {
+            return coverSuffixes;
+        }
+
+        public void setCoverSuffixes(List<String> coverSuffixes)
+        {
+            this.coverSuffixes = coverSuffixes;
+        }
+    }
+
     public static class Transcode
     {
         /**

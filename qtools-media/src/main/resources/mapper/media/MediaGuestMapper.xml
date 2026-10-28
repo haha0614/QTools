@@ -3,9 +3,11 @@
 PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <!--
-    未登录可见性判定（P5.78）：库根 guest_visible 的横切查询。
-    表由 doc/media_portability.sql 建立，guest_visible 列由 doc/media_root_guest_visible.sql 添加。
-    这里全部是主键 / album_id / content_hash 索引上的点查，没有全表扫描。
+    未登录可见性判定（P5.78 / P5.99）：库根 guest_visible + 内容分级 media_rating_policy 的横切查询。
+
+    表由 doc/media_portability.sql 建立，guest_visible 列由 doc/media_root_guest_visible.sql 添加；
+    分级列与策略表由 doc/media_content_rating.sql 添加。
+    这里全部是主键 / album_id / content_hash / rel_path 索引上的点查，没有全表扫描。
 -->
 <mapper namespace="com.qtools.media.mapper.MediaGuestMapper">
 
@@ -13,25 +15,55 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         select id from media_root where guest_visible = 0 order by id asc
     </select>
 
+    <select id="selectGuestHiddenRatings" resultType="java.lang.String">
+        select rating from media_rating_policy where guest_visible = 0 order by rating asc
+    </select>
+
     <select id="selectRootIdOfVideo" resultType="java.lang.Integer">
         select root_id from media_video where id = #{id} limit 1
+    </select>
+
+    <select id="selectRatingOfVideo" resultType="java.lang.String">
+        select content_rating from media_video where id = #{id} limit 1
     </select>
 
     <select id="selectRootIdsOfAlbum" resultType="java.lang.Integer">
         select distinct root_id from media_photo where album_id = #{albumId}
     </select>
 
-    <select id="selectRootIdsOfPhotoByHash" resultType="java.lang.Integer">
-        select distinct root_id from media_photo where content_hash = #{hash}
+    <select id="selectRatingOfAlbum" resultType="java.lang.String">
+        select content_rating from media_album where id = #{albumId} limit 1
+    </select>
+
+    <!-- P5.99：同一份内容可能存在于多本册 / 多个根，评级与根一起取回，由服务层统一判定 -->
+    <select id="selectCopiesOfPhotoByHash" resultType="java.util.LinkedHashMap">
+        select p.root_id as rootId, a.content_rating as rating
+        from media_photo p
+        left join media_album a on a.id = p.album_id
+        where p.content_hash = #{hash}
     </select>
 
     <select id="selectRootIdOfPhotoBySeq" resultType="java.lang.Integer">
         select root_id from media_photo where album_id = #{albumId} and seq = #{seq} limit 1
     </select>
 
-    <!-- P5.90：人物卡背景预渲染要按「头像属于哪个根」判可见性；只取两列，不碰 selectPersonDetail 的 4 个子查询 -->
+    <!-- P5.90：人物卡背景预渲染要按「头像属于哪个根 / 哪一档」判可见性；只取三列，不碰 selectPersonDetail 的 4 个子查询 -->
     <select id="selectAvatarOfPerson" resultType="java.util.Map">
-        select avatar_kind as kind, avatar_ref as ref from media_person where id = #{id} limit 1
+        select avatar_kind as kind, avatar_ref as ref, avatar_path as avatarPath
+        from media_person where id = #{id} limit 1
+    </select>
+
+    <!-- P5.99：/media/file|stream|sub?p=<相对路径> 的分级判定（不走 id，只能按路径反查） -->
+    <select id="selectRatingOfVideoByRelPath" resultType="java.lang.String">
+        select content_rating from media_video where rel_path = #{rel} limit 1
+    </select>
+
+    <select id="selectRatingOfAlbumByPhotoRelPath" resultType="java.lang.String">
+        select a.content_rating
+        from media_photo p
+        inner join media_album a on a.id = p.album_id
+        where p.rel_path = #{rel}
+        limit 1
     </select>
 
 </mapper>

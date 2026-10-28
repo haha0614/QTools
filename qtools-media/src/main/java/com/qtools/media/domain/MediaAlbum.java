@@ -38,6 +38,15 @@ public class MediaAlbum
 
     private String note;
 
+    /**
+     * 内容分级（P5.99）：{@code general} 大众 / {@code guidance} 家长指导 / {@code restricted} 限制级
+     *
+     * <p>由 {@code media_album.content_rating} 承载，值域与校验集中在
+     * {@link com.qtools.media.support.MediaRating}。相册自己的分级是**整册**属性：
+     * 册里的图片不单独存分级，未登录访客按相册这一档判可见性。</p>
+     */
+    private String contentRating;
+
     private Integer sort;
 
     private Date mtime;
@@ -133,6 +142,16 @@ public class MediaAlbum
     public void setNote(String note)
     {
         this.note = note;
+    }
+
+    public String getContentRating()
+    {
+        return contentRating;
+    }
+
+    public void setContentRating(String contentRating)
+    {
+        this.contentRating = contentRating;
     }
 
     public Integer getSort()

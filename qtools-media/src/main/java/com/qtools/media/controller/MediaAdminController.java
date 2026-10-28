@@ -42,6 +42,7 @@ import com.qtools.media.service.IMediaOrganizeService;
 import com.qtools.media.service.IMediaPersonCardBgService;
 import com.qtools.media.service.IMediaPersonService;
 import com.qtools.media.service.IMediaPlaylistService;
+import com.qtools.media.service.IMediaRatingService;
 import com.qtools.media.service.IMediaRootArtifactService;
 import com.qtools.media.service.IMediaSavedFilterService;
 import com.qtools.media.service.IMediaScanIngestService;
@@ -126,6 +127,10 @@ public class MediaAdminController extends BaseController
     /** 站端编辑策略（off / local / full）：管理端「编辑策略」面板读它、改它 */
     @Autowired
     private IMediaEditPolicyService mediaEditPolicyService;
+
+    /** 内容分级（P5.99）：视频 / 相册的单条与批量分级 + 分级可见性策略 */
+    @Autowired
+    private IMediaRatingService mediaRatingService;
 
     /** 保存的筛选条件（站端写、管理端只读清单 + 清理） */
     @Autowired
@@ -354,6 +359,79 @@ public class MediaAdminController extends BaseController
         return mediaAdminService.updateAlbumPerson(id, personId);
     }
 
+    // ------------------------------------------------------------------ 内容分级（P5.99）
+
+    /**
+     * 单条视频改分级：body {@code {rating:"general"|"guidance"|"restricted"}}
+     *
+     * <p>非法值 400（值域与校验集中在 {@code MediaRating} 一处）；改完立刻失效访客可见性快照
+     * 与索引快照，所以未登录访客下一次请求就是新口径，不用等 TTL。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-内容分级", businessType = BusinessType.UPDATE)
+    @PutMapping("/video/{id}/rating")
+    public Map<String, Object> videoRating(@PathVariable("id") String id,
+            @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaRatingService.updateVideoRating(id, stringValue(body.get("rating")));
+    }
+
+    /** 单本相册改分级：body {@code {rating}}（整册属性，册里的图片继承它） */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-内容分级", businessType = BusinessType.UPDATE)
+    @PutMapping("/album/{id}/rating")
+    public Map<String, Object> albumRating(@PathVariable("id") String id,
+            @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaRatingService.updateAlbumRating(id, stringValue(body.get("rating")));
+    }
+
+    /**
+     * 批量改分级：body {@code {type:"video"|"album", ids:[...], rating}}
+     *
+     * <p>管理端列表多选后一次提交；返回 {@code {kind,rating,label,requested,matched,updated}}，
+     * {@code matched} 与 {@code requested} 的差 = 不存在（已被扫描删掉）的 id 数。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-批量内容分级", businessType = BusinessType.UPDATE)
+    @PostMapping("/rating/batch")
+    public Map<String, Object> ratingBatch(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaRatingService.batch(stringValue(body.get("type")), stringsValue(body.get("ids"), "ids"),
+                stringValue(body.get("rating")));
+    }
+
+    /**
+     * 读分级可见性策略：{@code {general, guidance, restricted, items:[{value,label,guestVisible}]}}
+     *
+     * <p>{@code guestVisible=true} = 未登录可见。三档默认都可见（与迁移预置一致）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/rating-policy")
+    public Map<String, Object> ratingPolicy()
+    {
+        return mediaRatingService.policy();
+    }
+
+    /**
+     * 改分级可见性策略：body {@code {general?:bool, guidance?:bool, restricted?:bool}}
+     *
+     * <p><b>逐项局部更新</b>：不传 = 不改；传 true/false = 覆盖。管理端「库根管理」页的
+     * 「分级与可见性」区就是这三个开关，一次只翻一个也照常工作。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-分级可见性", businessType = BusinessType.UPDATE)
+    @PutMapping("/rating-policy")
+    public Map<String, Object> updateRatingPolicy(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaRatingService.updatePolicy(boolValue(body.get("general")), boolValue(body.get("guidance")),
+                boolValue(body.get("restricted")));
+    }
+
     // ------------------------------------------------------------------ 软删 / 恢复
 
     /** 软删：移动到回收站并置 hidden=1（绝不真删） */
@@ -487,6 +565,11 @@ public class MediaAdminController extends BaseController
             ingest.setWithPhoto(boolValue(body.get("withPhoto")));
             ingest.setLimit(integerValue(body.get("limit")));
             ingest.setForce(boolValue(body.get("force")));
+            // P5.97：扫完之后要不要接着补哈希 / 生成缩略图 / 重建索引快照（缺省全要）
+            ingest.setPipeline(boolValue(body.get("pipeline")));
+            ingest.setHash(boolValue(body.get("hash")));
+            ingest.setRebuildIndex(boolValue(body.get("rebuildIndex")));
+            ingest.setDerive(stringValue(body.get("derive")));
             return mediaScanIngestService.start(ingest);
         }
         MediaScanRequest request = new MediaScanRequest(stringValue(body.get("type")), stringValue(body.get("mode")),

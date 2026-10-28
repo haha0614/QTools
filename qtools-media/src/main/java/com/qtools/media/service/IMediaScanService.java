@@ -49,4 +49,15 @@ public interface IMediaScanService
 
     /** 最近 N 个任务 */
     List<Map<String, Object>> recent(int limit);
+
+    /**
+     * 协作式取消（P5.97）：destroy 当前子进程，任务线程收尾时把结论落成 {@code cancelled}
+     *
+     * <p>扫描入库流水线的「停止」按钮靠它停到<b>当前阶段</b>（补哈希 / 缩略图 / 精灵图预览都跑在这里）。</p>
+     *
+     * @param jobId 任务 id
+     * @return 任务视图（通常是 running，收尾后变 cancelled；前端轮询即可）
+     * @throws com.qtools.media.exception.MediaException 404 任务不存在 / 409 任务不在本进程运行
+     */
+    Map<String, Object> cancel(long jobId);
 }

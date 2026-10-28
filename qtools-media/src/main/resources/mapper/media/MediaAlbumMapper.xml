@@ -14,12 +14,14 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="bytes"      column="bytes"       />
         <result property="coverPath"  column="cover_path"  />
         <result property="note"       column="note"        />
+        <!-- P5.99 内容分级（doc/media_content_rating.sql）：整册一个值，默认 general -->
+        <result property="contentRating" column="content_rating" />
         <result property="sort"       column="sort"        />
         <result property="mtime"      column="mtime"       />
     </resultMap>
 
     <sql id="selectAlbumVo">
-        select id, person_id, title, dir, photo_count, bytes, cover_path, note, sort, mtime
+        select id, person_id, title, dir, photo_count, bytes, cover_path, note, content_rating, sort, mtime
         from media_album
     </sql>
 

@@ -8,8 +8,8 @@
 | 脚本 | 做什么（一句话） | 关键参数 |
 | --- | --- | --- |
 | `scan-media.js` | 只读遍历媒体根，把目录结构（含内容哈希、多库根、重复副本别名）写进 `media_video` / `media_album` / `media_photo`（别名进 `media_*_alias`） | `--root=`（必填）、`--root-id=`、`--db= --user= --host= --port=`、`--secret=`、`--dry-run`、`--truncate --yes`、`--album-mode=`、`--purge-unclaimed`、`--backfill-hash` |
-| `build-thumbs.js` | 读库调 ffmpeg 生成视频封面 / 图片缩略图 / 大图预览，封面按 `content_hash` 内容寻址 | `--thumbs=`（必填）、`--root=`、`--ffmpeg=`、`--force`、`--no-fresh`、`--limit=` |
-| `enrich-meta.js` | 读库调 ffprobe 补齐 `media_video` 的 `dur/w/h/vcodec`（待补集合 = 四列任一 NULL） | `--root=`、`--ffprobe=`（或 `MS_FFPROBE`）、`--limit=`、`--dry-run`、`--force` |
+| `build-thumbs.js` | 读库调 ffmpeg 生成视频封面 / 图片缩略图 / 大图预览，封面按 `content_hash` 内容寻址 | `--thumbs=`（必填）、`--root=`、`--root-from-db`（多库根，见第 6 节）、`--ffmpeg=`、`--force`、`--no-fresh`、`--limit=` |
+| `enrich-meta.js` | 读库调 ffprobe 补齐 `media_video` 的 `dur/fps/w/h/vcodec`（待补集合 = 任一列 NULL） | `--root=`、`--root-from-db`、`--root-id=`（只补一个库根 + 打 VERIFY 行）、`--ffprobe=`（或 `MS_FFPROBE`）、`--limit=`、`--dry-run`、`--force` |
 | `export-bundle.js` | 把一个库打成便携包目录（`manifest.json` + `media.sql.gz` + `user-state.json` + 可选 `thumbs/`） | `--root= --out=`（必填）、`--with-thumbs`、`--thumbs=`、`--with-stats`、`--dump=`、`--dry-run` |
 | `import-bundle.js` | 校验 `schemaVersion` 后把便携包导入目标库（**表级替换**），可选合并用户资产 | `--in=`（必填）、`--db=`、`--create-schema`、`--merge-user-state`、`--force`、`--dry-run` |
 
@@ -90,6 +90,31 @@ node E:\111\project\QTools\QTools\doc\media-import\import-bundle.js --in='D:\bun
 
 > 五个脚本的 `--port` 默认都是 `3306`，而本项目 `application-druid.yml` 默认 `3307`：
 > 本地跑一律显式写 `--port=3307`（见第 5 节「常见坑」）。
+
+### 2.1 多库根（P5.96）：逐条按 `root_id` 解析源文件
+
+`media_root` 里有多个 `kind='root'` 内容根时，**一条 `--root` 只够解析其中一个根下的行**，
+另一个根的行会全部报「源文件不存在」（管理端表现为「失败 N 条」，N = 非默认根的条数）。
+这两个脚本因此都支持 `--root-from-db`：源文件按**每行自己的** `media_video.root_id` /
+`media_photo.root_id` 去 `media_root.path` 解析，`--root` 退化成「`root_id` 为空 / 查不到」的兜底。
+
+```powershell
+# 缩略图 / 精灵图 / 预览片段：一条命令跑完所有库根，收尾按根分别报数
+node ...\build-thumbs.js --thumbs='D:\thumbs' --root='D:\我的媒体' --root-from-db --port=3307 --secret='D:\cfg\secret.yml'
+#   START ... rootfromdb=1 roots=2
+#   ROOTSUMS root_id=1 name=主库 ok=176 skip=0 fail=0 root=D:\我的媒体
+#   ROOTSUMS root_id=3 name=剪辑视频 ok=63 skip=0 fail=0 root=E:\视频
+#   ROOTFAIL root_id=<n> name=<...> fail=<n> shown=3   ← 只在有失败时打，后面最多跟 3 条原因
+
+# 补元数据：不带 --root-from-db 时单一 --root 会让别的根的源文件全部「不存在」
+node ...\enrich-meta.js --root-from-db --port=3307 --secret='D:\cfg\secret.yml'
+#   只想补一个根、并拿到该根的校验行（VERIFY root_id=<n> total=<n> missing_dur=<n> missing_fps=<n>）
+node ...\enrich-meta.js --root-from-db --root-id=3 --root='E:\视频' --port=3307 --secret='D:\cfg\secret.yml'
+```
+
+扫描入库（`POST /api/media/admin/scan {rootId}`）扫完会自动跑一段「只补本根待补行」的
+`enrich-meta.js --root-id=<本根>`，日志里给出 `VERIFY … missing_dur=0`；缺 ffprobe 时会明确报
+「N 条视频缺少时长元数据（ffprobe 未生效）」。
 
 > **管理端按钮触发时必须用 `--secret=`**：`MediaScanServiceImpl` 只把 `node + 脚本 + 参数` 拼进
 > `ProcessBuilder`，管理端触发时自动注入 `MS_FFMPEG` / `MS_MYSQL`（取 `qtools.media.ffmpeg` /
@@ -759,6 +784,127 @@ ITEM video=<videoId> task=<video|sprite|pvclip> result=<ok|skip|fail> out=<相�
 管理端据此把「哪几条跑完了」写进任务日志的一行 `RESULT ok= skip= fail= ids= [failIds=]`，
 `GET /api/media/admin/scan/{jobId}` 的视图里对应 `derive` 字段。接口契约见
 `doc/媒体库派生资源状态.md`。
+
+### 17. 视频自带封面：「视频名-封面.jpg」不入相册（P6.00）
+
+用户场景：剪辑软件导出时会顺手在同目录放一张封面，命名成「视频名-封面.jpg」。
+改之前扫描器把目录里的**一切**图片都当相册照片入库，结果每个视频多出一个「只含一张封面」的
+单图相册，图片站里也重复出现；视频海报却还是 ffmpeg 截帧。P6.00 把这两件事一起解决。
+
+#### 识别规则
+
+同一目录下同时存在：
+
+- 图片 `B + 后缀 + .jpg|.jpeg|.png|.webp|.gif|.bmp`
+- 视频 `B + .mp4|.mkv|.webm|.avi|.mov|.m4v|.wmv|.flv|.ts`
+- 且「后缀」属于后缀集合（**大小写不敏感 + 忽略空白**：`A-封面` / `A - 封面` / `A- 封面` 都算 `-封面`）
+
+→ 这张图就是那个视频的**自带封面**：
+
+1. **不入库为照片**：不写 `media_photo` / `media_album`，图片站与相册都不出现它
+   （老库里已有的行会被删掉，见下面「存量纠正」）；
+2. 视频侧写 `media_video.poster_source='file'` + `poster_file=<封面相对路径>`，
+   `poster_path` 仍然是派生产物路径 `thumbs/v/<content_hash>.jpg`（后端按它落盘的文件出图，不变）。
+
+没被匹配的图片（例如 `9050943c-…-封面.jpg` 这种前面不是某个视频名的）**照旧当照片入库**。
+
+#### 后缀集合（可配）
+
+| 优先级 | 来源 | 说明 |
+|---|---|---|
+| 1 | `--cover-suffixes=-封面,-cover` | 命令行，逗号分隔；`--cover-suffixes=` 空 = 关闭识别 |
+| 2 | 环境变量 `MS_COVER_SUFFIXES` | 管理端按 `qtools.media.scan.coverSuffixes` 注入（`MediaToolEnv.applyScan`） |
+| 3 | 脚本内置 | `-封面, -cover, _cover, _封面` |
+| — | `--no-cover-scan` | 等于空集合：图片全部按老逻辑入库 |
+
+```yaml
+# application.yml
+qtools:
+  media:
+    scan:
+      coverSuffixes: ['-封面', '-cover', '_cover', '_封面']   # 留空数组 = 关闭识别
+      # 比较口径：小写 + 忽略空白 —— 磁盘上 'A - 封面.jpg' / 'A- 封面.jpg' 与 'A-封面.jpg' 等价
+```
+
+扫描输出的那一行（管理端日志里能看到）：
+
+```
+自带封面 视频=2 封面图=2 已剔除照片=2 suffixes=-cover,_cover,-封面,_封面
+```
+
+#### 数据模型
+
+```bash
+# 幂等；存量 239 行原地变成 frame，语义与改前一致
+mysql -h127.0.0.1 -P3307 -uroot --default-character-set=utf8mb4 -t -D qtools \
+      < QTools/doc/media_video_poster_source.sql
+```
+
+| 列 | 值 | 含义 |
+|---|---|---|
+| `poster_source` | `frame` | 自动截帧（默认 / 历史行为） |
+| | `file` | 同目录自带封面 |
+| | `manual` | 手动指定（暂无 UI 写入，先占位；重扫**不会**覆盖它） |
+| `poster_file` | 相对媒体根的封面路径 | 仅 `poster_source='file'` 时有值，`build-thumbs.js` 拿它派生 |
+
+重扫的收敛规则（`scan-media.js` 的 `posterTouch()`）：本次命中 → `file`；本次没命中但库里是
+`manual` → 保持 `manual`；其余 → `frame`。所以「封面文件被删掉」会自然退回截帧。
+
+#### 派生流程（`build-thumbs.js`）
+
+- `poster_source='file'` 且 `poster_file` 指向的文件**还在** → 直接拿那张图派生
+  `thumbs/v/<content_hash>.jpg`（`-vf scale=480:-2 -q:v 4`，与截帧产物同分辨率同质量），
+  **不跑 ffmpeg 截帧**；新鲜度按**封面图**的 mtime 判，换了封面就会重建；
+- 文件不在 / 老库没这两列 → 退回截帧，并在 stderr 打一行 `WARN 自带封面文件不存在，退回截帧：<路径>`；
+- 日志里多一行 `cover 自带封面=<n> 回退截帧=<n>`。
+
+```bash
+node build-thumbs.js --root-from-db --thumbs=<缩略图根> [--video=id1,id2 --force]
+```
+
+#### 存量纠正（`--detect-covers`）
+
+识别规则只在扫描时生效，已经入库的封面图要用这条命令纠正（**先 dry-run 看清单**）：
+
+```bash
+# 1) 先跑迁移（见上），否则脚本会拒绝执行
+# 2) 只看清单（不写库）
+node scan-media.js --detect-covers --root-from-db --dry-run
+# 3) 真跑（--purge-empty：把因剔除封面而变 0 图的相册行一起删掉，与 --purge-unclaimed 同一套动作）
+node scan-media.js --detect-covers --root-from-db --purge-empty
+# 4) 海报改成用封面文件派生
+node build-thumbs.js --root-from-db --thumbs=<缩略图根>
+```
+
+`--root-from-db` 表示「每条视频按自己的 `media_video.root_id` 去 `media_root` 取媒体根」，
+多库根部署必须带（不带就全按 `--root`，别的根会全部判成「源文件不存在」）。
+
+它做三件事，全部可幂等重跑：
+
+1. 命中 → 视频 `poster_source='file'`、`poster_file=封面路径`（`manual` 的行跳过，不冲人工设置）；
+2. 从 `media_photo` 删掉这些封面行；
+3. 受影响相册的 `photo_count` / `bytes` 重算（不加 `--purge-empty` 就只归零、不删册行）。
+
+真实输出（本机克隆库实测，25 个命中）：
+
+```
+命中自带封面=25 其中库里已有照片行=25 涉及相册=25 将删除照片行=25 变空相册=23
+== 汇总（已写库）：命中自带封面=25 涉及相册=25 已删除照片行=25 已更新视频=25
+  库里 poster_source=file 的视频=25
+```
+
+#### 已知限制
+
+- **只认同目录 + 同名**：`输出/A.mp4` 与 `封面/A.jpg` 这种跨目录约定不会被识别（宁可漏判，
+  也不要把正常图片误判成封面——少一张图比多一堆封面照片严重）；
+- `--only-photo` 模式会把封面图当照片入库（该模式的约定是「只看图片」，不读视频表）；
+  `--only-video` 只写视频侧的 `poster_source`，不动 `media_photo`；
+- 宿主视频是 `.wmv/.flv/.ts` 这类暂不入库的容器时，封面图仍然被剔除（它们是封面是事实），
+  但那个视频没有 `media_video` 行可挂，海报也就无从谈起；
+- `--limit` 截断掉的那几个视频，其封面图仍按封面剔除（视频侧 poster 由下一次完整扫描补上）；
+- 存量纠正不会重排册内序号：删掉册内第 N 张后 `seq` 留空洞，下一次正式扫描按磁盘顺序重写；
+- 管理端列表的「自带封面」小标记读的是 `media_video.poster_source`，所以**必须先跑迁移**，
+  否则列表查询会报 `Unknown column`（脚本侧反而会整段降级，不报错）。
 
 ---
 
