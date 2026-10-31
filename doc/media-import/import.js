@@ -175,6 +175,54 @@ function mysqlRun(o, password, sql, stdinFd) {
   return r;
 }
 
+/**
+ * P6.47：把 --media-root 解析成 media_root.id。
+ *
+ * <p>照片的身份 = 库根 + 相对路径（media_photo.path_key 生成列）。插入时不带 root_id 会算成
+ * 「0|rel」，与已有行对不上，扫描就会不断插重复 —— 所以这里解析不出来就直接失败，宁可中断
+ * 也不写脏数据。</p>
+ */
+/**
+ * P6.48：目录并入表 —— dir -> 目标册 id。扫描时这些目录不再单独建册，照片直接归目标册。
+ */
+/**
+ * P6.50：已经被「重复文件 → 清理」收进别名表的路径，扫描时不要再导回主表。
+ * 否则主表和别名表同时存在同一路径，重复文件页的「设为主文件」会 409（路径被占用）。
+ */
+function resolveAliasPhotoPaths(o, password) {
+  const rows = query(o, password, 'SELECT root_id, rel_path FROM media_photo_alias');
+  const set = new Set();
+  for (const [rootId, rel] of rows) {
+    if (rel != null) set.add(String(rootId) + '|' + String(rel));
+  }
+  if (set.size) log('   重复别名 ' + set.size + ' 条（扫描时跳过这些路径）');
+  return set;
+}
+
+function resolveAlias(o, password, rootId) {
+  const rows = query(o, password, 'SELECT dir, album_id FROM media_album_dir WHERE root_id = ' + Number(rootId));
+  const map = Object.create(null);
+  for (const [dir, albumId] of rows) {
+    if (dir && albumId) map[String(dir)] = String(albumId);
+  }
+  const n = Object.keys(map).length;
+  if (n) log('   目录并入 ' + n + ' 条（扫描时跳过这些目录的建册）');
+  return map;
+}
+
+function resolveRootId(o, password) {
+  if (o.rootIdArg) return Number(o.rootIdArg);
+  const norm = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const rows = query(o, password, 'SELECT id, path FROM media_root');
+  const target = norm(o.mediaRoot);
+  const hit = rows.find((r) => norm(r[1]) === target);
+  if (!hit) {
+    throw new Error('库根未登记：' + o.mediaRoot + ' —— 请先在管理端「库根管理」里登记这个媒体根，或显式传 --root-id=');
+  }
+  log('   库根 root_id=' + hit[0] + ' （' + hit[1] + '）');
+  return Number(hit[0]);
+}
+
 function query(o, password, sql) {
   const r = mysqlRun(o, password, sql);
   if (r.status !== 0) {
@@ -272,6 +320,8 @@ function buildSql(data, o) {
   }
 
   const albumRows = data.albums.map((a, i) => {
+    // P6.48：这个目录已被「并入」到别的册 —— 不建册、不更新目标册的标题/计数（照片会直接归到目标册）
+    if (o.alias && o.alias[a.dir]) return null;
     const photos = Array.isArray(a.photos) ? a.photos : [];
     const count = photos.length;
     if (typeof a.count === 'number' && a.count !== count) {
@@ -301,7 +351,7 @@ function buildSql(data, o) {
       'NULL',
     ].join(',') + ')';
   });
-  for (const part of chunks(albumRows, o.batch)) {
+  for (const part of chunks(albumRows.filter(Boolean), o.batch)) {
     lines.push(
       'INSERT INTO media_album (id,person_id,title,dir,photo_count,bytes,cover_path,note,sort,hidden,mtime) VALUES ' +
       part.join(',') +
@@ -310,29 +360,38 @@ function buildSql(data, o) {
       'photo_count=n.photo_count,bytes=n.bytes,cover_path=n.cover_path,note=n.note,sort=n.sort;'
     );
   }
-  stats.albums = albumRows.length;
+  stats.albums = albumRows.filter(Boolean).length;
 
   // ---- photos（index.json 无单图 bytes/w/h -> bytes=0, w/h=NULL，按契约保留）
   const photoRows = [];
   for (const a of data.albums) {
+    const albumId = (o.alias && o.alias[a.dir]) || a.id;
     const photos = Array.isArray(a.photos) ? a.photos : [];
     photos.forEach((p, seq) => {
+      // 已被「重复文件」收进别名表的路径：不再导回主表
+      if (o.skipPhotoPaths && o.skipPhotoPaths.has(String(o.rootId) + '|' + p.rel)) return;
       const i = typeof p.i === 'number' ? p.i : seq;
       if (i !== seq) warn.push('相册 ' + a.id + ' 的 photo.i(' + i + ') 与数组下标(' + seq + ') 不一致，以数组下标为准');
       photoRows.push(
-        '(' + [sqlStr(a.id), seq, sqlStr(p.rel), '0', 'NULL', 'NULL', sqlBit(p.big), '0'].join(',') + ')'
+        '(' + [sqlStr(albumId), seq, sqlStr(p.rel), String(o.rootId), '0', 'NULL', 'NULL', sqlBit(p.big), '0'].join(',') + ')'
       );
     });
   }
   for (const part of chunks(photoRows, o.batch)) {
     lines.push(
-      'INSERT INTO media_photo (album_id,seq,rel_path,bytes,w,h,is_big,hidden) VALUES ' + part.join(',') +
+      'INSERT INTO media_photo (album_id,seq,rel_path,root_id,bytes,w,h,is_big,hidden) VALUES ' + part.join(',') +
       ' AS n ON DUPLICATE KEY UPDATE rel_path=n.rel_path,bytes=n.bytes,w=n.w,h=n.h,is_big=n.is_big;'
     );
   }
   stats.photos = photoRows.length;
   // 源里已删除的相册可能留下孤图，顺手清掉，保证关系校验恒成立
   lines.push('DELETE p FROM media_photo p LEFT JOIN media_album a ON a.id = p.album_id WHERE a.id IS NULL;');
+  // 照片计数以库为准（跳过别名路径 / 并入之后，index.json 的张数会不准）
+  lines.push('UPDATE media_album a SET photo_count = (SELECT COUNT(*) FROM media_photo p WHERE p.album_id = a.id);');
+  // P6.49：磁盘上已经不存在的册（照片行也没了）要清掉 —— 否则删过的册会永远挂在列表里
+  // （导入只 upsert 不 prune，管理端删的是文件+照片行，册行会留下来）
+  lines.push('DELETE a FROM media_album a WHERE NOT EXISTS (SELECT 1 FROM media_photo p WHERE p.album_id = a.id)' +
+    ' AND NOT EXISTS (SELECT 1 FROM media_album_dir d WHERE d.album_id = a.id);');
 
   // ---- videos（mtime 取磁盘文件 mtime）
   const videoRows = data.videos.map((v) => {
@@ -699,6 +758,13 @@ function main() {
 
   const sigBefore = rootSignature(o);
 
+  // P6.47：照片的身份改成「库根 + 相对路径」，插入时必须带 root_id，
+  // 否则 path_key 会算成 '0|rel'，跟已有行（'1|rel'）对不上 → 每次扫描都插一份重复。
+  const password = readPassword(o);
+  o.rootId = resolveRootId(o, password);
+  o.alias = resolveAlias(o, password, o.rootId);
+  o.skipPhotoPaths = resolveAliasPhotoPaths(o, password);
+
   log('== 生成 SQL ...');
   const built = buildSql(data, o);
   const sqlPath = path.join(o.out, 'import.sql');
@@ -706,8 +772,6 @@ function main() {
   log('   ' + sqlPath + '  ' + (Buffer.byteLength(built.sql) / 1024).toFixed(0) + ' KB，生成耗时 ' +
     built.genMs + ' ms');
   for (const w of built.warn) log('   [warn] ' + w);
-
-  const password = readPassword(o);
 
   log('== mysql 导入 ...');
   const tLoad = Date.now();
@@ -806,3 +870,9 @@ try {
   process.stderr.write('ERROR: ' + (e && e.stack ? e.stack : e) + '\n');
   process.exitCode = 1;
 }
+
+
+
+
+
+

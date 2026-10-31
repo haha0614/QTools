@@ -25,10 +25,10 @@
  *         photo.seq = 册内文件名自然序（数字感知）从 0 递增
  *         photo.is_big = bytes >= --big-bytes（默认 2MB）
  *         album.photo_count / album.bytes 累加；cover_path = thumbs/p/<albumId>/0000.jpg
- *         唯一性保证：相册身份只有 (dir_key,title) 一个键。换了 --album-mode 或改了标题推导，旧行既不会
- *         被复用也不会被删——P5.43 起改为「不许静默并存」：本次没被任何分组认领、且册内 0 图、dir_key
- *         又落在本次产物里的旧行，默认直接报错退出（不写库），加 --purge-unclaimed 才在同一事务里删掉；
- *         存量清理见 doc/media_album_dedupe.sql（先预览再删、幂等）
+ *         唯一性保证（P6.05）：相册身份 = (dir_key, identity_key)，identity_key 是 '#'+前缀 或 '*'，
+ *         与标题推导无关；库里有唯一索引 uk_album_identity 兜底，同一目录同一身份写不进第二行。
+ *         同一目录若已被另一种 --album-mode 建过册，本次直接报错不写库（--purge-unclaimed 才删了重来）；
+ *         本次没被任何分组认领、且册内 0 图的旧行同样默认报错，存量清理见 doc/media_album_dedupe.sql
  *   自带封面（P6.00）：同目录「视频名-封面.jpg」这类图片**不算相册照片**——同目录存在同名视频
  *         （B-封面.jpg / B.mp4，后缀集合默认 -封面,-cover,_cover,_封面，见 --cover-suffixes /
  *         MS_COVER_SUFFIXES）时，这张图不入 media_photo / media_album，只作为视频海报的来源：
@@ -850,6 +850,7 @@ function emptyState() {
     photoByAlbum: new Map(),
     albumById: new Map(),
     albumKey: new Map(),
+    albumIdentity: new Map(),
     albumLegacyDirKey: new Map(),
     albumLegacyTitle: new Map(),
     maxAlbumNo: 0,
@@ -877,11 +878,14 @@ function loadState(o, mysqlExe, password) {
   // 这里不再用 WHERE content_hash IS NOT NULL 过滤：没有哈希的老行同样需要参与
   // 「消失 / 停泊」判断，否则它们会一直霸着 (album_id, seq) 把新图挡掉。
   const pRows = queryRows(o, mysqlExe, password,
-    'SELECT id, album_id, seq, rel_path, IFNULL(content_hash, \'\'), IFNULL(root_id, 0) FROM media_photo;');
-  for (const [id, albumId, seq, rel, hash, rootId] of pRows) {
+    'SELECT id, album_id, seq, rel_path, IFNULL(content_hash, \'\'), IFNULL(root_id, 0)' +
+    (o.pinnedEnabled ? ', IFNULL(album_pinned, 0)' : '') + ' FROM media_photo;');
+  for (const [id, albumId, seq, rel, hash, rootId, pinned] of pRows) {
     const row = {
       id, albumId, seq: Number(seq), rel, hash: hash || '',
       rootId: Number(rootId) || null,
+      // 人工归属（管理端拆/移过）：重扫不再按目录改它的 album_id/seq
+      pinned: pinned === '1',
     };
     const byAlbum = s.photoByAlbum.get(albumId) || [];
     byAlbum.push(row);
@@ -893,12 +897,25 @@ function loadState(o, mysqlExe, password) {
   }
 
   const aRows = queryRows(o, mysqlExe, password,
-    "SELECT id, dir_key IS NULL, IFNULL(dir_key, ''), IFNULL(dir, ''), title, sort FROM media_album;");
-  for (const [id, isNull, dirKey, dir, title, sort] of aRows) {
-    const row = { id, dirKey, dir, title, sort: Number(sort), dirKeyNull: isNull === '1' };
+    "SELECT id, dir_key IS NULL, IFNULL(dir_key, ''), IFNULL(dir, ''), title, sort" +
+    (o.albumIdentityEnabled ? ", IFNULL(identity_key, ''), IFNULL(source, '')" : '') +
+    ' FROM media_album;');
+  for (const r of aRows) {
+    const [id, isNull, dirKey, dir, title, sort] = r;
+    const row = {
+      id, dirKey, dir, title, sort: Number(sort), dirKeyNull: isNull === '1',
+      // P6.05：身份键（'#<前缀>' / '*'）与产生它的模式；老库没有这两列时留空，走标题兜底匹配
+      identityKey: o.albumIdentityEnabled ? (r[6] || '') : '',
+      source: o.albumIdentityEnabled ? (r[7] || '') : '',
+    };
     s.albumById.set(id, row);
-    if (!row.dirKeyNull) s.albumKey.set(dirKey + '\u0000' + title, row);
-    else {
+    if (!row.dirKeyNull) {
+      s.albumKey.set(dirKey + '\u0000' + title, row);
+      if (row.identityKey) s.albumIdentity.set(dirKey + '\u0000' + row.identityKey, row);
+    }
+    else if (row.source !== 'manual') {
+      // 人工建的册（拆出为新册：dir_key 为 NULL、source='manual'）不参与「按目录/按标题」认领，
+      // 否则目录里出现同名分组时它会被当成老行接管，标题与 dir_key 一起被改写
       const dk = dir + '\u0000' + title;
       const byDir = s.albumLegacyDirKey.get(dk) || [];
       byDir.push(row);
@@ -950,8 +967,23 @@ function aliasTablesReady(o, mysqlExe, password) {
 
 // ---------------------------------------------------------------- 计划（分配 id / 识别移动）
 
+/**
+ * 相册在目录内的身份（P6.05）
+ *
+ * <p>与标题推导**完全无关**：前缀分册是 {@code '#' + 前缀}，整目录一册是 {@code '*'}。
+ * 标题会随「目录里只分出一册时改用目录名」这条规则变化，拿它当身份键就会在换模式/改推导时
+ * 造出第二套相册行（就是 a308 幽灵相册的成因）。</p>
+ */
+function albumIdentityOf(g) {
+  return g.prefix ? '#' + g.prefix : '*';
+}
+
 /** 按 (dir_key,title) 认相册；老行 dir_key 为空时退化用 (dir,title) / 唯一 title / 前缀令牌匹配 */
 function findAlbum(state, g, o, claimed) {
+  // 1) 身份键命中（P6.05 首选）：换 --album-mode 或改标题推导都不会再认出第二行
+  const byIdentity = state.albumIdentity.get(g.dirKey + '\u0000' + albumIdentityOf(g));
+  if (byIdentity && !claimed.has(byIdentity.id)) return byIdentity;
+
   const exact = state.albumKey.get(g.dirKey + '\u0000' + g.titleGuess);
   if (exact && !claimed.has(exact.id)) return exact;
 
@@ -1080,9 +1112,13 @@ function planPhotos(albums, state, ctx) {
   const rows = [];
   const moves = [];
   const parks = [];
+  // 有图被人工归属挪走了的册：它们的 photo_count 也得按库内实际行重算（否则会一直报磁盘张数）
+  const pinnedFrom = new Set();
   const claimed = new Set();
-  // 册内同内容副本：只在「同一本相册」里才算重复（同一张图出现在不同相册是合法的，
-  // 那是内容复用而不是重复文件）；主表照旧各占一行，册内张数与磁盘保持一致
+  // 册内同内容副本：**别名表只沉淀「同一本相册里两份文件都在磁盘上」这一种**。
+  // 跨册同内容不写别名——但按原子归属的口径（一张照片只属于一个册），它同样是重复文件，
+  // 由管理端「重复文件 → 同内容多份」按 content_hash 对主表分组来管（P6.51）。
+  // 主表照旧各占一行，册内张数与磁盘保持一致
   const seenInAlbum = new Map();
   for (const a of albums) {
     for (const r of (state.photoByAlbum.get(a.id) || [])) {
@@ -1120,6 +1156,17 @@ function planPhotos(albums, state, ctx) {
       }
       claimed.add(prior.id);
       p.id = prior.id;
+      if (prior.pinned) {
+        // 人工归属（P6.51）：管理端拆/移过的图，扫描不再按目录改它的 album_id/seq。
+        // 文件本身改名/移动了还是要跟（否则这行会烂成 missing），但归属不动。
+        if (prior.rel !== p.rel) {
+          p.movedFrom = prior.rel;
+          moves.push({ albumId: a.id, seq, photo: p, pinned: true });
+        }
+        stats.pinned += 1;
+        pinnedFrom.add(a.id);
+        return;
+      }
       if (prior.rel === p.rel && prior.albumId === a.id && prior.seq === seq) {
         rows.push({ albumId: a.id, seq, photo: p });
         stats.update += 1;
@@ -1130,11 +1177,11 @@ function planPhotos(albums, state, ctx) {
       }
     });
   }
-  return { rows, moves, parks };
+  return { rows, moves, parks, pinnedFrom: Array.from(pinnedFrom) };
 }
 
 function planImport(scan, state, o) {
-  const stats = { insert: 0, move: 0, update: 0, dup: 0, skip: scan.skipped, alias: 0 };
+  const stats = { insert: 0, move: 0, update: 0, dup: 0, skip: scan.skipped, alias: 0, pinned: 0 };
   const dupList = [];
   const present = scan.present || { photo: new Set(), video: new Set() };
   const ctx = { list: [], dupList, stats, o, present };
@@ -1172,6 +1219,9 @@ function planImport(scan, state, o) {
       photos,
       photoCount: photos.length,
       bytes: photos.reduce((s, p) => s + p.bytes, 0),
+      // P6.05：写库时一并落下身份与产生它的模式（唯一索引 uk_album_identity 兜底防重）
+      identityKey: albumIdentityOf(g),
+      source: o.albumMode,
       cover: 'thumbs/p/' + id + '/0000.jpg',
       // P5.59：所在目录的磁盘 mtime（stat 失败为 null，写库时退化为不动该列）
       dirMtimeMs: g.dirMtimeMs,
@@ -1193,6 +1243,17 @@ function planImport(scan, state, o) {
     staleAlbums.push({ id: a.id, dirKey: a.dirKey, title: a.title });
   }
 
+  // 分册模式冲突（P6.05）：同一目录里已经有另一种模式建出来的行，本次再用另一种模式扫，
+  // 图会被整本搬到新相册、旧行全变成空壳（2026-10-29 的 a308 幽灵相册就是这么来的）。
+  // 默认报错不写库；给了 --purge-unclaimed 才删了重来。
+  const modeConflicts = [];
+  for (const a of state.albumById.values()) {
+    if (a.dirKeyNull || claimed.has(a.id) || !producedDirs.has(a.dirKey)) continue;
+    if (a.source && a.source !== o.albumMode) {
+      modeConflicts.push({ id: a.id, dirKey: a.dirKey, title: a.title, source: a.source });
+    }
+  }
+
   // 自带封面（P6.00）：这些图片的旧 media_photo 行要真删，所在相册的计数要重算
   const coverPhotos = scan.coverPhotos || [];
   const coverAlbumIds = [];
@@ -1206,11 +1267,13 @@ function planImport(scan, state, o) {
   return {
     albums,
     staleAlbums,
+    modeConflicts,
     videoRows: videoPlan.rows,
     movedVideos: videoPlan.moves,
     photoRows: photoPlan.rows,
     movedPhotos: photoPlan.moves,
     parkedPhotos: photoPlan.parks,
+    pinnedFromAlbums: photoPlan.pinnedFrom,
     aliasList: ctx.list,
     dupList,
     stats,
@@ -1377,16 +1440,19 @@ function buildSql(model, o) {
   const albumRows = model.albums.map((a) => '(' + [
     sqlStr(a.id), 'NULL', sqlStr(a.title), sqlStr(a.dirKey), sqlInt(a.photoCount),
     sqlInt(a.bytes), sqlStr(a.cover), "''", sqlInt(a.sort), '0', sqlStr(a.dirKey),
+    ...(o.albumIdentityEnabled ? [sqlStr(a.identityKey), sqlStr(a.source)] : []),
     ...(o.albumMtimeEnabled ? [sqlDateTime(a.dirMtimeMs)] : []),
   ].join(',') + ')');
   for (const part of chunks(albumRows, o.batch)) {
     lines.push('INSERT INTO media_album (id,person_id,title,dir,photo_count,bytes,cover_path,note,sort,hidden,dir_key' +
+      (o.albumIdentityEnabled ? ',identity_key,source' : '') +
       mtimeCol + ') VALUES ' +
       part.join(',') +
       // person_id / note / hidden 不覆盖：管理端的人工归类不能被重扫冲掉
       // mtime 用 IFNULL：本次 stat 不到目录时保留库里的已有值，绝不用 NULL 抹掉
       ' AS n ON DUPLICATE KEY UPDATE title=n.title,dir=n.dir,photo_count=n.photo_count,' +
-      'bytes=n.bytes,cover_path=n.cover_path,sort=n.sort,dir_key=n.dir_key' + mtimeTouch + ';');
+      'bytes=n.bytes,cover_path=n.cover_path,sort=n.sort,dir_key=n.dir_key' +
+      (o.albumIdentityEnabled ? ',identity_key=n.identity_key,source=n.source' : '') + mtimeTouch + ';');
   }
 
   // 5) 图片 upsert（content_hash 一并写入）
@@ -1404,6 +1470,15 @@ function buildSql(model, o) {
 
   // 6) 图片改名/移动：UPDATE 同一行，并按新目录更新 album_id/seq
   for (const m of model.movedPhotos) {
+    // 人工归属的行：文件改名只跟着改路径，album_id/seq 由策划决定，扫描不碰
+    if (m.pinned) {
+      lines.push('UPDATE media_photo SET rel_path=' + sqlStr(m.photo.rel) +
+        ',bytes=' + sqlInt(m.photo.bytes) + ',is_big=' + sqlInt(m.photo.isBig) +
+        ',content_hash=' + sqlStr(m.photo.hash) + ',root_id=' + sqlRoot(o.rootId) +
+        (o.missingEnabled ? ',missing=0,last_seen=NOW()' : '') +
+        ' WHERE id=' + sqlInt(m.photo.id) + ';');
+      continue;
+    }
     lines.push('UPDATE media_photo SET album_id=' + sqlStr(m.albumId) + ',seq=' + sqlInt(m.seq) +
       ',rel_path=' + sqlStr(m.photo.rel) + ',bytes=' + sqlInt(m.photo.bytes) +
       ',is_big=' + sqlInt(m.photo.isBig) + ',content_hash=' + sqlStr(m.photo.hash) +
@@ -1413,9 +1488,11 @@ function buildSql(model, o) {
 
   // 7) 目录里删过图：把每本相册 seq >= 当前张数 的历史残留清掉，否则相册会越重扫越多。
   //    seq >= PARK_BASE 的是已停泊的缺失行（要留着给管理端清理），绝不能在这里删掉。
+  //    人工归属（album_pinned=1）的行 seq 落在本册磁盘张数之后，绝不能被当成残留删掉
   for (const a of model.albums) {
     lines.push('DELETE FROM media_photo WHERE album_id = ' + sqlStr(a.id) +
-      ' AND seq >= ' + sqlInt(a.photoCount) + ' AND seq < ' + PARK_BASE + ';');
+      ' AND seq >= ' + sqlInt(a.photoCount) + ' AND seq < ' + PARK_BASE +
+      (o.pinnedEnabled ? ' AND album_pinned = 0' : '') + ';');
   }
   // 孤儿图（相册已被删掉）：保证「每张图都能找到相册」恒成立
   lines.push('DELETE p FROM media_photo p LEFT JOIN media_album a ON a.id = p.album_id WHERE a.id IS NULL;');
@@ -1434,6 +1511,15 @@ function buildSql(model, o) {
     }
   }
 
+  // 7-c) 分册模式不同的旧行（P6.05）：只有 --purge-unclaimed 才真删；守卫在写库前已经拦过
+  for (const s of (model.modeConflicts || [])) {
+    if (!o.purgeUnclaimed) continue;
+    if (o.albumPersonEnabled) {
+      lines.push('DELETE FROM media_album_person WHERE album_id = ' + sqlStr(s.id) + ';');
+    }
+    lines.push('DELETE FROM media_album WHERE id = ' + sqlStr(s.id) + ';');
+  }
+
   // 8) 同内容副本 -> 别名表（本期只沉淀数据，后端不读）
   for (const table of ['media_video_alias', 'media_photo_alias']) {
     const aliasRows = model.aliasList.filter((x) => x.table === table)
@@ -1443,6 +1529,20 @@ function buildSql(model, o) {
         // 重扫幂等：(hash, rel_path) 唯一键命中就只刷 root_id/size，create_time 保留首次登记时间
         ' AS n ON DUPLICATE KEY UPDATE root_id=n.root_id,size=n.size;');
     }
+  }
+
+  // 9) 含人工归属的册：张数/体积按库内实际行重算。相册 upsert 写的是「磁盘张数」，
+  //    而 album_pinned 的行由管理端策展决定——搬进来的不在本册目录里、搬出去的还在本册目录里，
+  //    用磁盘张数会把两边都算错。
+  if (o.pinnedEnabled) {
+    // 搬入方：库里有 album_pinned 行的册（磁盘上没有这些图，按磁盘张数会少算）
+    // 搬出方：本次有 pinned 行被跳过的册（图还在目录里，但已不属于它，按磁盘张数会多算）
+    const src = (model.pinnedFromAlbums || []).map(sqlStr);
+    lines.push('UPDATE media_album a SET' +
+      ' photo_count = (SELECT COUNT(*) FROM media_photo p WHERE p.album_id = a.id),' +
+      ' bytes = (SELECT IFNULL(SUM(p.bytes), 0) FROM media_photo p WHERE p.album_id = a.id)' +
+      ' WHERE a.id IN (SELECT DISTINCT album_id FROM media_photo WHERE album_pinned = 1)' +
+      (src.length ? ' OR a.id IN (' + src.join(',') + ')' : '') + ';');
   }
 
   lines.push('COMMIT;');
@@ -1590,6 +1690,40 @@ function albumMtimeReady(o, mysqlExe, password) {
   const n = rows.length && rows[0].length ? Number(rows[0][0]) : 0;
   if (n === 1) return true;
   warn('media_album 还没有 mtime 列（先执行 doc/media_album_mtime.sql）：本次不写相册 mtime');
+  return false;
+}
+
+/**
+ * 相册身份两列（identity_key / source）是否就位（P6.05）
+ *
+ * <p>没建就整段降级：认相册退回 (dir_key,title)，写库不写这两列——生成的 SQL 与改动前逐字相同，
+ * 老库不执行迁移也能继续扫，只是没有「同目录同身份只能一行」的硬保证。</p>
+ */
+function albumIdentityReady(o, mysqlExe, password) {
+  const rows = queryRows(o, mysqlExe, password,
+    "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() " +
+    "AND table_name = 'media_album' AND column_name IN ('identity_key','source');");
+  const n = rows.length && rows[0].length ? Number(rows[0][0]) : 0;
+  if (n === 2) return true;
+  warn('media_album 还没有 identity_key / source 列（先执行 doc/media_album_identity.sql）：' +
+    '本次仍按 (dir_key,title) 认相册，重复相册只能靠 --purge-unclaimed 兜底');
+  return false;
+}
+
+/**
+ * media_photo.album_pinned 列（doc/media_photo_pinned.sql）是否就位
+ *
+ * <p>没建就整段降级：生成的 SQL 与改动前逐字相同，老库不迁移也能继续扫——
+ * 只是「人工归属」不再受保护，管理端拆/移过的图下次扫描会被目录拽回去。</p>
+ */
+function photoPinnedReady(o, mysqlExe, password) {
+  const rows = queryRows(o, mysqlExe, password,
+    "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() " +
+    "AND table_name = 'media_photo' AND column_name = 'album_pinned';");
+  const n = rows.length && rows[0].length ? Number(rows[0][0]) : 0;
+  if (n === 1) return true;
+  warn('media_photo 还没有 album_pinned 列（先执行 doc/media_photo_pinned.sql）：' +
+    '本次不保护人工归属，重扫会按目录重新归属');
   return false;
 }
 
@@ -2288,6 +2422,11 @@ function main() {
   if (needDb) {
     mysqlExe = resolveExe(o.mysql, 'MS_MYSQL', 'mysql', 'mysql 客户端');
     password = readPassword(o);
+    // P6.05：相册身份两列（doc/media_album_identity.sql）必须在 loadState 之前探明——
+    // loadState 的 SELECT 有没有这两列取决于它，晚了就会把 source 读成空、守卫全失效
+    o.albumIdentityEnabled = o.truncate ? false : albumIdentityReady(o, mysqlExe, password);
+    // 人工归属列（doc/media_photo_pinned.sql）：同样必须在 loadState 之前探明
+    o.pinnedEnabled = o.truncate ? false : photoPinnedReady(o, mysqlExe, password);
     // --truncate 会清空这三张表：库内状态一律作废，按空库重新分配 aNNN（与旧行为一致）
     state = o.truncate ? emptyState() : loadState(o, mysqlExe, password);
     o.rootId = resolveRootId(o, mysqlExe, password);
@@ -2306,6 +2445,8 @@ function main() {
     o.missingEnabled = true;
     o.albumPersonEnabled = true;
     o.albumMtimeEnabled = true;
+    o.albumIdentityEnabled = true;
+    o.pinnedEnabled = true;
     o.posterEnabled = true;
   }
 
@@ -2333,6 +2474,23 @@ function main() {
 
   // 唯一性保证：相册身份只有 (dir_key,title)，标题一旦推导变了就会「同一套内容两本册」。
   // 只要发现同目录的 0 图旧行，就别静默并存——默认报错退出，给开关才清理。
+  // P6.05：更硬的守卫在下面 modeConflicts——同一目录已经被另一种 --album-mode 建过册时，
+  // 即便那些行还有图（不是空壳），也不许本次把图整本搬走。
+  if (model.modeConflicts && model.modeConflicts.length) {
+    warn('有 ' + model.modeConflicts.length + ' 本相册是用另一种分册模式建的（本次 --album-mode=' +
+      o.albumMode + '）：同目录再按另一种模式扫会把图搬走、旧行变空壳');
+    for (const c of model.modeConflicts.slice(0, 10)) {
+      warn('  MODE album ' + c.id + ' source=' + c.source + ' dir="' + c.dirKey + '" title="' + c.title + '"');
+    }
+    if (model.modeConflicts.length > 10) warn('  …还有 ' + (model.modeConflicts.length - 10) + ' 本');
+    if (o.purgeUnclaimed) {
+      log('== --purge-unclaimed：同一事务内删除 ' + model.modeConflicts.length + ' 本「分册模式不同」的旧相册');
+    } else if (!(o.dryRun || o.dumpSql)) {
+      throw new Error('发现 ' + model.modeConflicts.length + ' 本相册是用另一种 --album-mode 建的（本次 ' + o.albumMode +
+        '）：同目录换模式再扫会把图整本搬走、旧行全部变成空壳——a308 幽灵相册就是这么产生的。' +
+        '二选一后再跑：① 用与这些行相同的 --album-mode；② 加 --purge-unclaimed，让本次扫描在同一事务里删掉旧行。本次未写库。');
+    }
+  }
   if (model.staleAlbums.length) {
     warn('有 ' + model.staleAlbums.length + ' 本相册本次没被任何分组认领（册内 0 图、dir_key 在本次产物里）：' +
       '同一目录的图已被别的相册整本认领，通常是换过 --album-mode 或改过标题推导留下的旧行');

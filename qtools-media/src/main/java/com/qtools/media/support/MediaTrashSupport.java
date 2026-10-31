@@ -3,6 +3,7 @@ package com.qtools.media.support;
 import java.io.IOException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
@@ -31,6 +32,9 @@ public final class MediaTrashSupport
 
     /** 回收站条目名里的 id 分隔符：{@code <id>__<原名>} */
     public static final String TRASH_SEP = "__";
+
+    /** 旁注目录名（与条目同目录的 {@code .meta/}）：回收站列表要跳过以 . 开头的名字 */
+    public static final String META_DIR = ".meta";
 
     private static final DateTimeFormatter SUFFIX_FORMAT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
 
@@ -61,6 +65,135 @@ public final class MediaTrashSupport
             n++;
         }
         return target;
+    }
+
+    /**
+     * 把「原相对路径」落盘到条目旁边：{@code .meta/<条目名>.path}
+     *
+     * <p>解决的问题：重复副本清理 / 重复文件删除是「文件进回收站 + 删掉 DB 行」，
+     * 行没了以后回收站就只能显示「原记录已丢失」，既看不到它原来在哪，也没法恢复。
+     * 旁注在搬移成功之后写，只存原相对路径一行，读写都在本类里，不外泄格式。</p>
+     */
+    /** 旁注内容：原相对路径 + 内容哈希（有哈希就能在回收站里出封面/大图） */
+    public static final class Meta
+    {
+        public final String relPath;
+        public final String contentHash;
+
+        Meta(String relPath, String contentHash)
+        {
+            this.relPath = relPath;
+            this.contentHash = contentHash;
+        }
+    }
+
+    public static void writeOriginalRel(Path entryPath, String originalRel)
+    {
+        writeMeta(entryPath, originalRel, null);
+    }
+
+    /** 写旁注（{@code rel=} / {@code hash=} 两行）；哈希为空时只写路径 */
+    public static void writeMeta(Path entryPath, String originalRel, String contentHash)
+    {
+        if (entryPath == null || entryPath.getFileName() == null
+                || originalRel == null || originalRel.isEmpty())
+        {
+            return;
+        }
+        Path parent = entryPath.getParent();
+        if (parent == null)
+        {
+            return;
+        }
+        try
+        {
+            Path dir = parent.resolve(META_DIR);
+            Files.createDirectories(dir);
+            StringBuilder sb = new StringBuilder("rel=").append(originalRel).append('\n');
+            if (contentHash != null && !contentHash.isEmpty())
+            {
+                sb.append("hash=").append(contentHash).append('\n');
+            }
+            Files.writeString(dir.resolve(entryPath.getFileName().toString() + ".path"), sb.toString(),
+                    StandardCharsets.UTF_8);
+        }
+        catch (IOException e)
+        {
+            // 写不进去不能影响删除本身：最多是回收站里这条显示「原记录已丢失」
+            log.warn("写回收站原路径旁注失败 {}：{}", entryPath, e.getMessage());
+        }
+    }
+
+    /** 读旁注；没有旁注（老条目 / 未落盘）返回 null */
+    public static String readOriginalRel(Path entryPath)
+    {
+        Meta meta = readMeta(entryPath);
+        return meta == null ? null : meta.relPath;
+    }
+
+    /**
+     * 读旁注（兼容两种格式）
+     *
+     * <p>新格式是 {@code rel=<路径>} / {@code hash=<哈希>} 两行；更早只写了一行纯路径，
+     * 没有 {@code =} 就按「整段是路径」解释，老条目不会因为格式变化读不出来。</p>
+     */
+    public static Meta readMeta(Path entryPath)
+    {
+        if (entryPath == null || entryPath.getFileName() == null || entryPath.getParent() == null)
+        {
+            return null;
+        }
+        Path file = entryPath.getParent().resolve(META_DIR)
+                .resolve(entryPath.getFileName().toString() + ".path");
+        try
+        {
+            if (!Files.isRegularFile(file))
+            {
+                return null;
+            }
+            String text = Files.readString(file, StandardCharsets.UTF_8).trim();
+            if (text.isEmpty())
+            {
+                return null;
+            }
+            if (!text.contains("="))
+            {
+                return new Meta(text, null);
+            }
+            String rel = null;
+            String hash = null;
+            for (String line : text.split("\r?\n"))
+            {
+                int eq = line.indexOf('=');
+                if (eq <= 0)
+                {
+                    continue;
+                }
+                String key = line.substring(0, eq).trim();
+                String value = line.substring(eq + 1).trim();
+                if ("rel".equals(key))
+                {
+                    rel = value;
+                }
+                else if ("hash".equals(key))
+                {
+                    hash = value;
+                }
+            }
+            if (rel == null || rel.isEmpty())
+            {
+                rel = null;
+            }
+            if (rel == null && (hash == null || hash.isEmpty()))
+            {
+                return null;
+            }
+            return new Meta(rel, hash);
+        }
+        catch (IOException e)
+        {
+            return null;
+        }
     }
 
     /**
