@@ -36,9 +36,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="rating"     column="rating"      />
         <!-- P5.99 内容分级（doc/media_content_rating.sql）：列表里回显 + 行内下拉改它 -->
         <result property="contentRating" column="content_rating" />
+        <result property="reviewState" column="review_state" />
         <!-- 缺失文件（doc/media_missing.sql）：1=扫描时磁盘上不存在；last_seen=最后一次看到它 -->
         <result property="missing"    column="missing"     />
         <result property="lastSeen"   column="last_seen"   />
+        <!-- P6.07：列表展示用的聚合串（子查询算出来的，不是表列） -->
+        <result property="personText" column="person_text" />
+        <result property="studioText" column="studio_text" />
     </resultMap>
 
     <resultMap type="com.qtools.media.domain.MediaAlbum" id="MediaAdminAlbumResult">
@@ -52,8 +56,12 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="note"       column="note"        />
         <!-- P5.99 内容分级：相册列表回显 + 行内下拉改它 -->
         <result property="contentRating" column="content_rating" />
+        <result property="reviewState" column="review_state" />
+        <result property="coverRelPath" column="cover_rel_path" />
         <result property="sort"       column="sort"        />
         <result property="hidden"     column="hidden"      />
+        <!-- P6.54：0 = 扫描给的建议册（站端不可见），管理端要能看出来 -->
+        <result property="confirmed"  column="confirmed"   />
         <result property="mtime"      column="mtime"       />
     </resultMap>
 
@@ -68,6 +76,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="w"       column="w"        />
         <result property="h"       column="h"        />
         <result property="isBig"   column="is_big"   />
+        <!-- P6.09 图片自身分级（NULL=继承相册） -->
+        <result property="contentRating" column="content_rating" />
+        <result property="reviewState" column="review_state" />
         <result property="hidden"  column="hidden"   />
         <!-- 缺失文件（doc/media_missing.sql）+ 内容哈希（缩略图按内容寻址） -->
         <result property="missing"     column="missing"      />
@@ -81,7 +92,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         select v.id, v.folder, v.rel_path, v.title, v.size, v.dur, v.w, v.h, v.vcodec,
                v.browser_ok, v.poster_path, v.poster_source, v.poster_file,
                v.doc_path, v.sub_path, v.hidden, v.mtime, v.rating,
-               v.content_rating, v.missing, v.last_seen
+               v.content_rating, v.review_state, v.missing, v.last_seen,
+               <!-- P6.07：管理端列表要看到「谁演的 / 哪个工作室」，用两个子查询聚合，避免 N+1 -->
+               (select group_concat(a.name order by a.name separator '、')
+                  from media_video_actor a where a.video_id = v.id) as person_text,
+               (select group_concat(s.name order by s.name separator '、')
+                  from media_video_studio vs join media_studio s on s.id = vs.studio_id
+                 where vs.video_id = v.id) as studio_text
         from media_video v
         <where>
             <if test="hidden != null and hidden != ''">
@@ -95,6 +112,10 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             </if>
             <if test="vcodec != null and vcodec != ''">
                 and v.vcodec like concat('%', #{vcodec}, '%')
+            </if>
+            <!-- P6.07：按内容分级筛选（管理端之前只能逐行看，不能筛） -->
+            <if test="rating != null and rating != ''">
+                and v.content_rating = #{rating}
             </if>
             <if test="person != null and person != ''">
                 and exists (select 1 from media_video_actor a where a.video_id = v.id and a.name = #{person})
@@ -122,7 +143,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <select id="selectAlbumPage" resultMap="MediaAdminAlbumResult">
         select a.id, a.person_id, a.title, a.dir, a.photo_count, a.bytes, a.cover_path,
-               a.note, a.content_rating, a.sort, a.hidden, a.mtime
+               a.note, a.content_rating, a.review_state, a.sort, a.hidden, a.confirmed, a.mtime,
+               (select p.rel_path from media_photo p where p.album_id = a.id order by p.seq asc limit 1) as cover_rel_path
         from media_album a
         <where>
             <if test="hidden != null and hidden != ''">
@@ -133,6 +155,10 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             </if>
             <if test="personId != null">
                 and a.person_id = #{personId}
+            </if>
+            <!-- P6.07：按内容分级筛选 -->
+            <if test="rating != null and rating != ''">
+                and a.content_rating = #{rating}
             </if>
         </where>
         order by
@@ -175,6 +201,27 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         from media_photo
         where id = #{id}
     </select>
+
+    <!-- P6.12：列表页「修改人物」弹窗要回填当前人物，一次批量取，避免 N+1 -->
+    <select id="selectActorsByVideoIds" resultType="java.util.LinkedHashMap">
+        select a.video_id as videoId, a.name as name, a.person_id as personId, a.role as role
+          from media_video_actor a
+         where a.video_id in
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </select>
+
+    <!-- P6.09：图片自身分级；#{rating} 为 null 时写回 NULL = 重新继承相册 -->
+    <update id="updatePhotoRating">
+        update media_photo set content_rating = #{rating} where id = #{id}
+    </update>
+
+    <update id="updatePhotoRatingBatch">
+        <!-- P6.44：人工定了档就把模型结论一起覆盖掉 —— 否则这张图会一直挂在「分级复核」队列里 -->
+        update media_photo
+        set content_rating = #{rating}<if test="autoRating != null">, auto_rating = #{autoRating}</if>
+        where id in
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </update>
 
     <select id="selectPhotoByAlbumSeq" resultMap="MediaAdminPhotoResult">
         select id, root_id, album_id, seq, rel_path, bytes, w, h, is_big, hidden,
@@ -280,7 +327,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     -->
     <select id="selectAlbumPhotos" resultMap="MediaAdminPhotoResult">
         select p.id, p.root_id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big,
-               p.hidden, p.missing, p.last_seen, p.content_hash
+               p.hidden, p.missing, p.last_seen, p.content_hash, p.content_rating
         from media_photo p
         where p.album_id = #{albumId}
         order by p.missing asc, p.seq asc
@@ -288,7 +335,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <!-- 缺失图片分页（按最后 seen 升序：越早消失的排前面） -->
     <select id="selectMissingPhotoPage" resultMap="MediaAdminPhotoResult">
-        select p.id, p.root_id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big,
+/
                p.hidden, p.missing, p.last_seen, p.content_hash
         from media_photo p
         where p.missing = 1
@@ -384,3 +431,6 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </select>
 
 </mapper>
+
+
+

@@ -16,24 +16,27 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="note"       column="note"        />
         <!-- P5.99 内容分级（doc/media_content_rating.sql）：整册一个值，默认 general -->
         <result property="contentRating" column="content_rating" />
+        <result property="reviewState"   column="review_state" />
         <result property="sort"       column="sort"        />
         <result property="mtime"      column="mtime"       />
     </resultMap>
 
     <sql id="selectAlbumVo">
-        select id, person_id, title, dir, photo_count, bytes, cover_path, note, content_rating, sort, mtime
+        select id, person_id, title, dir, photo_count, bytes, cover_path, note, content_rating, review_state, sort, mtime
         from media_album
     </sql>
 
+    <!-- P6.54：站端只认「已采纳」的册；建议册（confirmed=0）只在管理端可见。
+         confirmed 为 NULL 的老库视为已采纳，不会因为升级丢册。 -->
     <select id="selectAlbumList" resultMap="MediaAlbumResult">
         <include refid="selectAlbumVo"/>
-        where hidden = 0
+        where hidden = 0 and (confirmed is null or confirmed = 1)
         order by sort asc, id asc
     </select>
 
     <select id="selectAlbumById" parameterType="String" resultMap="MediaAlbumResult">
         <include refid="selectAlbumVo"/>
-        where id = #{id} and hidden = 0
+        where id = #{id} and hidden = 0 and (confirmed is null or confirmed = 1)
     </select>
 
     <select id="selectMaxMtime" resultType="java.util.Date">
@@ -41,3 +44,4 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </select>
 
 </mapper>
+

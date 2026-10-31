@@ -1472,17 +1472,21 @@ function buildSql(model, o) {
     sqlInt(a.bytes), sqlStr(a.cover), "''", sqlInt(a.sort), '0', sqlStr(a.dirKey),
     ...(o.albumIdentityEnabled ? [sqlStr(a.identityKey), sqlStr(a.source)] : []),
     ...(o.albumMtimeEnabled ? [sqlDateTime(a.dirMtimeMs)] : []),
+    // P6.54：扫描建出来的册只是「建议册」，站端不认；人采纳过就一直是采纳态（下面不改这列）
+    ...(o.albumConfirmedEnabled ? ['0'] : []),
   ].join(',') + ')');
   for (const part of chunks(albumRows, o.batch)) {
     lines.push('INSERT INTO media_album (id,person_id,title,dir,photo_count,bytes,cover_path,note,sort,hidden,dir_key' +
       (o.albumIdentityEnabled ? ',identity_key,source' : '') +
-      mtimeCol + ') VALUES ' +
+      mtimeCol + (o.albumConfirmedEnabled ? ',confirmed' : '') + ') VALUES ' +
       part.join(',') +
       // person_id / note / hidden 不覆盖：管理端的人工归类不能被重扫冲掉
       // mtime 用 IFNULL：本次 stat 不到目录时保留库里的已有值，绝不用 NULL 抹掉
       ' AS n ON DUPLICATE KEY UPDATE title=n.title,dir=n.dir,photo_count=n.photo_count,' +
       'bytes=n.bytes,cover_path=n.cover_path,sort=n.sort,dir_key=n.dir_key' +
-      (o.albumIdentityEnabled ? ',identity_key=n.identity_key,source=n.source' : '') + mtimeTouch + ';');
+      (o.albumIdentityEnabled ? ',identity_key=n.identity_key,source=n.source' : '') + mtimeTouch
+      // confirmed 故意不在 ON DUPLICATE 里：采纳是人的决定，重扫不许把它退回建议态
+      + ';');
   }
 
   // 5) 图片 upsert（content_hash 一并写入）
@@ -1763,6 +1767,18 @@ function albumIdentityReady(o, mysqlExe, password) {
  * <p>没建就整段降级：生成的 SQL 与改动前逐字相同，老库不迁移也能继续扫——
  * 只是「人工归属」不再受保护，管理端拆/移过的图下次扫描会被目录拽回去。</p>
  */
+/** media_album.confirmed 列（doc/media_album_confirmed.sql）是否就位；缺列整段降级，生成的 SQL 与改动前逐字相同 */
+function albumConfirmedReady(o, mysqlExe, password) {
+  const rows = queryRows(o, mysqlExe, password,
+    "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() " +
+    "AND table_name = 'media_album' AND column_name = 'confirmed';");
+  const n = rows.length && rows[0].length ? Number(rows[0][0]) : 0;
+  if (n === 1) return true;
+  warn('media_album 还没有 confirmed 列（先执行 doc/media_album_confirmed.sql）：' +
+    '本次建出的册一律按「已采纳」处理，没有建议册这道门');
+  return false;
+}
+
 function photoPinnedReady(o, mysqlExe, password) {
   const rows = queryRows(o, mysqlExe, password,
     "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() " +
@@ -2474,6 +2490,7 @@ function main() {
     o.albumIdentityEnabled = o.truncate ? false : albumIdentityReady(o, mysqlExe, password);
     // 人工归属列（doc/media_photo_pinned.sql）：同样必须在 loadState 之前探明
     o.pinnedEnabled = o.truncate ? false : photoPinnedReady(o, mysqlExe, password);
+    o.albumConfirmedEnabled = o.truncate ? false : albumConfirmedReady(o, mysqlExe, password);
     // --truncate 会清空这三张表：库内状态一律作废，按空库重新分配 aNNN（与旧行为一致）
     state = o.truncate ? emptyState() : loadState(o, mysqlExe, password);
     o.rootId = resolveRootId(o, mysqlExe, password);
@@ -2497,6 +2514,7 @@ function main() {
     o.albumMtimeEnabled = true;
     o.albumIdentityEnabled = true;
     o.pinnedEnabled = true;
+    o.albumConfirmedEnabled = true;
     o.posterEnabled = true;
   }
 

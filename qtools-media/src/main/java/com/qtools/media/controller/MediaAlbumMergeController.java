@@ -307,6 +307,58 @@ public class MediaAlbumMergeController
     }
 
     /**
+     * 采纳建议册（P6.54）：{@code POST /media/admin/albums/confirm {ids:["a170", ...]}}
+     *
+     * <p>扫描按目录建出来的册默认 @@confirmed = 0@@（建议册），站端看不到；
+     * 这里把它们变成「已采纳」。册的内容（照片归属）扫描时就已经成立了，采纳只是一个开关——
+     * 所以采纳后不需要任何搬运/重算，只需索引快照失效。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @PostMapping("/confirm")
+    public Map<String, Object> confirmAlbums(@RequestBody Map<String, Object> body)
+    {
+        Object raw = body.get("ids");
+        if (!(raw instanceof List))
+        {
+            throw new ServiceException("缺少 ids 数组");
+        }
+        List<String> ids = new ArrayList<>();
+        for (Object o : (List<?>) raw)
+        {
+            String id = text(o);
+            if (id != null)
+            {
+                ids.add(id);
+            }
+        }
+        if (ids.isEmpty())
+        {
+            throw new ServiceException("ids 不能为空");
+        }
+        if (ids.size() > 500)
+        {
+            throw new ServiceException("一次最多采纳 500 本");
+        }
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        StringBuilder in = new StringBuilder();
+        for (int i = 0; i < ids.size(); i++)
+        {
+            if (i > 0)
+            {
+                in.append(',');
+            }
+            in.append(quote(ids.get(i)));
+        }
+        int updated = jdbc.update("update media_album set confirmed = 1 where confirmed <> 1 and id in (" + in + ")");
+        mediaIndexService.invalidateSnapshot();
+        log.info("采纳建议册 ids={} 实际采纳={}", ids, updated);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("confirmed", updated);
+        out.put("ids", ids);
+        return out;
+    }
+
+    /**
      * 移出册 → 未归类（P6.52）。
      *
      * <p>一张照片「最多属于一个系列（0..1）」，0 这一头就是这里：{@code album_id = NULL}。

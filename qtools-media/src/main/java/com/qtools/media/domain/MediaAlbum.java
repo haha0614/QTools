@@ -47,12 +47,26 @@ public class MediaAlbum
      */
     private String contentRating;
 
+    /** P6.35：审核状态 pending/approved/rejected（站端可见 = approved 且通过分级门槛） */
+    private String reviewState;
+
+    /** P6.46：封面图的原图相对路径（管理端预览要用原图，不是缩略图） */
+    private String coverRelPath;
+
     private Integer sort;
 
     private Date mtime;
 
     /** 是否隐藏（1/0）；仅管理端查询会填充 */
     private Integer hidden;
+
+    /**
+     * P6.54：册是否被采纳（1=已采纳、站端可见；0=扫描给的建议册）
+     *
+     * <p>扫描只在新插入时写 0，ON DUPLICATE KEY 不覆盖这一列——采纳是人的决定，
+     * 重扫不许把它退回建议态。存量全部为 1。</p>
+     */
+    private Integer confirmed;
 
     public String getId()
     {
@@ -149,6 +163,26 @@ public class MediaAlbum
         return contentRating;
     }
 
+    public String getReviewState()
+    {
+        return reviewState;
+    }
+
+    public String getCoverRelPath()
+    {
+        return coverRelPath;
+    }
+
+    public void setCoverRelPath(String coverRelPath)
+    {
+        this.coverRelPath = coverRelPath;
+    }
+
+    public void setReviewState(String reviewState)
+    {
+        this.reviewState = reviewState;
+    }
+
     public void setContentRating(String contentRating)
     {
         this.contentRating = contentRating;
@@ -183,4 +217,16 @@ public class MediaAlbum
     {
         this.hidden = hidden;
     }
+
+    public Integer getConfirmed()
+    {
+        return confirmed;
+    }
+
+    public void setConfirmed(Integer confirmed)
+    {
+        this.confirmed = confirmed;
+    }
 }
+
+
