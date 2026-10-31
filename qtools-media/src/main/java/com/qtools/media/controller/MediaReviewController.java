@@ -62,8 +62,11 @@ public class MediaReviewController
             @RequestParam(value = "keyword", required = false) String keyword,
             @RequestParam(value = "page", required = false, defaultValue = "1") int page,
             @RequestParam(value = "size", required = false, defaultValue = "20") int size,
-            // P6.55：入站队列 = 还没被人「采纳 + 通过」的册（建议册，或审核还没过）
-            @RequestParam(value = "inbound", required = false) Boolean inbound)
+            // P6.55：入站队列口径
+            //   suggest（默认）= 只有建议册（confirmed=0），它是"新到货"，不该被审核积压灌满
+            //   pending = 未审的正式册（历史积压，单独看、单独清）
+            //   all     = 两者并集
+            @RequestParam(value = "inbound", required = false) String inbound)
     {
         String kind = normalizeType(type);
         String stateValue = normalizeState(state, true);
@@ -72,13 +75,30 @@ public class MediaReviewController
         String kw = keyword == null ? "" : keyword.trim();
 
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
-        // P6.55：入站队列 = 还没被人「采纳 + 通过」的册；它替代 state 筛选，两者不同时生效
-        boolean inboundOnly = Boolean.TRUE.equals(inbound) && "album".equals(kind);
+        // P6.55：入站队列口径（suggest / pending / all）；它替代 state 筛选，两者不同时生效
+        String inboundMode = inbound == null ? null : inbound.trim().toLowerCase(Locale.ROOT);
+        if ("true".equals(inboundMode))
+        {
+            inboundMode = "suggest";
+        }
+        boolean inboundOnly = inboundMode != null && !inboundMode.isEmpty() && "album".equals(kind);
         StringBuilder where = new StringBuilder(" where 1 = 1");
         List<Object> args = new ArrayList<>();
         if (inboundOnly)
         {
-            where.append(" and (t.confirmed = 0 or t.review_state = 'pending')");
+            if ("pending".equals(inboundMode))
+            {
+                where.append(" and t.review_state = 'pending'");
+            }
+            else if ("all".equals(inboundMode))
+            {
+                where.append(" and (t.confirmed = 0 or t.review_state = 'pending')");
+            }
+            else
+            {
+                // 默认：只列还没被采纳的建议册
+                where.append(" and t.confirmed = 0");
+            }
         }
         else if (stateValue != null)
         {
