@@ -142,6 +142,10 @@ public class MediaAdminController extends BaseController
     @Autowired
     private IMediaRatingClassifyService mediaRatingClassifyService;
 
+    /** 图片内容自动分级（P6.24）：缩略图交本机 NSFW 模型判「露点」，按批调用 */
+    @Autowired
+    private com.qtools.media.service.impl.MediaPhotoClassifyService mediaPhotoClassifyService;
+
     /** 保存的筛选条件（站端写、管理端只读清单 + 清理） */
     @Autowired
     private IMediaSavedFilterService mediaSavedFilterService;
@@ -182,10 +186,11 @@ public class MediaAdminController extends BaseController
             @RequestParam(value = "hidden", required = false) String hidden,
             @RequestParam(value = "sort", required = false) String sort,
             @RequestParam(value = "tagId", required = false) Long tagId,
-            @RequestParam(value = "ids", required = false) String ids)
+            @RequestParam(value = "ids", required = false) String ids,
+            @RequestParam(value = "rating", required = false) String rating)
     {
         startPage();
-        return mediaAdminService.selectVideoPage(keyword, folder, person, vcodec, hidden, sort, tagId, ids);
+        return mediaAdminService.selectVideoPage(keyword, folder, person, vcodec, hidden, sort, tagId, ids, rating);
     }
 
     /** 相册分页列表 */
@@ -194,10 +199,11 @@ public class MediaAdminController extends BaseController
     public TableDataInfo albums(@RequestParam(value = "keyword", required = false) String keyword,
             @RequestParam(value = "personId", required = false) Long personId,
             @RequestParam(value = "hidden", required = false) String hidden,
-            @RequestParam(value = "sort", required = false) String sort)
+            @RequestParam(value = "sort", required = false) String sort,
+            @RequestParam(value = "rating", required = false) String rating)
     {
         startPage();
-        return mediaAdminService.selectAlbumPage(keyword, personId, hidden, sort);
+        return mediaAdminService.selectAlbumPage(keyword, personId, hidden, sort, rating);
     }
 
     /** 某册图片分页列表 */
@@ -369,6 +375,34 @@ public class MediaAdminController extends BaseController
         return mediaAdminService.updateAlbumPerson(id, personId);
     }
 
+    /**
+     * 批量设置人物：body {@code {type:"video"|"album", ids:[...], personIds:[...]}}
+     *
+     * <p>复用单条写入（视频走 replaceVideoPersons：含「素人」兜底与标签同步；
+     * 相册走 updateAlbumPerson：person_id + media_album_person 一起写）。
+     * personIds 为空 = 清空归属。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-批量人物归属", businessType = BusinessType.UPDATE)
+    @PostMapping("/batch-person")
+    public Map<String, Object> batchPerson(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaAdminService.batchPerson(stringValue(body.get("type")),
+                stringsValue(body.get("ids"), "ids"), longsValue(body.get("personIds"), "personIds"));
+    }
+
+    /** 批量设置工作室：body {@code {ids:[...], studioIds:[...]}}（只对视频） */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-批量工作室归属", businessType = BusinessType.UPDATE)
+    @PostMapping("/batch-studio")
+    public Map<String, Object> batchStudio(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        return mediaAdminService.batchStudio(stringsValue(body.get("ids"), "ids"),
+                longsValue(body.get("studioIds"), "studioIds"));
+    }
+
     // ------------------------------------------------------------------ 内容分级（P5.99）
 
     /**
@@ -467,6 +501,29 @@ public class MediaAdminController extends BaseController
                 boolValue(body.get("force")));
     }
 
+    /**
+     * 图片内容自动分级（P6.24）：把一册图片的缩略图交给本机 NSFW 模型判「有没有露点」。
+     *
+     * <p>body：{@code {albumId, offset?, limit?, dryRun?}}。{@code limit} 1..60（默认 30），
+     * {@code dryRun} 缺省 true = 只预览不写库。回包
+     * {@code {checked,total,nextOffset,done,dryRun,counts,samples,applied}}——
+     * 一次只判一批，前端按 {@code nextOffset} 连着调到 {@code done=true}，中途关掉也不会丢已判的部分。</p>
+     *
+     * <p>只写「限制 / 家长指导」两档；<b>不会写 general</b>：图片只能比相册更严，
+     * 自动把图"降"成大众级不在这个功能的语义里。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-图片自动分级", businessType = BusinessType.UPDATE)
+    @PostMapping("/rating/classify-photos")
+    public Map<String, Object> classifyPhotos(@RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, false);
+        Boolean dryRun = boolValue(body.get("dryRun"));
+        return mediaPhotoClassifyService.classify(stringValue(body.get("albumId")),
+                intValue(body.get("offset")), intValue(body.get("limit")),
+                dryRun == null ? Boolean.TRUE : dryRun);
+    }
+
     // ------------------------------------------------------------------ 软删 / 恢复
 
     /** 软删：移动到回收站并置 hidden=1（绝不真删） */
@@ -528,7 +585,8 @@ public class MediaAdminController extends BaseController
         {
             throw MediaException.badRequest("missing kind / id");
         }
-        return mediaAdminService.restore(kind, id);
+        // trashRel 可选：行已被删（重复文件清理）时按条目旁注的原路径恢复
+        return mediaAdminService.restore(kind, id, stringValue(body.get("trashRel")));
     }
 
     /** 彻底删除（真删，不可恢复）：只允许 trash 根下的对象，越界一律 403 */

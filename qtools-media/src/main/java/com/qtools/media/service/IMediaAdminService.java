@@ -23,10 +23,10 @@ public interface IMediaAdminService
      *              （选中父标签必须能命中挂在子标签下的视频）；null = 不按标签过滤
      */
     TableDataInfo selectVideoPage(String keyword, String folder, String person, String vcodec, String hidden,
-            String sort, Long tagId, String ids);
+            String sort, Long tagId, String ids, String rating);
 
     /** 相册分页 */
-    TableDataInfo selectAlbumPage(String keyword, Long personId, String hidden, String sort);
+    TableDataInfo selectAlbumPage(String keyword, Long personId, String hidden, String sort, String rating);
 
     /** 某册图片分页 */
     TableDataInfo selectPhotoPage(String albumId);
@@ -83,6 +83,14 @@ public interface IMediaAdminService
     Map<String, Object> restore(String kind, String id);
 
     /**
+     * 从回收站恢复（可精确指定条目）
+     *
+     * <p>{@code trashRel} 给定时先看这条记录还在不在库里：不在（重复文件清理是
+     * 「文件进回收站 + 删行」）就按条目旁注里记的原路径把文件搬回去，重名加后缀。</p>
+     */
+    Map<String, Object> restore(String kind, String id, String trashRel);
+
+    /**
      * 回收站分页（以磁盘为准，不是查表）
      *
      * @param kind   all / video / album / photo
@@ -120,6 +128,12 @@ public interface IMediaAdminService
 
     /** 人物列表（id/name/albumCount/photoCount） */
     List<Map<String, Object>> people();
+
+    /** P6.10 批量设置人物：type=video|album，ids 为目标条目，personIds 为空表示清空 */
+    Map<String, Object> batchPerson(String type, List<String> ids, List<Long> personIds);
+
+    /** P6.10 批量设置工作室（只对视频有效）；studioIds 为空表示清空 */
+    Map<String, Object> batchStudio(List<String> ids, List<Long> studioIds);
 
     /** 改相册人物归属；personId 为 null 表示未归类 */
     Map<String, Object> updateAlbumPerson(String albumId, Long personId);

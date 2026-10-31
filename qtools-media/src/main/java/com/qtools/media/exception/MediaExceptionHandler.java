@@ -10,6 +10,7 @@ import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import com.qtools.common.exception.ServiceException;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 /**
@@ -52,6 +53,20 @@ public class MediaExceptionHandler
     {
         log.warn("媒体接口权限不足 {} {} -> {}", request.getMethod(), request.getRequestURI(), e.getMessage());
         writeError(response, request, 403, "forbidden");
+    }
+
+    /**
+     * 业务异常（参数不合法、状态不允许等）
+     *
+     * <p>必须显式声明：否则会落到下面的 {@code Exception} 分支，把「选中的图在目标册里都有同内容副本」
+     * 这类业务提示变成 HTTP 500 + {@code internal error}，前端只能显示「系统接口500异常」。</p>
+     */
+    @ExceptionHandler(ServiceException.class)
+    public void handleServiceException(ServiceException e, HttpServletRequest request, HttpServletResponse response)
+            throws IOException
+    {
+        log.warn("媒体接口业务异常 {} {} -> {}", request.getMethod(), request.getRequestURI(), e.getMessage());
+        writeError(response, request, 400, e.getMessage());
     }
 
     @ExceptionHandler(Exception.class)

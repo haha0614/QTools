@@ -49,6 +49,8 @@ import com.qtools.media.service.IMediaAdminService;
 import com.qtools.media.service.IMediaFileService;
 import com.qtools.media.service.IMediaIndexService;
 import com.qtools.media.service.IMediaOrganizeService;
+import com.qtools.media.service.IMediaPersonService;
+import com.qtools.media.service.IMediaStudioService;
 import com.qtools.media.support.MediaRating;
 import com.qtools.media.support.MediaTranscodeProbe;
 import com.qtools.media.support.MediaTrashSupport;
@@ -149,6 +151,13 @@ public class MediaAdminServiceImpl implements IMediaAdminService
     @Autowired
     private IMediaOrganizeService mediaOrganizeService;
 
+    /** P6.10：批量设置人物 / 工作室——复用单条写入逻辑（含素人兜底与 use_count 重算） */
+    @Autowired
+    private IMediaPersonService mediaPersonService;
+
+    @Autowired
+    private IMediaStudioService mediaStudioService;
+
     @Autowired
     private MediaProperties mediaProperties;
 
@@ -164,28 +173,31 @@ public class MediaAdminServiceImpl implements IMediaAdminService
 
     @Override
     public TableDataInfo selectVideoPage(String keyword, String folder, String person, String vcodec,
-            String hidden, String sort, Long tagId, String ids)
+            String hidden, String sort, Long tagId, String ids, String rating)
     {
         // 层级筛选语义：选父标签 = 命中「自身 + 全部后代」标签下的视频（前端也能拿 tags 的 parentId 自行展开，
         // 这里做服务端展开是为了让管理端筛选与将来的服务端筛选共用同一份语义）
         List<Long> tagIds = tagId == null ? null : mediaOrganizeService.descendantTagIds(tagId);
         List<MediaVideo> rows = mediaAdminMapper.selectVideoPage(trimToNull(keyword), trimToNull(folder),
                 trimToNull(person), trimToNull(vcodec), normalizeHidden(hidden), trimToNull(sort), tagIds,
-                splitIds(ids));
+                splitIds(ids), trimToNull(rating));
         long total = new PageInfo<>(rows).getTotal();
         List<Map<String, Object>> out = new ArrayList<>(rows.size());
         for (MediaVideo video : rows)
         {
             out.add(videoRow(video));
         }
+        // P6.12：列表页「修改人物」弹窗要回填当前人物。前端原来读 row.persons，但列表行没有这个键，
+        // 于是每次都从空白开始选（用户反馈）。这里一次批量取出本页视频的演员行，挂到对应行上。
+        fillVideoPersons(rows, out);
         return dataTable(out, total);
     }
 
     @Override
-    public TableDataInfo selectAlbumPage(String keyword, Long personId, String hidden, String sort)
+    public TableDataInfo selectAlbumPage(String keyword, Long personId, String hidden, String sort, String rating)
     {
         List<MediaAlbum> rows = mediaAdminMapper.selectAlbumPage(trimToNull(keyword), personId,
-                normalizeHidden(hidden), trimToNull(sort));
+                normalizeHidden(hidden), trimToNull(sort), trimToNull(rating));
         long total = new PageInfo<>(rows).getTotal();
         Map<Long, String> personNames = loadPersonNames();
         List<Map<String, Object>> out = new ArrayList<>(rows.size());
@@ -584,7 +596,19 @@ public class MediaAdminServiceImpl implements IMediaAdminService
     @Override
     public Map<String, Object> restore(String kind, String id)
     {
+        return restore(kind, id, null);
+    }
+
+    @Override
+    public Map<String, Object> restore(String kind, String id, String trashRel)
+    {
         requireKind(kind);
+        // 行已经没了（重复副本 / 重复文件清理是「文件进回收站 + 删行」）：
+        // 只能按条目旁注里记的原路径恢复，否则这条永远只能「彻底删除」
+        if (StringUtils.isNotEmpty(trashRel) && !rowExists(kind, id))
+        {
+            return restoreOrphan(kind, id, trashRel);
+        }
         Path source = null;
         String storedId;
         String rel;
@@ -655,6 +679,93 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         out.put("updated", updated);
         out.put("hidden", false);
         return out;
+    }
+
+    /** 这条记录还在不在库里（行已删的回收站条目走 restoreOrphan） */
+    private boolean rowExists(String kind, String id)
+    {
+        if (KIND_VIDEO.equals(kind))
+        {
+            return lookupVideo(id) != null;
+        }
+        if (KIND_ALBUM.equals(kind))
+        {
+            return lookupAlbum(id) != null;
+        }
+        return lookupPhoto(id) != null;
+    }
+
+    /**
+     * 按旁注恢复一条「行已不存在」的回收站条目：搬回原目录，重名加后缀。
+     *
+     * <p>不重建 DB 行——搬回去以后下一次扫描会按目录重新入库，这才是唯一事实来源。</p>
+     */
+    private Map<String, Object> restoreOrphan(String kind, String id, String trashRel)
+    {
+        Path entry = requireTrashObject(kind, resolveTrashTarget(kind, trashRel));
+        String rel = MediaTrashSupport.readOriginalRel(entry);
+        if (rel == null)
+        {
+            throw MediaException.badRequest("这条回收站记录没有原路径（删除时未落盘），无法自动恢复：" + trashRel);
+        }
+        Integer rootId = null;
+        Path bucket = entry.getParent();
+        if (bucket != null && bucket.getFileName() != null
+                && ROOT_BUCKET.matcher(bucket.getFileName().toString()).matches())
+        {
+            rootId = Integer.valueOf(bucket.getFileName().toString());
+        }
+        Path destination = mediaFileService.resolveWriteTarget(rel, rootId);
+        if (Files.exists(destination))
+        {
+            destination = uniqueSuffix(destination);
+        }
+        try
+        {
+            if (destination.getParent() != null)
+            {
+                Files.createDirectories(destination.getParent());
+            }
+            MediaTrashSupport.moveOrCopy(entry, destination);
+        }
+        catch (IOException e)
+        {
+            log.error("回收站按旁注恢复失败 kind={} id={} {} -> {}", kind, id, entry, destination, e);
+            throw new MediaException(500, "移回失败（跨盘或文件被占用）：" + e.getMessage());
+        }
+        mediaIndexService.invalidateSnapshot();
+        String to = mediaFileService.relativize(destination);
+        log.info("回收站恢复（行已删，按旁注）kind={} id={} {} -> {}", kind, id, trashRel, to);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("restored", true);
+        out.put("kind", kind);
+        out.put("id", id);
+        out.put("from", trashRel);
+        out.put("to", to);
+        out.put("rootId", rootId);
+        out.put("orphan", true);
+        out.put("note", "记录已不存在，文件已搬回原目录；下次扫描会重新入库");
+        return out;
+    }
+
+    /** 重名时的目标名：<原名>_1.<ext>、_2… */
+    private static Path uniqueSuffix(Path target)
+    {
+        Path dir = target.getParent();
+        String name = target.getFileName().toString();
+        int dot = name.lastIndexOf('.');
+        String base = dot > 0 ? name.substring(0, dot) : name;
+        String ext = dot > 0 ? name.substring(dot) : "";
+        for (int i = 1; i < 1000; i++)
+        {
+            Path candidate = dir.resolve(base + "_" + i + ext);
+            if (!Files.exists(candidate))
+            {
+                return candidate;
+            }
+        }
+        return dir.resolve(base + "_" + System.currentTimeMillis() + ext);
     }
 
     // ------------------------------------------------------------------ 回收站
@@ -763,6 +874,8 @@ public class MediaAdminServiceImpl implements IMediaAdminService
     {
         String originalRel = null;
         String thumbUrl = null;
+        // 照片的内容哈希：有它才能给出封面 / 预览大图（内容寻址，文件进了回收站也还在）
+        String hash = null;
         if (KIND_VIDEO.equals(entry.kind()))
         {
             MediaVideo video = lookupVideo(entry.id());
@@ -793,7 +906,40 @@ public class MediaAdminServiceImpl implements IMediaAdminService
             if (photo != null)
             {
                 originalRel = photo.getRelPath();
-                thumbUrl = thumbUrl(photo.getAlbumId(), photo.getSeq(), contentHash(photo.getContentHash()));
+                hash = contentHash(photo.getContentHash());
+                thumbUrl = thumbUrl(photo.getAlbumId(), photo.getSeq(), hash);
+            }
+        }
+
+        MediaTrashSupport.Meta meta = null;
+        if (originalRel == null)
+        {
+            // 行没了（重复文件清理会删行）：读条目旁的旁注，原路径照样显示，
+            // 旁注里带了内容哈希的话，封面与预览大图也照样能给
+            meta = MediaTrashSupport.readMeta(entry.path());
+            if (meta != null)
+            {
+                if (meta.relPath != null)
+                {
+                    originalRel = meta.relPath;
+                }
+                if (hash == null)
+                {
+                    hash = contentHash(meta.contentHash);
+                }
+            }
+        }
+        String previewUrl = null;
+        if (KIND_PHOTO.equals(entry.kind()) && hash != null)
+        {
+            if (thumbUrl == null)
+            {
+                thumbUrl = photoUrl(THUMB_PHOTO_PREFIX, null, null, hash, false);
+            }
+            previewUrl = photoUrl(PREVIEW_PHOTO_PREFIX, null, null, hash, true);
+            if (previewUrl == null)
+            {
+                previewUrl = thumbUrl;
             }
         }
 
@@ -810,6 +956,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         row.put("deletedAt", formatDate(entry.deletedAt()));
         row.put("isDir", entry.isDir());
         row.put("thumbUrl", thumbUrl);
+        row.put("previewUrl", previewUrl);
         return row;
     }
 
@@ -1341,6 +1488,112 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         return out;
     }
 
+    /** 批量接口的 id 上限（与内容分级批量一致，防止一次误贴把整库刷掉） */
+    private static final int BATCH_LIMIT = 2000;
+
+    @Override
+    public Map<String, Object> batchPerson(String type, List<String> ids, List<Long> personIds)
+    {
+        String kind = type == null ? "" : type.trim().toLowerCase(java.util.Locale.ROOT);
+        List<String> targets = cleanBatchIds(ids);
+        if (targets.isEmpty())
+        {
+            throw MediaException.badRequest("ids 不能为空（要给哪些条目设置人物）");
+        }
+        List<Long> people = cleanBatchLongs(personIds);
+        int updated = 0;
+        if ("album".equals(kind))
+        {
+            // 相册沿用单人物字段（media_album.person_id + media_album_person），多选时取第一个
+            Long single = people.isEmpty() ? null : people.get(0);
+            for (String id : targets)
+            {
+                updateAlbumPerson(id, single);
+                updated++;
+            }
+        }
+        else if ("video".equals(kind))
+        {
+            for (String id : targets)
+            {
+                mediaPersonService.replaceVideoPersons(id, people, null);
+                updated++;
+            }
+        }
+        else
+        {
+            throw MediaException.badRequest("type 只能是 video 或 album，本次: " + type);
+        }
+        mediaIndexService.invalidateSnapshot();
+        log.info("批量设置人物 type={} requested={} updated={} personIds={}", kind, targets.size(), updated, people);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("type", kind);
+        out.put("requested", targets.size());
+        out.put("updated", updated);
+        out.put("personIds", people);
+        return out;
+    }
+
+    @Override
+    public Map<String, Object> batchStudio(List<String> ids, List<Long> studioIds)
+    {
+        List<String> targets = cleanBatchIds(ids);
+        if (targets.isEmpty())
+        {
+            throw MediaException.badRequest("ids 不能为空（要给哪些视频设置工作室）");
+        }
+        List<Long> studios = cleanBatchLongs(studioIds);
+        int updated = 0;
+        for (String id : targets)
+        {
+            mediaStudioService.replaceVideoStudios(id, studios);
+            updated++;
+        }
+        mediaIndexService.invalidateSnapshot();
+        log.info("批量设置工作室 requested={} updated={} studioIds={}", targets.size(), updated, studios);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("requested", targets.size());
+        out.put("updated", updated);
+        out.put("studioIds", studios);
+        return out;
+    }
+
+    private static List<String> cleanBatchIds(List<String> ids)
+    {
+        List<String> targets = new ArrayList<>();
+        if (ids != null)
+        {
+            for (String id : ids)
+            {
+                if (id != null && !id.trim().isEmpty() && !targets.contains(id.trim()))
+                {
+                    targets.add(id.trim());
+                }
+            }
+        }
+        if (targets.size() > BATCH_LIMIT)
+        {
+            throw MediaException.badRequest("ids 一次最多 " + BATCH_LIMIT + " 个，本次: " + targets.size());
+        }
+        return targets;
+    }
+
+    private static List<Long> cleanBatchLongs(List<Long> values)
+    {
+        List<Long> out = new ArrayList<>();
+        if (values != null)
+        {
+            for (Long v : values)
+            {
+                if (v != null && !out.contains(v))
+                {
+                    out.add(v);
+                }
+            }
+        }
+        return out;
+    }
+
     @Override
     public Map<String, Object> updateAlbumPerson(String albumId, Long personId)
     {
@@ -1373,6 +1626,59 @@ public class MediaAdminServiceImpl implements IMediaAdminService
 
     // ------------------------------------------------------------------ 行整形
 
+    /**
+     * 给列表行补 {@code persons:[{id,name,role}]}（P6.12）
+     *
+     * <p>「修改人物」弹窗靠它回填已有选择；一次 in 查询取本页全部演员行，页内不产生 N+1。
+     * 演员只有 name 没有 person_id 的老行（person_id 为空）不输出——那种行在弹窗里也无法回填成人物 id。</p>
+     */
+    private void fillVideoPersons(List<MediaVideo> rows, List<Map<String, Object>> nodes)
+    {
+        if (rows == null || rows.isEmpty() || nodes == null || nodes.isEmpty())
+        {
+            return;
+        }
+        List<String> ids = new ArrayList<>(rows.size());
+        for (MediaVideo row : rows)
+        {
+            if (row != null && row.getId() != null)
+            {
+                ids.add(row.getId());
+            }
+        }
+        if (ids.isEmpty())
+        {
+            return;
+        }
+        Map<String, List<Map<String, Object>>> byVideo = new java.util.HashMap<>();
+        for (Map<String, Object> actor : mediaAdminMapper.selectActorsByVideoIds(ids))
+        {
+            Object videoId = actor.get("videoId");
+            Object personId = actor.get("personId");
+            if (videoId == null || personId == null)
+            {
+                continue;
+            }
+            Map<String, Object> node = new LinkedHashMap<>();
+            node.put("id", personId);
+            node.put("name", actor.get("name"));
+            if (actor.get("role") != null)
+            {
+                node.put("role", actor.get("role"));
+            }
+            byVideo.computeIfAbsent(String.valueOf(videoId), k -> new ArrayList<>()).add(node);
+        }
+        for (int i = 0; i < rows.size() && i < nodes.size(); i++)
+        {
+            MediaVideo row = rows.get(i);
+            if (row == null || row.getId() == null)
+            {
+                continue;
+            }
+            nodes.get(i).put("persons", byVideo.getOrDefault(row.getId(), List.of()));
+        }
+    }
+
     private Map<String, Object> videoRow(MediaVideo video)
     {
         Map<String, Object> node = new LinkedHashMap<>();
@@ -1390,10 +1696,17 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         node.put("hidden", video.getHidden() != null && video.getHidden() != 0);
         // P5.99 内容分级：列表行内下拉就靠这个键回显（行整形是显式白名单，漏了这里 = 列永远空）
         node.put("contentRating", MediaRating.normalize(video.getContentRating()));
+        // P6.45：审核状态（同上，白名单漏了它，媒体库的「审核」列就恒显示待审核）
+        node.put("reviewState", video.getReviewState());
         node.put("mtime", formatDate(video.getMtime()));
         // 缺失文件（P2-D）：管理端列表据此标红点；用户端默认仍带出，由前端自行过滤
         node.put("missing", video.getMissing() != null && video.getMissing() != 0);
         node.put("lastSeen", formatDate(video.getLastSeen()));
+        // P6.07：管理端列表要显示「人物 / 工作室」两列（mapper 里两个子查询聚合，无 N+1）
+        // P6.08：没有演员的视频在库里归「素人」兜底行，列表也照这个口径显示，别再显示成空
+        String persons = video.getPersonText();
+        node.put("personText", (persons == null || persons.isBlank()) ? "素人" : persons);
+        node.put("studioText", video.getStudioText());
         return node;
     }
 
@@ -1411,6 +1724,9 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         node.put("cover", album.getCoverPath());
         // P5.99 内容分级（整册一个值）：相册列表行内下拉的回显字段
         node.put("contentRating", MediaRating.normalize(album.getContentRating()));
+        // P6.45：审核状态（行整形是显式白名单，漏了这里 = 列表永远显示「待审核」）
+        node.put("reviewState", album.getReviewState());
+        node.put("coverRelPath", album.getCoverRelPath());
         return node;
     }
 
@@ -1423,6 +1739,8 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         node.put("bytes", photo.getBytes());
         node.put("isBig", photo.getIsBig() != null && photo.getIsBig() != 0);
         node.put("hidden", photo.getHidden() != null && photo.getHidden() != 0);
+        // P6.42：图片自身的分级（null = 继承相册）。审核页的缩略图要显示它，否则看不出哪张单独定过级。
+        node.put("contentRating", photo.getContentRating());
         // 内容寻址 URL：URL 随内容变，浏览器缓存就不可能再指到旧图。
         // 产物没落盘时仍需发老命名 URL——内容寻址入口没有序号回退，发出去就是死链
         String photoHash = contentHash(photo.getContentHash());
@@ -1435,6 +1753,9 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         node.put("contentHash", photo.getContentHash());
         // 版本号：前端将来可拼 ?v=<thumbVersion> 做 cache-busting（本期只返回，前端暂不使用）
         node.put("thumbVersion", thumbVersion(photo, photoHash));
+        // P6.09：图片自身分级；null = 继承相册（前端显示“继承”，不要当成大众级）
+        String own = photo.getContentRating();
+        node.put("contentRating", (own == null || own.isBlank()) ? null : MediaRating.normalize(own));
         return node;
     }
 
@@ -1696,6 +2017,11 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         {
             for (Path path : stream.toList())
             {
+                if (isMetaName(path))
+                {
+                    // .meta 旁注目录：不是回收站条目
+                    continue;
+                }
                 if (!isRootBucket(path))
                 {
                     found.add(parseTrashEntry(kind, path, null));
@@ -1715,8 +2041,19 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         {
             throw new MediaException(500, "回收站不可读: " + dir);
         }
+        // 旁注以 . 开头，可能在库根桶里（trash/photo/1/.meta）也可能直接在 kind 下：
+        // 这里统一兜一遍，任何层级都不会被当成条目（P6.51 第一版只过滤了外层，桶内的漏了）
+        found.removeIf(e -> e.path().getFileName() != null
+                && e.path().getFileName().toString().startsWith("."));
         found.sort(TRASH_ORDER);
         return found;
+    }
+
+    /** 旁注目录 / 旁注文件（以 . 开头）：回收站枚举一律跳过 */
+    private static boolean isMetaName(Path path)
+    {
+        Path name = path.getFileName();
+        return name != null && name.toString().startsWith(".");
     }
 
     /** 回收站里的库根桶：目录名是纯数字（{@code trash/<kind>/<rootId>}） */
@@ -2097,3 +2434,6 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         return out.isEmpty() ? null : out;
     }
 }
+
+
+

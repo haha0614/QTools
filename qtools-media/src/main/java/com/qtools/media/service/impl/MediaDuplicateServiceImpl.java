@@ -127,7 +127,7 @@ public class MediaDuplicateServiceImpl implements IMediaDuplicateService
             {
                 String relPath = str(alias.get("relPath"));
                 Integer rootId = integer(alias.get("rootId"));
-                int outcome = moveAliasToTrash(cleanKind, rootId, relPath, str(alias.get("id")), movedToTrash);
+                int outcome = moveAliasToTrash(cleanKind, rootId, relPath, str(alias.get("id")), hash, movedToTrash);
                 if (outcome > 0)
                 {
                     deletedFiles++;
@@ -254,6 +254,7 @@ public class MediaDuplicateServiceImpl implements IMediaDuplicateService
         {
             // 文件已不在盘上 → moveAliasToTrash 返回 0：行照删、deletedFiles=0，仍是 200
             deletedFiles = moveAliasToTrash(cleanKind, integer(alias.get("rootId")), str(alias.get("relPath")), id,
+                str(alias.get("contentHash")),
                     movedToTrash);
         }
 
@@ -277,7 +278,8 @@ public class MediaDuplicateServiceImpl implements IMediaDuplicateService
     // ------------------------------------------------------------------ 内部
 
     /** 把一个别名文件搬进回收站：跳过（0）/ 已搬（1）；路径越界或 IO 失败直接抛 */
-    private int moveAliasToTrash(String kind, Integer rootId, String relPath, String aliasId, List<String> movedToTrash)
+    private int moveAliasToTrash(String kind, Integer rootId, String relPath, String aliasId, String contentHash,
+            List<String> movedToTrash)
     {
         if (StringUtils.isEmpty(relPath))
         {
@@ -309,6 +311,8 @@ public class MediaDuplicateServiceImpl implements IMediaDuplicateService
             log.error("别名文件搬入回收站失败 kind={} {} -> {}", kind, source, target, e);
             throw new MediaException(500, "移动失败（跨盘或文件被占用）：" + e.getMessage());
         }
+        // 别名行随后就被删了：原路径随条目落盘，回收站才说得清它原来在哪
+        MediaTrashSupport.writeMeta(target, relPath, contentHash);
         movedToTrash.add(mediaFileService.relativize(target));
         return 1;
     }
