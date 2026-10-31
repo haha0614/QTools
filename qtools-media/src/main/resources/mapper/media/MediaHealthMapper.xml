@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.qtools.media.mapper.MediaHealthMapper">
+
+    <select id="countAlbumCounterMismatch" resultType="long">
+        SELECT COUNT(*) FROM media_album a
+         WHERE a.photo_count &lt;&gt; (SELECT COUNT(*) FROM media_photo p WHERE p.album_id = a.id)
+    </select>
+
+    <select id="countAlbumIdentityMissing" resultType="long">
+        SELECT COUNT(*) FROM media_album WHERE identity_key = ''
+    </select>
+
+    <select id="countAlbumIdentityConflict" resultType="long">
+        SELECT COUNT(*) FROM (
+            SELECT dir_key, identity_key FROM media_album
+             GROUP BY dir_key, identity_key HAVING COUNT(*) > 1
+        ) t
+    </select>
+
+    <select id="countMissingPhotos" resultType="long">
+        SELECT COUNT(*) FROM media_photo WHERE missing = 1
+    </select>
+
+    <select id="countMissingVideos" resultType="long">
+        SELECT COUNT(*) FROM media_video WHERE missing = 1
+    </select>
+
+    <select id="countEmptyAlbums" resultType="long">
+        SELECT COUNT(*) FROM media_album a
+         WHERE NOT EXISTS (SELECT 1 FROM media_photo p WHERE p.album_id = a.id)
+    </select>
+
+    <!-- album_id 为 NULL = 未归类（P6.52 允许的合法状态），不是孤儿，不能算异常 -->
+    <select id="countOrphanPhotoRows" resultType="long">
+        SELECT COUNT(*) FROM media_photo p
+         WHERE p.album_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM media_album a WHERE a.id = p.album_id)
+    </select>
+
+    <select id="countAlbumsWithoutCover" resultType="long">
+        SELECT COUNT(*) FROM media_album WHERE cover_path IS NULL OR cover_path = ''
+    </select>
+
+    <select id="selectEmptyAlbumList" resultType="java.util.LinkedHashMap">
+        SELECT a.id AS id, a.dir_key AS dirKey, a.title AS title
+          FROM media_album a
+         WHERE NOT EXISTS (SELECT 1 FROM media_photo p WHERE p.album_id = a.id)
+         ORDER BY a.id
+    </select>
+
+    <select id="selectAlbumDirList" resultType="java.util.LinkedHashMap">
+        SELECT a.id AS id, a.dir_key AS dirKey, a.title AS title
+          FROM media_album a
+         ORDER BY a.id
+    </select>
+
+    <select id="selectCounterMismatchRows" resultType="java.util.LinkedHashMap">
+        SELECT a.id AS id, a.title AS title, a.photo_count AS declared,
+               (SELECT COUNT(*) FROM media_photo p WHERE p.album_id = a.id) AS actual
+          FROM media_album a
+         WHERE a.photo_count &lt;&gt; (SELECT COUNT(*) FROM media_photo p WHERE p.album_id = a.id)
+         ORDER BY a.photo_count DESC
+         LIMIT #{limit}
+    </select>
+
+    <select id="selectRootPaths" resultType="java.lang.String">
+        SELECT path FROM media_root WHERE kind = 'root' ORDER BY id
+    </select>
+
+    <delete id="deleteAlbumPersonByAlbumIds">
+        DELETE FROM media_album_person WHERE album_id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </delete>
+
+    <delete id="deleteAlbumsByIds">
+        DELETE FROM media_album WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </delete>
+
+    <!-- 头像引用悬空：avatar_ref 形如 a163:0#crop=...，按冒号前半段匹配相册 id -->
+    <update id="clearAvatarRefsForAlbums">
+        UPDATE media_person
+           SET avatar_path = NULL, avatar_kind = NULL, avatar_ref = NULL
+         WHERE avatar_ref IS NOT NULL AND avatar_ref &lt;&gt; ''
+           AND SUBSTRING_INDEX(avatar_ref, ':', 1) IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </update>
+
+    <!-- 计数重算：LEFT JOIN 保证「一张图都没有」的相册也被归零（不是漏掉） -->
+    <update id="recountAlbumCounters">
+        UPDATE media_album a
+        LEFT JOIN (
+            SELECT album_id, COUNT(*) AS c, SUM(bytes) AS b
+              FROM media_photo GROUP BY album_id
+        ) t ON t.album_id = a.id
+           SET a.photo_count = COALESCE(t.c, 0),
+               a.bytes = COALESCE(t.b, 0)
+         WHERE a.photo_count &lt;&gt; COALESCE(t.c, 0)
+            OR a.bytes &lt;&gt; COALESCE(t.b, 0)
+    </update>
+
+</mapper>

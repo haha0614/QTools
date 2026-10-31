@@ -10,6 +10,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -306,6 +307,86 @@ public class MediaAlbumMergeController
     }
 
     /**
+     * 移出册 → 未归类（P6.52）。
+     *
+     * <p>一张照片「最多属于一个系列（0..1）」，0 这一头就是这里：{@code album_id = NULL}。
+     * 同时置 {@code album_pinned = 1}——空归属是人工决定，扫描不许按目录把它拽回去。
+     * 站端所有图片查询都按 album 走，所以无册照片天然不会出现在站上。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @PostMapping("/photos/detach")
+    public Map<String, Object> detachPhotos(@RequestBody Map<String, Object> body)
+    {
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        List<Long> ids = photoIds(body);
+        List<Map<String, Object>> rows = photos(jdbc, ids);
+        Set<String> sources = new LinkedHashSet<>();
+        List<Object[]> batch = new ArrayList<>();
+        for (Map<String, Object> r : rows)
+        {
+            Object album = r.get("album_id");
+            if (album != null)
+            {
+                sources.add(String.valueOf(album));
+            }
+            batch.add(new Object[] { r.get("id") });
+        }
+        int[] affected = jdbc.batchUpdate(
+                "update media_photo set album_id = null, album_pinned = 1 where id = ?", batch);
+        int detached = countAffected(affected);
+        for (String s : sources)
+        {
+            recompute(jdbc, s);
+        }
+        mediaIndexService.invalidateSnapshot();
+        log.info("移出册（未归类）选中={} 实际={} 来源册={}", ids.size(), detached, sources);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("detached", detached);
+        out.put("from", new ArrayList<String>(sources));
+        return out;
+    }
+
+    /**
+     * 未归类照片列表：{@code GET /media/admin/albums/photos/uncategorized?page=1&size=48}
+     *
+     * <p>缩略图只给内容寻址 URL（{@code /api/media/thumb/p/<hash>}）：无册的行没有
+     * albumId/seq 可以回退，正好也逼着老库先把哈希补上。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/photos/uncategorized")
+    public Map<String, Object> uncategorized(
+            @RequestParam(value = "page", required = false, defaultValue = "1") int page,
+            @RequestParam(value = "size", required = false, defaultValue = "48") int size,
+            @RequestParam(value = "keyword", required = false) String keyword)
+    {
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        int p = Math.max(1, page);
+        int s = Math.max(1, Math.min(200, size));
+        String kw = text(keyword);
+        String where = " where album_id is null" + (kw == null ? "" : " and rel_path like " + quote("%" + kw + "%"));
+        Integer total = jdbc.queryForObject("select count(*) from media_photo" + where, Integer.class);
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "select id, rel_path as relPath, bytes, root_id as rootId, content_hash as contentHash,"
+                        + " seq, hidden, coalesce(missing, 0) as missing"
+                        + " from media_photo" + where + " order by id desc limit ? offset ?",
+                s, (p - 1) * s);
+        for (Map<String, Object> r : rows)
+        {
+            Object hash = r.get("contentHash");
+            String h = hash == null ? null : String.valueOf(hash).trim();
+            r.put("thumbUrl", h == null || h.isEmpty() ? null : "/api/media/thumb/p/" + h);
+            r.put("previewUrl", h == null || h.isEmpty() ? null : "/api/media/preview/p/" + h);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("total", total == null ? 0 : total.intValue());
+        out.put("page", p);
+        out.put("size", s);
+        out.put("rows", rows);
+        return out;
+    }
+
+    /**
      * 按图拆出 —— 把选中的图挪进一本**新建**的册（P6.51）。
      *
      * <p>新册不是目录册：dir_key 为 NULL、source='manual'，所以扫描既不会按目录认领它，
@@ -427,14 +508,7 @@ public class MediaAlbumMergeController
         // 返回 rows.size() 会让界面报成功、库里却什么都没变（P6.51 踩过一次）
         int[] affected = jdbc.batchUpdate(
                 "update media_photo set album_id = ?, seq = ?, album_pinned = 1 where id = ?", batch);
-        int moved = 0;
-        for (int n : affected)
-        {
-            if (n > 0 || n == java.sql.Statement.SUCCESS_NO_INFO)
-            {
-                moved++;
-            }
-        }
+        int moved = countAffected(affected);
         if (moved != rows.size())
         {
             log.warn("按图改归属：批量更新命中的行数 {} != 计划 {}（ids={}）", moved, rows.size(),
@@ -496,6 +570,25 @@ public class MediaAlbumMergeController
                         + " and t.content_hash in (select s.content_hash from media_photo s"
                         + " where s.id in (" + list + ") and s.content_hash is not null)"
                         + " order by t.seq", target);
+    }
+
+    /** 批量更新实际命中了几行（SUCCESS_NO_INFO 也算命中） */
+    private static int countAffected(int[] affected)
+    {
+        int n = 0;
+        for (int v : affected)
+        {
+            if (v > 0 || v == java.sql.Statement.SUCCESS_NO_INFO)
+            {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    private static String quote(String value)
+    {
+        return "'" + value.replace("'", "''") + "'";
     }
 
     private static String csv(List<Long> ids)

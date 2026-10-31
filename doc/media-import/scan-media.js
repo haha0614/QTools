@@ -1156,11 +1156,12 @@ function planPhotos(albums, state, ctx) {
       }
       claimed.add(prior.id);
       p.id = prior.id;
-      if (prior.pinned) {
+      if (prior.pinned || prior.albumId === null || prior.albumId === undefined) {
         // 人工归属（P6.51）：管理端拆/移过的图，扫描不再按目录改它的 album_id/seq。
         // 文件本身改名/移动了还是要跟（否则这行会烂成 missing），但归属不动。
         if (prior.rel !== p.rel) {
           p.movedFrom = prior.rel;
+          p.movedFromAlbum = prior.albumId;
           moves.push({ albumId: a.id, seq, photo: p, pinned: true });
         }
         stats.pinned += 1;
@@ -1172,6 +1173,7 @@ function planPhotos(albums, state, ctx) {
         stats.update += 1;
       } else {
         p.movedFrom = prior.rel;
+        p.movedFromAlbum = prior.albumId;
         moves.push({ albumId: a.id, seq, photo: p });
         stats.move += 1;
       }
@@ -1231,6 +1233,33 @@ function planImport(scan, state, o) {
   const videoPlan = planVideos(scan.videos, state, ctx);
   const photoPlan = planPhotos(albums, state, ctx);
 
+  // P6.53：册的存在由「实际拥有几张图」决定，而不是「这个目录在不在」。
+  // 一个目录分组里的图可能全被人工归属挡住了（pinned / 已移出成无册），这种册一张图都不拥有：
+  // 新建的不要建（否则站端多一本没封面、点进去空的册），已有的删掉。
+  // 逐册数「本次计划结束后归它几行」：计划写入的行 + 搬进来的行 + 已停泊的缺失行。
+  // 停泊行必须算进去——否则「文件全丢了但行还在」的册会被删，缺失记录跟着一起没了。
+  const rowsByAlbum = new Map();
+  for (const r of photoPlan.rows) {
+    rowsByAlbum.set(r.albumId, (rowsByAlbum.get(r.albumId) || 0) + 1);
+  }
+  const movesIn = new Map();
+  for (const m of photoPlan.moves) {
+    movesIn.set(m.albumId, (movesIn.get(m.albumId) || 0) + 1);
+  }
+  const parkedByAlbum = new Map();
+  for (const [albumId, list] of state.photoByAlbum) {
+    const n = list.filter((r) => r.seq >= PARK_BASE).length;
+    if (n > 0) parkedByAlbum.set(albumId, n);
+  }
+  const keptAlbums = [];
+  const droppedAlbums = [];
+  for (const a of albums) {
+    const owned = (rowsByAlbum.get(a.id) || 0) + (movesIn.get(a.id) || 0)
+      + (parkedByAlbum.get(a.id) || 0);
+    if (owned > 0) keptAlbums.push(a);
+    else droppedAlbums.push({ id: a.id, title: a.title, dirKey: a.dirKey, reused: a.reused });
+  }
+
   // 本次「没被任何分组认领」的旧行：册内 0 图 + dir_key 落在本次产物里。
   // 这就是换 --album-mode / 改标题推导后留下的空壳——老版本既不复用也不删，
   // 于是同一套内容并存两条（一条有图、一条永远打不开），photo_count 还停在旧值。
@@ -1265,7 +1294,8 @@ function planImport(scan, state, o) {
   }
 
   return {
-    albums,
+    albums: keptAlbums,
+    droppedAlbums,
     staleAlbums,
     modeConflicts,
     videoRows: videoPlan.rows,
@@ -1495,7 +1525,10 @@ function buildSql(model, o) {
       (o.pinnedEnabled ? ' AND album_pinned = 0' : '') + ';');
   }
   // 孤儿图（相册已被删掉）：保证「每张图都能找到相册」恒成立
-  lines.push('DELETE p FROM media_photo p LEFT JOIN media_album a ON a.id = p.album_id WHERE a.id IS NULL;');
+  // 只在 album_id 非空时才可能是孤儿：album_id 为 NULL 是「未归类」（P6.52 允许的合法状态），
+  // 少了 p.album_id IS NOT NULL 这个条件，一次扫描就会把所有无册照片删光
+  lines.push('DELETE p FROM media_photo p LEFT JOIN media_album a ON a.id = p.album_id'
+    + ' WHERE p.album_id IS NOT NULL AND a.id IS NULL;');
 
   // 7-b) 本次没被认领的空壳旧行：不给 --purge-unclaimed 就只把计数归零（行留着，页头数字
   //      至少不再翻倍），给了就真删——连同人物关联行，避免留下指向已删相册的孤儿行
@@ -1509,6 +1542,20 @@ function buildSql(model, o) {
       lines.push('UPDATE media_album SET photo_count = 0, bytes = 0 WHERE id = ' + sqlStr(s.id) +
         ' AND (photo_count <> 0 OR bytes <> 0);');
     }
+  }
+
+  // 7-b-2) P6.53：一张图都不拥有的册直接删掉（新建的压根没插进去）。
+  //   站端相册列表不按张数过滤，留着就是一本没封面、点进去空的册。
+  //   有 media_album_dir 别名指向它的不删——那是「并入另一册」的目标册，删了别名就悬空。
+  for (const d of (model.droppedAlbums || [])) {
+    if (!d.reused) continue;
+    if (o.albumPersonEnabled) {
+      lines.push('DELETE FROM media_album_person WHERE album_id = ' + sqlStr(d.id) + ';');
+    }
+    lines.push('DELETE FROM media_album WHERE id = ' + sqlStr(d.id)
+      + (o.albumDirEnabled
+        ? ' AND NOT EXISTS (SELECT 1 FROM media_album_dir dd WHERE dd.album_id = media_album.id);'
+        : ';'));
   }
 
   // 7-c) 分册模式不同的旧行（P6.05）：只有 --purge-unclaimed 才真删；守卫在写库前已经拦过
@@ -2432,6 +2479,8 @@ function main() {
     o.rootId = resolveRootId(o, mysqlExe, password);
     o.aliasEnabled = aliasTablesReady(o, mysqlExe, password);
     o.albumPersonEnabled = existingTables(o, mysqlExe, password, ['media_album_person']).has('media_album_person');
+    // 目录并入表（P6.48）：没有它就没法判断「这本册是不是并入的目标册」，删除时就少一层保护
+    o.albumDirEnabled = existingTables(o, mysqlExe, password, ['media_album_dir']).has('media_album_dir');
     // 缺失标记两列没建时整段降级：生成的 SQL 与改动前逐字相同
     o.missingEnabled = o.truncate ? false : missingReady(o, mysqlExe, password);
     // 相册 mtime 列（历史行回填由 --backfill-album-mtime 负责，缺列时两处一起降级）
@@ -2444,6 +2493,7 @@ function main() {
     o.aliasEnabled = true;
     o.missingEnabled = true;
     o.albumPersonEnabled = true;
+    o.albumDirEnabled = true;
     o.albumMtimeEnabled = true;
     o.albumIdentityEnabled = true;
     o.pinnedEnabled = true;
@@ -2547,7 +2597,8 @@ function main() {
   log(queryCounts(o, mysqlExe, password));
   log(statsLine(model.stats, missOut));
   log('相册 复用=' + model.albums.filter((a) => a.reused).length +
-    ' 新建=' + model.albums.filter((a) => !a.reused).length);
+    ' 新建=' + model.albums.filter((a) => !a.reused).length +
+    ((model.droppedAlbums || []).length ? ' 丢弃空册=' + model.droppedAlbums.length : ''));
   printDups(model.dupList);
   printAliases(model.aliasList);
   if (o.pruneMissing) {

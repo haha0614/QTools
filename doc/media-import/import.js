@@ -385,7 +385,9 @@ function buildSql(data, o) {
   }
   stats.photos = photoRows.length;
   // 源里已删除的相册可能留下孤图，顺手清掉，保证关系校验恒成立
-  lines.push('DELETE p FROM media_photo p LEFT JOIN media_album a ON a.id = p.album_id WHERE a.id IS NULL;');
+  // album_id 为 NULL = 未归类（P6.52 允许的合法状态），不是孤儿；不排除掉会被当成孤儿删光
+  lines.push('DELETE p FROM media_photo p LEFT JOIN media_album a ON a.id = p.album_id'
+    + ' WHERE p.album_id IS NOT NULL AND a.id IS NULL;');
   // 照片计数以库为准（跳过别名路径 / 并入之后，index.json 的张数会不准）
   lines.push('UPDATE media_album a SET photo_count = (SELECT COUNT(*) FROM media_photo p WHERE p.album_id = a.id);');
   // P6.49：磁盘上已经不存在的册（照片行也没了）要清掉 —— 否则删过的册会永远挂在列表里
@@ -493,7 +495,8 @@ function verify(o, password, data, sqlStats) {
     '(SELECT COALESCE(SUM(bytes),0) FROM media_album),' +
     '(SELECT COALESCE(SUM(photo_count),0) FROM media_album),' +
     '(SELECT COUNT(*) FROM media_album WHERE person_id IS NULL),' +
-    '(SELECT COUNT(*) FROM media_photo p LEFT JOIN media_album a ON a.id=p.album_id WHERE a.id IS NULL)').map(Number);
+    '(SELECT COUNT(*) FROM media_photo p LEFT JOIN media_album a ON a.id=p.album_id'
+      + ' WHERE p.album_id IS NOT NULL AND a.id IS NULL)').map(Number);
   const [videos, albums, photos, people, tags, actors, vBytes, aBytes, aPhotoSum, albumNoPerson, orphanPhotos] = row;
 
   const expectedVideos = stat.videos !== undefined ? stat.videos : data.videos.length;
