@@ -313,6 +313,58 @@ public class MediaAlbumMergeController
     }
 
     /**
+     * 册内人工排序（P6.57）：{@code POST /media/admin/albums/photos/reorder {album, photoIds, startSeq}}
+     *
+     * <p>把 {@code photoIds} 按给定顺序依次写 {@code startSeq, startSeq+1, …}，只动这几行、且必须属于该册。
+     * {@code startSeq} 由前端传"当前页第一张的 seq"，所以翻页时也能只排当前页。
+     * ({@code album_id, seq}) 从 P6.47 起只是普通索引，重排不会撞唯一键。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @PostMapping("/photos/reorder")
+    public Map<String, Object> reorderPhotos(@RequestBody Map<String, Object> body)
+    {
+        String album = text(body.get("album"));
+        if (album == null)
+        {
+            throw new ServiceException("缺少 album");
+        }
+        List<Long> ids = photoIds(body);
+        if (ids.size() > 500)
+        {
+            throw new ServiceException("一次最多重排 500 张");
+        }
+        int startSeq = 0;
+        Object rawStart = body.get("startSeq");
+        if (rawStart != null)
+        {
+            try
+            {
+                startSeq = Integer.parseInt(String.valueOf(rawStart).trim());
+            }
+            catch (NumberFormatException e)
+            {
+                throw new ServiceException("startSeq 必须是数字：" + rawStart);
+            }
+        }
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        List<Object[]> batch = new ArrayList<>();
+        for (int i = 0; i < ids.size(); i++)
+        {
+            batch.add(new Object[] { Integer.valueOf(startSeq + i), ids.get(i).longValue(), album });
+        }
+        int[] affected = jdbc.batchUpdate(
+                "update media_photo set seq = ? where id = ? and album_id = ?", batch);
+        int updated = countAffected(affected);
+        mediaIndexService.invalidateSnapshot();
+        log.info("册内排序 album={} startSeq={} 计划={} 实际={}", album, startSeq, ids.size(), updated);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("updated", updated);
+        out.put("album", album);
+        out.put("startSeq", startSeq);
+        return out;
+    }
+
+    /**
      * 整册打散为「未归类」（P6.55）：入站队列里的第三个决定。
      *
      * <p>把这本册的照片全部 {@code album_id = NULL + album_pinned = 1}，册变成 0 行；
