@@ -21,12 +21,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.context.request.RequestAttributes;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
+import com.qtools.common.security.AppUserProfile;
 import com.qtools.common.security.IAppTokenVerifier;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.domain.MediaRoot;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaGuestMapper;
 import com.qtools.media.mapper.MediaRootMapper;
+import com.qtools.media.service.IAdminSessionProbe;
 import com.qtools.media.service.IMediaFileService;
 import com.qtools.media.service.IMediaGuestAccessService;
 import com.qtools.media.support.BearerTokens;
@@ -71,6 +73,15 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
     @Autowired
     private ObjectProvider<IAppTokenVerifier> appTokenVerifier;
 
+    /**
+     * 管理端登录态探针（qtools-admin 提供，P6.08）
+     *
+     * <p>管理端界面会复用站端接口（人物详情 / 相册列表 / 头像挑选），它带的是 {@code Admin-Token} cookie，
+     * 不是 app token。没有这个探针时，管理员在管理端看家长指导级人物的相册会得到「人物不存在」。</p>
+     */
+    @Autowired
+    private ObjectProvider<IAdminSessionProbe> adminSessionProbe;
+
     /** 根缓存；{@code null} = 还没建过，下次访问时建 */
     private volatile Snapshot snapshot;
 
@@ -83,6 +94,14 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
     public boolean isGuest(HttpServletRequest request)
     {
         if (request == null)
+        {
+            return false;
+        }
+        // P6.08：管理端带着 Admin-Token cookie 复用站端接口时不算访客（探针由 qtools-admin 提供）。
+        // 顺序放在 app token 之前：管理端 cookie 与站端 Bearer 互斥，先判哪个都一样，但先判 cookie 能让
+        // 「管理员误带了一个过期的 app token」也不会被降级成访客。
+        IAdminSessionProbe probe = adminSessionProbe == null ? null : adminSessionProbe.getIfAvailable();
+        if (probe != null && probe.isAdmin(request))
         {
             return false;
         }
@@ -105,6 +124,35 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
         {
             // 失效 / 篡改 / 过期：与 MediaOwnerServiceImpl 同口径 —— 按未登录处理
             log.debug("app token 校验异常，按未登录处理: {}", e.getMessage());
+            return true;
+        }
+    }
+
+    /** P6.29：站端访客判定 —— 只看 app token；管理端 cookie 不算登录 */
+    @Override
+    public boolean isStationGuest()
+    {
+        HttpServletRequest request = currentRequest();
+        if (request == null)
+        {
+            return false;
+        }
+        IAppTokenVerifier verifier = appTokenVerifier == null ? null : appTokenVerifier.getIfAvailable();
+        if (verifier == null)
+        {
+            return false;
+        }
+        String token = BearerTokens.of(request);
+        if (token == null)
+        {
+            return true;
+        }
+        try
+        {
+            return verifier.verifyUserId(token) == null;
+        }
+        catch (RuntimeException e)
+        {
             return true;
         }
     }
@@ -151,7 +199,253 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
     @Override
     public Set<String> hiddenRatings()
     {
-        return snapshot().hiddenRatings;
+        return viewerHiddenRatings();
+    }
+
+    /** 登录用户未设上限时的默认档（P6.26）：只能看大众 + 家长指导 */
+    private static final String DEFAULT_USER_MAX_RATING = "guidance";
+    private static final long PROFILE_TTL_MS = 5000L;
+
+    /** userId → 账号档案（role/maxRating），5 秒缓存：一次索引构建里会被问上百次 */
+    private final Map<Long, ProfileEntry> profileCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * P6.26：按<b>当前访问者</b>算隐藏分级。
+     * <ul>
+     *   <li>管理端 → 空（管理端看全部）；</li>
+     *   <li>未登录 → 策略表（guest_visible=0 的档）；</li>
+     *   <li>登录用户 → 比 max_rating 更严的档；owner → 空。</li>
+     * </ul>
+     */
+    @Override
+    public Set<String> viewerHiddenRatings()
+    {
+        HttpServletRequest request = currentRequest();
+        if (request == null)
+        {
+            return snapshot().hiddenRatings;
+        }
+        IAdminSessionProbe probe = adminSessionProbe == null ? null : adminSessionProbe.getIfAvailable();
+        if (probe != null && probe.isAdmin(request))
+        {
+            return Collections.emptySet();
+        }
+        IAppTokenVerifier verifier = appTokenVerifier == null ? null : appTokenVerifier.getIfAvailable();
+        if (verifier == null)
+        {
+            return snapshot().hiddenRatings;
+        }
+        Long userId = appUserId(request, verifier);
+        if (userId == null)
+        {
+            return snapshot().hiddenRatings;
+        }
+        AppUserProfile profile = profileOf(userId, verifier);
+        if (profile == null)
+        {
+            // 老库没跑迁移 / 查不到档案：按默认 guidance（宁严勿宽）
+            return ratingsAbove(DEFAULT_USER_MAX_RATING);
+        }
+        if (profile.isOwner())
+        {
+            return Collections.emptySet();
+        }
+        return ratingsAbove(profile.getMaxRating());
+    }
+
+    /** P6.26：索引快照的缓存键要用它——不同访问者看到的索引不同，不能共用一份 */
+    @Override
+    public String viewerKey()
+    {
+        HttpServletRequest request = currentRequest();
+        if (request == null)
+        {
+            return "none";
+        }
+        IAdminSessionProbe probe = adminSessionProbe == null ? null : adminSessionProbe.getIfAvailable();
+        if (probe != null && probe.isAdmin(request))
+        {
+            return "admin";
+        }
+        IAppTokenVerifier verifier = appTokenVerifier == null ? null : appTokenVerifier.getIfAvailable();
+        if (verifier == null)
+        {
+            return "anon";
+        }
+        Long userId = appUserId(request, verifier);
+        if (userId == null)
+        {
+            return "guest";
+        }
+        AppUserProfile profile = profileOf(userId, verifier);
+        if (profile == null)
+        {
+            return "u:" + DEFAULT_USER_MAX_RATING;
+        }
+        if (profile.isOwner())
+        {
+            return "owner";
+        }
+        String max = profile.getMaxRating();
+        return "u:" + (max == null || max.isBlank() ? DEFAULT_USER_MAX_RATING : max.trim().toLowerCase(Locale.ROOT));
+    }
+
+    /**
+     * P6.28：站端（公开内容）的身份判定 —— 只看 app token，不看 Admin-Token。
+     *
+     * <p>管理端和站端同源：管理员在那个浏览器里打开站端时，Admin-Token cookie 会被自动带上。
+     * 若按它放行，用户「站端退出登录」之后仍然能看到全部内容（实际发生过的 bug）。
+     * 管理端的预览接口仍用 {@link #viewerHiddenRatings()}，所以后台预览不受影响。</p>
+     */
+    @Override
+    public Set<String> stationHiddenRatings()
+    {
+        HttpServletRequest request = currentRequest();
+        if (request == null)
+        {
+            return snapshot().hiddenRatings;
+        }
+        IAppTokenVerifier verifier = appTokenVerifier == null ? null : appTokenVerifier.getIfAvailable();
+        if (verifier == null)
+        {
+            return snapshot().hiddenRatings;
+        }
+        Long userId = appUserId(request, verifier);
+        if (userId == null)
+        {
+            return snapshot().hiddenRatings;
+        }
+        AppUserProfile profile = profileOf(userId, verifier);
+        if (profile == null)
+        {
+            return ratingsAbove(DEFAULT_USER_MAX_RATING);
+        }
+        if (profile.isOwner())
+        {
+            return Collections.emptySet();
+        }
+        return ratingsAbove(profile.getMaxRating());
+    }
+
+    @Override
+    public String stationViewerKey()
+    {
+        HttpServletRequest request = currentRequest();
+        if (request == null)
+        {
+            return "none";
+        }
+        IAppTokenVerifier verifier = appTokenVerifier == null ? null : appTokenVerifier.getIfAvailable();
+        if (verifier == null)
+        {
+            return "anon";
+        }
+        Long userId = appUserId(request, verifier);
+        if (userId == null)
+        {
+            return "guest";
+        }
+        AppUserProfile profile = profileOf(userId, verifier);
+        if (profile == null)
+        {
+            return "u:" + DEFAULT_USER_MAX_RATING;
+        }
+        if (profile.isOwner())
+        {
+            return "owner";
+        }
+        String max = profile.getMaxRating();
+        return "u:" + (max == null || max.isBlank() ? DEFAULT_USER_MAX_RATING : max.trim().toLowerCase(Locale.ROOT));
+    }
+
+    private HttpServletRequest currentRequest()
+    {
+        RequestAttributes attrs = RequestContextHolder.getRequestAttributes();
+        return attrs instanceof ServletRequestAttributes servlet ? servlet.getRequest() : null;
+    }
+
+    private Long appUserId(HttpServletRequest request, IAppTokenVerifier verifier)
+    {
+        String token = BearerTokens.of(request);
+        if (token == null)
+        {
+            return null;
+        }
+        try
+        {
+            return verifier.verifyUserId(token);
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
+
+    private AppUserProfile profileOf(Long userId, IAppTokenVerifier verifier)
+    {
+        long now = System.currentTimeMillis();
+        ProfileEntry hit = profileCache.get(userId);
+        if (hit != null && hit.expiresAt > now)
+        {
+            return hit.profile;
+        }
+        AppUserProfile profile;
+        try
+        {
+            profile = verifier.profileOf(userId);
+        }
+        catch (RuntimeException e)
+        {
+            profile = null;
+        }
+        profileCache.put(userId, new ProfileEntry(profile, now + PROFILE_TTL_MS));
+        if (profileCache.size() > 512)
+        {
+            profileCache.clear();
+        }
+        return profile;
+    }
+
+    /** 比 max 更严的档（max=guidance → {restricted}；max=restricted → 空） */
+    private static Set<String> ratingsAbove(String max)
+    {
+        int limit = rankOf(max);
+        Set<String> out = new HashSet<>();
+        for (String rating : MediaRating.values())
+        {
+            if (rankOf(rating) > limit)
+            {
+                out.add(rating);
+            }
+        }
+        return out;
+    }
+
+    private static int rankOf(String rating)
+    {
+        String value = rating == null ? "" : rating.trim().toLowerCase(Locale.ROOT);
+        if ("restricted".equals(value))
+        {
+            return 2;
+        }
+        if ("guidance".equals(value))
+        {
+            return 1;
+        }
+        return 0;
+    }
+
+    private static final class ProfileEntry
+    {
+        final AppUserProfile profile;
+
+        final long expiresAt;
+
+        ProfileEntry(AppUserProfile profile, long expiresAt)
+        {
+            this.profile = profile;
+            this.expiresAt = expiresAt;
+        }
     }
 
     @Override
@@ -345,6 +639,11 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
         {
             return false;
         }
+        String reviewState = mediaGuestMapper.selectReviewStateOfVideo(videoId);
+        if (reviewState != null && !"approved".equalsIgnoreCase(reviewState.trim()))
+        {
+            return true;
+        }
         return isRootHidden(mediaGuestMapper.selectRootIdOfVideo(videoId))
                 || isRatingHidden(mediaGuestMapper.selectRatingOfVideo(videoId));
     }
@@ -361,10 +660,13 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
         {
             return false;
         }
-        if (isRatingHidden(mediaGuestMapper.selectRatingOfAlbum(albumId)))
+        // P6.35：未过审 / 驳回的册，站端整册不可见（后台预览不受影响：这里只对访客生效）
+        String reviewState = mediaGuestMapper.selectReviewStateOfAlbum(albumId);
+        if (reviewState != null && !"approved".equalsIgnoreCase(reviewState.trim()))
         {
             return true;
         }
+        // 根收紧仍然整册隐藏（这是另一维，不因为图级分级而放开）
         for (Integer rootId : mediaGuestMapper.selectRootIdsOfAlbum(albumId))
         {
             if (isRootHidden(rootId))
@@ -372,7 +674,15 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
                 return true;
             }
         }
-        return false;
+        Set<String> hidden = hiddenRatings();
+        if (hidden.isEmpty())
+        {
+            return false;
+        }
+        // P6.25：册级从「一票否决」降为「默认值」——整册能不能看，看它还有没有一张可见的图。
+        // 生效档 = 图片自身档 ?? 相册档（图级优先），所以限制级册里的「大众」图仍然可见。
+        Integer visible = mediaGuestMapper.countVisiblePhotosOfAlbum(albumId, new ArrayList<>(hidden));
+        return visible == null || visible.intValue() <= 0;
     }
 
     /**
@@ -394,7 +704,11 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
         }
         for (Map<String, Object> copy : copies)
         {
-            if (!isRootHidden(intOf(copy.get("rootId"))) && !isRatingHidden(stringOf(copy.get("rating"))))
+            // P6.25：生效档 = 图片自身档 ?? 相册档（图级优先）；只有这一档收紧才不可见。
+            String own = stringOf(copy.get("ownRating"));
+            String effective = own != null && !own.isEmpty() ? own : stringOf(copy.get("rating"));
+            // P6.58：被单独 pending/rejected 的副本不算「可见的那一份」
+            if (!photoReviewBlocked(copy) && !isRootHidden(intOf(copy.get("rootId"))) && !isRatingHidden(effective))
             {
                 return false;
             }
@@ -423,8 +737,12 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
             // 序号位传的是内容哈希（老 HTML 两种写法都有）：退回按哈希判定
             return photoHashBlocked(index);
         }
+        // P6.25：生效档 = 图片自身档 ?? 相册档（图级优先，允许比册更宽）
+        String own = mediaGuestMapper.selectRatingOfPhotoBySeq(albumId, seq);
+        String album = mediaGuestMapper.selectRatingOfAlbum(albumId);
+        String effective = own != null && !own.isEmpty() ? own : album;
         return isRootHidden(mediaGuestMapper.selectRootIdOfPhotoBySeq(albumId, seq))
-                || isRatingHidden(mediaGuestMapper.selectRatingOfAlbum(albumId));
+                || isRatingHidden(effective);
     }
 
     /**
@@ -464,7 +782,29 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
         {
             return true;
         }
-        return StringUtils.isNotEmpty(rel) && ratingBlockedByRelPath(rel);
+        if (StringUtils.isEmpty(rel))
+        {
+            return false;
+        }
+        // P6.58：照片级审核与「分级收紧」是两条独立规则——分级策略为空时下面那条会提前放行，
+        // 所以这一条必须单独判，不能挂在 ratingBlockedByRelPath 里面
+        if (photoReviewBlockedByRelPath(rel))
+        {
+            return true;
+        }
+        return ratingBlockedByRelPath(rel);
+    }
+
+    /** 这行照片是不是被单独 pending / rejected 了（NULL = 继承册，不挡） */
+    private boolean photoReviewBlockedByRelPath(String rel)
+    {
+        String key = rel.trim();
+        if (key.startsWith("/") || key.startsWith("\\"))
+        {
+            key = key.substring(1);
+        }
+        Map<String, Object> photo = mediaGuestMapper.selectPhotoRatingsByRelPath(key);
+        return photo != null && !photo.isEmpty() && photoReviewBlocked(photo);
     }
 
     /** 相对路径属于哪个视频 / 哪本册的图 → 那一档分级是否收紧（都没有命中 = 非媒体文件，放行） */
@@ -484,7 +824,27 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
         {
             return isRatingHidden(videoRating);
         }
-        return isRatingHidden(mediaGuestMapper.selectRatingOfAlbumByPhotoRelPath(key));
+        // P6.25：原文件的生效档同样是「图片自身档 ?? 相册档」
+        Map<String, Object> photo = mediaGuestMapper.selectPhotoRatingsByRelPath(key);
+        if (photo == null || photo.isEmpty())
+        {
+            return false;
+        }
+        // P6.58：照片级审核（NULL=继承册，册那关已经在上面判过；单独 pending/rejected 的这张不给取）
+        if (photoReviewBlocked(photo))
+        {
+            return true;
+        }
+        String own = stringOf(photo.get("ownRating"));
+        String effective = own != null && !own.isEmpty() ? own : stringOf(photo.get("albumRating"));
+        return isRatingHidden(effective);
+    }
+
+    /** 照片级审核是否把这一行挡掉：NULL=继承册（不挡），只有显式 pending/rejected 才挡 */
+    private static boolean photoReviewBlocked(Map<String, Object> row)
+    {
+        String state = row == null ? null : stringOf(row.get("ownReview"));
+        return state != null && !state.isEmpty() && !"approved".equalsIgnoreCase(state);
     }
 
     private boolean isRootHidden(Integer rootId)
@@ -701,3 +1061,7 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
         }
     }
 }
+
+
+
+

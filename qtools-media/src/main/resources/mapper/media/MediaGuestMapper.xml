@@ -37,7 +37,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <!-- P5.99：同一份内容可能存在于多本册 / 多个根，评级与根一起取回，由服务层统一判定 -->
     <select id="selectCopiesOfPhotoByHash" resultType="java.util.LinkedHashMap">
-        select p.root_id as rootId, a.content_rating as rating, p.content_rating as ownRating
+        select p.root_id as rootId, a.content_rating as rating, p.content_rating as ownRating,
+               p.review_state as ownReview
         from media_photo p
         left join media_album a on a.id = p.album_id
         where p.content_hash = #{hash}
@@ -89,7 +90,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <!-- P6.25：按相对路径取「图片自身档 + 相册档」，由服务层按「图级优先」合成生效档 -->
     <select id="selectPhotoRatingsByRelPath" resultType="java.util.LinkedHashMap">
-        select a.content_rating as albumRating, p.content_rating as ownRating
+        select a.content_rating as albumRating, p.content_rating as ownRating, p.review_state as ownReview
         from media_photo p
         inner join media_album a on a.id = p.album_id
         where p.rel_path = #{rel}
