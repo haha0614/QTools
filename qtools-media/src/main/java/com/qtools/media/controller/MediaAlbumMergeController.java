@@ -307,6 +307,37 @@ public class MediaAlbumMergeController
     }
 
     /**
+     * 整册打散为「未归类」（P6.55）：入站队列里的第三个决定。
+     *
+     * <p>把这本册的照片全部 {@code album_id = NULL + album_pinned = 1}，册变成 0 行；
+     * 按 §四.9 的口径，下一次扫描会把它清掉——等于「这本建议我不接受，图先留着」。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @PostMapping("/photos/detach-album")
+    public Map<String, Object> detachAlbum(@RequestBody Map<String, Object> body)
+    {
+        String album = text(body.get("album"));
+        if (album == null)
+        {
+            throw new ServiceException("缺少 album");
+        }
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        if (album(jdbc, album) == null)
+        {
+            throw new ServiceException("册不存在：" + album);
+        }
+        int detached = jdbc.update(
+                "update media_photo set album_id = null, album_pinned = 1 where album_id = ?", album);
+        recompute(jdbc, album);
+        mediaIndexService.invalidateSnapshot();
+        log.info("整册打散为未归类 album={} 张数={}", album, detached);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("detached", detached);
+        out.put("album", album);
+        return out;
+    }
+
+    /**
      * 采纳建议册（P6.54）：{@code POST /media/admin/albums/confirm {ids:["a170", ...]}}
      *
      * <p>扫描按目录建出来的册默认 @@confirmed = 0@@（建议册），站端看不到；
