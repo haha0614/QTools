@@ -78,6 +78,12 @@ public class MediaAlbumMergeController
             throw new ServiceException("册不存在");
         }
         Integer rootId = dominantRoot(jdbc, source);
+        // P6.56：并进一本已上站的册，搬过去的照片单独过一遍审核（同上，触发器只覆盖 INSERT）
+        if (isLiveAlbum(jdbc, target))
+        {
+            jdbc.update("update media_photo set review_state = 'pending' where album_id = ?"
+                    + " and (review_state is null or review_state = 'approved')", source);
+        }
         int offset = nextSeq(jdbc, target);
         int moved = jdbc.update("update media_photo set album_id = ?, seq = seq + ? where album_id = ?",
                 target, offset, source);
@@ -602,10 +608,20 @@ public class MediaAlbumMergeController
         {
             recompute(jdbc, s);
         }
+        // P6.56：目标册已经「采纳 + 通过」时，被移入的照片要单独过一遍审核——
+        // 审核触发器只覆盖 INSERT，UPDATE album_id 不触发，不补这一步就是「未审先上线」。
+        int pending = 0;
+        if (isLiveAlbum(jdbc, target))
+        {
+            pending = jdbc.update("update media_photo set review_state = 'pending'"
+                    + " where id in (" + csvOfRows(rows) + ")"
+                    + " and (review_state is null or review_state = 'approved')");
+        }
         recompute(jdbc, target);
         mediaIndexService.invalidateSnapshot();
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("moved", moved);
+        out.put("pendingReview", pending);
         out.put("target", target);
         out.put("from", new ArrayList<String>(sources));
         return out;
@@ -653,6 +669,30 @@ public class MediaAlbumMergeController
                         + " and t.content_hash in (select s.content_hash from media_photo s"
                         + " where s.id in (" + list + ") and s.content_hash is not null)"
                         + " order by t.seq", target);
+    }
+
+    /** 这本册是不是「已上站」：采纳 + 审核通过（只有这种册需要给移入的照片补一道审核） */
+    private static boolean isLiveAlbum(JdbcTemplate jdbc, String albumId)
+    {
+        Integer n = jdbc.queryForObject(
+                "select count(*) from media_album where id = ? and confirmed = 1 and review_state = 'approved'",
+                Integer.class, albumId);
+        return n != null && n.intValue() > 0;
+    }
+
+    /** rows 里所有 id 拼成 SQL 的 IN 列表 */
+    private static String csvOfRows(List<Map<String, Object>> rows)
+    {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < rows.size(); i++)
+        {
+            if (i > 0)
+            {
+                sb.append(',');
+            }
+            sb.append(String.valueOf(rows.get(i).get("id")));
+        }
+        return sb.toString();
     }
 
     /** 批量更新实际命中了几行（SUCCESS_NO_INFO 也算命中） */

@@ -25,6 +25,22 @@ public class MediaPhoto
      */
     private String contentHash;
 
+    /**
+     * 图片自身的内容分级（P6.09）；{@code null} = 继承所属相册。
+     *
+     * <p>有值时<b>只会更严</b>：相册收紧照样不可见，图自身收紧也不可见——
+     * 不允许用它把限制级相册里的某张图放出来。</p>
+     */
+    private String contentRating;
+
+    /**
+     * P6.56：照片自己的审核状态；{@code null} = 继承所属相册，有值时<b>只会更严</b>。
+     *
+     * <p>用途：把一张图移入/并入一本已上站（approved + confirmed）的册时，只把这几个置 pending，
+     * 而不是把整册打回重审。</p>
+     */
+    private String reviewState;
+
     /** 所属库根 media_root.id；null 表示默认根（多库根预留，当前只用一个根） */
     private Integer rootId;
 
@@ -93,6 +109,26 @@ public class MediaPhoto
     public void setContentHash(String contentHash)
     {
         this.contentHash = contentHash;
+    }
+
+    public String getReviewState()
+    {
+        return reviewState;
+    }
+
+    public void setReviewState(String reviewState)
+    {
+        this.reviewState = reviewState;
+    }
+
+    public String getContentRating()
+    {
+        return contentRating;
+    }
+
+    public void setContentRating(String contentRating)
+    {
+        this.contentRating = contentRating;
     }
 
     public Integer getRootId()

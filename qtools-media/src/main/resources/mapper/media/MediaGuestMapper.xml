@@ -37,10 +37,15 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <!-- P5.99：同一份内容可能存在于多本册 / 多个根，评级与根一起取回，由服务层统一判定 -->
     <select id="selectCopiesOfPhotoByHash" resultType="java.util.LinkedHashMap">
-        select p.root_id as rootId, a.content_rating as rating
+        select p.root_id as rootId, a.content_rating as rating, p.content_rating as ownRating
         from media_photo p
         left join media_album a on a.id = p.album_id
         where p.content_hash = #{hash}
+    </select>
+
+    <!-- P6.09：图片自身分级（NULL=继承相册）；只在「相册档可见」之后才需要看它 -->
+    <select id="selectRatingOfPhotoBySeq" resultType="String">
+        select content_rating from media_photo where album_id = #{albumId} and seq = #{seq} limit 1
     </select>
 
     <select id="selectRootIdOfPhotoBySeq" resultType="java.lang.Integer">
@@ -66,4 +71,39 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         limit 1
     </select>
 
+    <!-- P6.25：相册还有几张访客可见的图。生效档 = 图片自身档 ?? 相册档（图级优先）。 -->
+    <select id="countVisiblePhotosOfAlbum" resultType="java.lang.Integer">
+        select count(*)
+        from media_photo p
+        inner join media_album a on a.id = p.album_id
+        where p.album_id = #{albumId}
+          and coalesce(p.missing, 0) = 0
+          and coalesce(p.hidden, 0) = 0
+          <!-- P6.56：照片级审核（NULL=继承册，册那关前面已经判过；这里只挡单独 pending/rejected 的） -->
+          and (p.review_state is null or p.review_state = 'approved')
+        <if test="hiddenRatings != null and hiddenRatings.size() > 0">
+          and coalesce(p.content_rating, a.content_rating) not in
+          <foreach collection="hiddenRatings" item="r" open="(" separator="," close=")">#{r}</foreach>
+        </if>
+    </select>
+
+    <!-- P6.25：按相对路径取「图片自身档 + 相册档」，由服务层按「图级优先」合成生效档 -->
+    <select id="selectPhotoRatingsByRelPath" resultType="java.util.LinkedHashMap">
+        select a.content_rating as albumRating, p.content_rating as ownRating
+        from media_photo p
+        inner join media_album a on a.id = p.album_id
+        where p.rel_path = #{rel}
+        limit 1
+    </select>
+
+    <select id="selectReviewStateOfAlbum" resultType="java.lang.String">
+        select review_state from media_album where id = #{albumId}
+    </select>
+
+    <select id="selectReviewStateOfVideo" resultType="java.lang.String">
+        select review_state from media_video where id = #{videoId}
+    </select>
+
 </mapper>
+
+

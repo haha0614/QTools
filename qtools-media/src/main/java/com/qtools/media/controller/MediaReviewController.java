@@ -192,6 +192,109 @@ public class MediaReviewController
     }
 
     /**
+     * 照片级审核队列（P6.56）：{@code GET /review/photos?state=pending|rejected|approved|all}
+     *
+     * <p>只列「显式设了照片级状态」的行（{@code review_state is not null}）——NULL 是继承册，
+     * 归册的审核管，不在这里刷屏。无册照片（album_id 为 NULL）也会出现在这里，
+     * 它们是唯一能单独被审核的内容。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/photos")
+    public Map<String, Object> photos(@RequestParam(value = "state", required = false, defaultValue = "pending") String state,
+            @RequestParam(value = "keyword", required = false) String keyword,
+            @RequestParam(value = "page", required = false, defaultValue = "1") int page,
+            @RequestParam(value = "size", required = false, defaultValue = "40") int size)
+    {
+        String st = state == null ? "" : state.trim().toLowerCase(Locale.ROOT);
+        int safePage = Math.max(1, page);
+        int safeSize = Math.min(Math.max(1, size), 200);
+        String kw = keyword == null ? "" : keyword.trim();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        StringBuilder where = new StringBuilder(" where 1 = 1");
+        List<Object> args = new ArrayList<>();
+        if (st.isEmpty() || "all".equals(st))
+        {
+            where.append(" and p.review_state is not null");
+        }
+        else if ("inherit".equals(st))
+        {
+            where.append(" and p.review_state is null");
+        }
+        else
+        {
+            where.append(" and p.review_state = ?");
+            args.add(st);
+        }
+        if (!kw.isEmpty())
+        {
+            where.append(" and p.rel_path like ?");
+            args.add("%" + kw + "%");
+        }
+        String from = " from media_photo p left join media_album a on a.id = p.album_id";
+        Long total = jdbc.queryForObject("select count(*)" + from + where, Long.class, args.toArray());
+        args.add(safeSize);
+        args.add((safePage - 1) * safeSize);
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "select p.id, p.album_id as albumId, a.title as albumTitle, p.seq, p.rel_path as relPath,"
+                        + " p.review_state as reviewState, p.content_hash as contentHash, p.content_rating as contentRating,"
+                        + " p.root_id as rootId" + from + where
+                        + " order by p.id desc limit ? offset ?", args.toArray());
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("rows", rows);
+        out.put("total", total == null ? 0 : total.intValue());
+        out.put("page", safePage);
+        out.put("size", safeSize);
+        out.put("state", st);
+        return out;
+    }
+
+    /**
+     * 改照片级审核状态：{@code POST /review/photos/state {ids:[photoId...], state}}
+     *
+     * <p>{@code state="inherit"} 或空 → 置回 NULL（恢复继承所属相册）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @PostMapping("/photos/state")
+    public Map<String, Object> photoState(@RequestBody Map<String, Object> body)
+    {
+        List<Object> ids = ids(body.get("ids"));
+        if (ids.isEmpty())
+        {
+            throw new ServiceException("缺少 ids");
+        }
+        String raw = text(body.get("state"));
+        String st = raw == null ? "inherit" : raw.trim().toLowerCase(Locale.ROOT);
+        Object value;
+        if ("inherit".equals(st) || "null".equals(st))
+        {
+            value = null;
+        }
+        else if ("pending".equals(st) || "approved".equals(st) || "rejected".equals(st))
+        {
+            value = st;
+        }
+        else
+        {
+            throw new ServiceException("state 只能是 pending / approved / rejected / inherit");
+        }
+        StringBuilder in = new StringBuilder();
+        for (int i = 0; i < ids.size(); i++)
+        {
+            in.append(i == 0 ? "?" : ",?");
+        }
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        List<Object> args = new ArrayList<>();
+        args.add(value);
+        args.addAll(ids);
+        int updated = jdbc.update("update media_photo set review_state = ? where id in (" + in + ")", args.toArray());
+        mediaIndexService.invalidateSnapshot();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("updated", updated);
+        out.put("state", st);
+        return out;
+    }
+
+    /**
      * 分级复核列表：模型判不了（auto_rating='review'）的照片，按相册聚合展示。
      * 返回：{rows:[{id, albumId, albumTitle, seq, autoPorn, contentRating}], total}
      */

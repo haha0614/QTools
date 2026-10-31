@@ -14,6 +14,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="w"       column="w"        />
         <result property="h"       column="h"        />
         <result property="isBig"   column="is_big"   />
+        <!-- P6.09 图片自身分级（NULL=继承相册） -->
+        <result property="contentRating" column="content_rating" />
         <!-- 内容哈希：前端用它拼缩略图 URL（/media/thumb/p/<albumId>/<hash>），也用于收藏身份 -->
         <result property="contentHash" column="content_hash" />
         <!-- 所属库根（P5.78）：索引构建时按它筛掉「仅登录可见」的根；未 select 该列的查询留 null 即可 -->
@@ -24,11 +26,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         includeMissing：默认 true（老行为：缺失行照旧带出，由前端自行过滤）；
         显式传 false 时加 missing = 0，服务端就把「文件已消失」的行滤掉。
     -->
+    <!-- P6.56：站端只出「照片级审核没被单独挡掉」的行（NULL=继承册，册那关已在 album 侧判过） -->
     <select id="selectPhotoList" resultMap="MediaPhotoResult">
-        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big, p.content_hash, p.root_id
+        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big, p.content_hash, p.content_rating, p.review_state, p.root_id
         from media_photo p
         inner join media_album a on a.id = p.album_id and a.hidden = 0
         where p.hidden = 0
+          and (p.review_state is null or p.review_state = 'approved')
         <if test="includeMissing != null and includeMissing == false">
             and p.missing = 0
         </if>
@@ -36,10 +40,11 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </select>
 
     <select id="selectPhotoListByAlbumId" resultMap="MediaPhotoResult">
-        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big, p.content_hash
+        select p.id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big, p.content_hash, p.content_rating, p.review_state
         from media_photo p
         inner join media_album a on a.id = p.album_id and a.hidden = 0
         where p.hidden = 0 and p.album_id = #{albumId}
+          and (p.review_state is null or p.review_state = 'approved')
         <if test="includeMissing != null and includeMissing == false">
             and p.missing = 0
         </if>
@@ -73,6 +78,14 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     -->
     <select id="selectPhotoContentHashByAlbumSeq" resultType="String">
         select p.content_hash
+        from media_photo p
+        where p.album_id = #{albumId} and p.seq = #{seq}
+        limit 1
+    </select>
+
+    <!-- P6.08：裁头像 / 人物卡背景要「原图」，这里只取定位信息（相对路径 + 所属根） -->
+    <select id="selectPhotoPathByAlbumSeq" resultType="java.util.LinkedHashMap">
+        select p.rel_path as relPath, p.root_id as rootId, p.missing as missing
         from media_photo p
         where p.album_id = #{albumId} and p.seq = #{seq}
         limit 1
