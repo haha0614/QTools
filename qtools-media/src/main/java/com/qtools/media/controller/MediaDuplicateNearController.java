@@ -301,6 +301,55 @@ public class MediaDuplicateNearController
         return out;
     }
 
+    /**
+     * 清理指定的若干份：{@code POST /near/remove {ids:[...]}}
+     *
+     * <p>给"勾选清理"和"清理某一本册在本组里的全部"用：前端算好要删的 id 列表，
+     * 一次请求删完（仍然一次人工确认），不需要为每种玩法各开一个接口。</p>
+     */
+    @PreAuthorize("@ss.hasAnyPermi('media:admin:scan,media:admin:edit')")
+    @Log(title = "媒体库-清理相似图片", businessType = BusinessType.DELETE)
+    @PostMapping("/remove")
+    public Map<String, Object> remove(@RequestBody Map<String, Object> body)
+    {
+        List<String> ids = keysOf(body.get("ids"));
+        if (ids == null || ids.isEmpty())
+        {
+            throw new ServiceException("缺少 ids");
+        }
+        List<Map<String, Object>> removedRows = new ArrayList<>();
+        List<Map<String, Object>> failed = new ArrayList<>();
+        for (String raw : ids)
+        {
+            long id;
+            try
+            {
+                id = Long.parseLong(raw);
+            }
+            catch (NumberFormatException e)
+            {
+                continue;
+            }
+            try
+            {
+                removedRows.add(photoRemover.remove(id));
+            }
+            catch (RuntimeException e)
+            {
+                Map<String, Object> f = new LinkedHashMap<>();
+                f.put("id", Long.valueOf(id));
+                f.put("reason", e.getMessage());
+                failed.add(f);
+            }
+        }
+        cache.clear();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("removed", Integer.valueOf(removedRows.size()));
+        out.put("failed", failed);
+        log.info("相似图片：按 id 清理 {} 张，失败 {}", removedRows.size(), failed.size());
+        return out;
+    }
+
     // ------------------------------------------------------------------ 内部
 
     /** 按阈值分组（带缓存）：同一候选集只算一次，页面翻页不重复做 O(n²) */
