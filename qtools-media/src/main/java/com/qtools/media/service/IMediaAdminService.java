@@ -25,6 +25,12 @@ public interface IMediaAdminService
     TableDataInfo selectVideoPage(String keyword, String folder, String person, String vcodec, String hidden,
             String sort, Long tagId, Boolean noTag, String ids, String rating);
 
+    /** P6.86：改册名（title_pinned 置 1） */
+    java.util.Map<String, Object> renameAlbum(String id, String title);
+
+    /** P6.86：删册——册内照片移出到「未归类」，删行，返回 {detached, dirKey} */
+    java.util.Map<String, Object> deleteAlbum(String id);
+
     /** 标签覆盖：{@code {total, tagged, untagged}}——"还有多少条没打标签" */
     java.util.Map<String, Object> videoTagStats();
 

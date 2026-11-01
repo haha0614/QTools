@@ -35,6 +35,15 @@ public interface MediaAdminMapper
             @Param("sort") String sort, @Param("tagIds") List<Long> tagIds, @Param("noTag") Boolean noTag,
             @Param("ids") List<String> ids, @Param("rating") String rating);
 
+    /** P6.86：改册名（并置 title_pinned=1，让重扫不再覆盖） */
+    int updateAlbumTitle(@Param("id") String id, @Param("title") String title);
+
+    /** P6.86：把册内照片移出到「未归类」（album_id = NULL） */
+    int detachPhotosOfAlbum(@Param("albumId") String albumId);
+
+    /** P6.86：删掉册行 */
+    int deleteAlbumRow(@Param("id") String id);
+
     /** 标签覆盖统计 */
     List<java.util.Map<String, Object>> selectVideoTagStats();
 

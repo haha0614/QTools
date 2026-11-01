@@ -210,6 +210,54 @@ public class MediaAdminServiceImpl implements IMediaAdminService
     }
 
     @Override
+    public Map<String, Object> renameAlbum(String id, String title)
+    {
+        String name = title == null ? "" : title.trim();
+        if (name.isEmpty())
+        {
+            throw new com.qtools.common.exception.ServiceException("册名不能为空");
+        }
+        if (name.length() > 200)
+        {
+            throw new com.qtools.common.exception.ServiceException("册名最长 200 个字符");
+        }
+        MediaAlbum album = mediaAdminMapper.selectAlbumAnyById(id);
+        if (album == null)
+        {
+            throw new com.qtools.common.exception.ServiceException("相册不存在：" + id);
+        }
+        mediaAdminMapper.updateAlbumTitle(id, name);
+        mediaIndexService.invalidateSnapshot();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", id);
+        out.put("title", name);
+        out.put("titlePinned", Boolean.TRUE);
+        return out;
+    }
+
+    @Override
+    public Map<String, Object> deleteAlbum(String id)
+    {
+        MediaAlbum album = mediaAdminMapper.selectAlbumAnyById(id);
+        if (album == null)
+        {
+            throw new com.qtools.common.exception.ServiceException("相册不存在：" + id);
+        }
+        // 照片不跟着消失：移出到「未归类」（album_id 允许 NULL，是设计内状态）
+        int detached = mediaAdminMapper.detachPhotosOfAlbum(id);
+        mediaAdminMapper.deleteAlbumRow(id);
+        mediaIndexService.invalidateSnapshot();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", id);
+        out.put("title", album.getTitle());
+        out.put("detached", Integer.valueOf(detached));
+        // 目录型册（dir_key 非空）：下一次扫描还会按目录重新建出来，必须让调用方知道
+        out.put("dirKey", album.getDirKey());
+        out.put("recreatable", Boolean.valueOf(album.getDirKey() != null && !album.getDirKey().isEmpty()));
+        return out;
+    }
+
+    @Override
     public Map<String, Object> videoTagStats()
     {
         List<Map<String, Object>> rows = mediaAdminMapper.selectVideoTagStats();

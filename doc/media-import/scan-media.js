@@ -1482,7 +1482,10 @@ function buildSql(model, o) {
       part.join(',') +
       // person_id / note / hidden 不覆盖：管理端的人工归类不能被重扫冲掉
       // mtime 用 IFNULL：本次 stat 不到目录时保留库里的已有值，绝不用 NULL 抹掉
-      ' AS n ON DUPLICATE KEY UPDATE title=n.title,dir=n.dir,photo_count=n.photo_count,' +
+      // P6.86：标题也一样——title_pinned=1 时保留库里的名字，否则重扫会用目录名把人工改名冲掉
+      (o.albumTitlePinnedEnabled
+        ? ' AS n ON DUPLICATE KEY UPDATE title=IF(COALESCE(title_pinned,0)=1,title,n.title),dir=n.dir,photo_count=n.photo_count,'
+        : ' AS n ON DUPLICATE KEY UPDATE title=n.title,dir=n.dir,photo_count=n.photo_count,') +
       'bytes=n.bytes,cover_path=n.cover_path,sort=n.sort,dir_key=n.dir_key' +
       (o.albumIdentityEnabled ? ',identity_key=n.identity_key,source=n.source' : '') + mtimeTouch
       // confirmed 故意不在 ON DUPLICATE 里：采纳是人的决定，重扫不许把它退回建议态
@@ -1776,6 +1779,18 @@ function albumConfirmedReady(o, mysqlExe, password) {
   if (n === 1) return true;
   warn('media_album 还没有 confirmed 列（先执行 doc/media_album_confirmed.sql）：' +
     '本次建出的册一律按「已采纳」处理，没有建议册这道门');
+  return false;
+}
+
+/** P6.86：media_album.title_pinned 在不在——不在就退回"重扫覆盖标题"的老行为 */
+function albumTitlePinnedReady(o, mysqlExe, password) {
+  const rows = queryRows(o, mysqlExe, password,
+    "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() " +
+    "AND table_name = 'media_album' AND column_name = 'title_pinned';");
+  const n = rows.length && rows[0].length ? Number(rows[0][0]) : 0;
+  if (n === 1) return true;
+  warn('media_album 还没有 title_pinned 列（先执行 doc/media_album_title_pinned.sql）：' +
+    '本次仍会用目录名覆盖册标题，人工改的名活不过重扫');
   return false;
 }
 
@@ -2491,6 +2506,8 @@ function main() {
     // 人工归属列（doc/media_photo_pinned.sql）：同样必须在 loadState 之前探明
     o.pinnedEnabled = o.truncate ? false : photoPinnedReady(o, mysqlExe, password);
     o.albumConfirmedEnabled = o.truncate ? false : albumConfirmedReady(o, mysqlExe, password);
+    // P6.86：title_pinned 列存在时，重扫不能覆盖人工改过的册名
+    o.albumTitlePinnedEnabled = o.truncate ? false : albumTitlePinnedReady(o, mysqlExe, password);
     // --truncate 会清空这三张表：库内状态一律作废，按空库重新分配 aNNN（与旧行为一致）
     state = o.truncate ? emptyState() : loadState(o, mysqlExe, password);
     o.rootId = resolveRootId(o, mysqlExe, password);

@@ -183,6 +183,20 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         order by p.seq asc
     </select>
 
+    <!-- P6.86：改册名，并标记"人定的名字"（扫描端据此跳过 title 覆盖） -->
+    <update id="updateAlbumTitle">
+        update media_album set title = #{title}, title_pinned = 1 where id = #{id}
+    </update>
+
+    <!-- P6.86：删册前把照片移出到「未归类」——照片只属于一个系列，但"没有系列"是合法状态 -->
+    <update id="detachPhotosOfAlbum">
+        update media_photo set album_id = null where album_id = #{albumId}
+    </update>
+
+    <delete id="deleteAlbumRow">
+        delete from media_album where id = #{id}
+    </delete>
+
     <!-- P6.83：一页视频各自的标签（videoId + tagId/name/color） -->
     <select id="selectVideoTagsByVideoIds" resultType="java.util.LinkedHashMap">
         select vt.video_id as videoId, t.id as tagId, t.name as name, t.color as color

@@ -208,6 +208,27 @@ public class MediaAdminController extends BaseController
         return mediaAdminService.videoTagStats();
     }
 
+    /** P6.86：改册名（人工设定，重扫不再覆盖） */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-相册改名", businessType = BusinessType.UPDATE)
+    @PutMapping("/album/{id}")
+    public Map<String, Object> renameAlbum(@PathVariable("id") String id,
+            @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        Object title = body.get("title");
+        return mediaAdminService.renameAlbum(id, title == null ? null : String.valueOf(title));
+    }
+
+    /** P6.86：删册（册内照片移出到「未归类」，不删文件） */
+    @PreAuthorize("@ss.hasPermission('media:admin:remove')")
+    @Log(title = "媒体库-删除相册", businessType = BusinessType.DELETE)
+    @DeleteMapping("/album/{id}")
+    public Map<String, Object> deleteAlbum(@PathVariable("id") String id)
+    {
+        return mediaAdminService.deleteAlbum(id);
+    }
+
     /** 相册分页列表 */
     @PreAuthorize("@ss.hasPermi('media:admin:list')")
     @GetMapping("/albums")
