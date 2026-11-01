@@ -106,9 +106,19 @@ public class MediaAdminServiceImpl implements IMediaAdminService
 
     private static final int TRASH_PAGE_MAX = 200;
 
-    /** 首次软删无内嵌时间戳 → 视为最早（排序键为空串），与 restore 的取法保持一致 */
+    /**
+     * 回收站排序键 = **真正的删除时刻**（P6.79.2）
+     *
+     * <p>原来按文件名里的内嵌时间戳排：那个戳只在「同一个 id 第二次软删」时才出现，
+     * 首次软删的条目没有戳 → 排序键当空串 → 被当成"最早"，于是**刚删的东西全被压到列表最后**，
+     * 页面上看不到（实测 14:15 删的 11 条都在磁盘上，只是排到了末尾）。</p>
+     *
+     * <p>{@code deletedAt} 现在有可靠来源（旁注 {@code deleted=} / 旁注 mtime / 文件 mtime 兜底），
+     * 换用它排序，restore「取最近一次软删」的语义也随之更准。</p>
+     */
     private static final Comparator<TrashEntry> TRASH_ORDER =
-            Comparator.comparing(entry -> entry.stamp() == null ? "" : entry.stamp());
+            Comparator.comparing(TrashEntry::deletedAt,
+                    Comparator.nullsFirst(Comparator.naturalOrder()));
 
     /** 库根一致性抽样的条数（自检必须是常数级开销，不能全量扫库） */
     private static final int ROOT_SAMPLE = 200;
