@@ -569,6 +569,107 @@ public class MediaAlbumMergeController
         return out;
     }
 
+    /**
+     * 未归类照片按**目录**汇总：{@code GET /media/admin/albums/photos/uncategorized/dirs}
+     *
+     * <p>规则模式下扫描不再按目录建册，新目录进来的照片全都停在「未归类」。这里把它们的目录
+     * 聚出来（带张数、是否已有规则），人一次点击就能"立规则 + 建册并入"（见 {@code /claim}）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/photos/uncategorized/dirs")
+    public List<Map<String, Object>> uncategorizedDirs()
+    {
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "select case when locate('/', rel_path) > 0"
+                        + " then substring(rel_path, 1, length(rel_path) - locate('/', reverse(rel_path)))"
+                        + " else '' end as dir,"
+                        + " count(*) as photos, coalesce(sum(bytes), 0) as bytes,"
+                        + " min(root_id) as rootId"
+                        + " from media_photo where album_id is null group by dir order by photos desc limit 200");
+        for (Map<String, Object> r : rows)
+        {
+            Object dir = r.get("dir");
+            String d = dir == null ? "" : String.valueOf(dir);
+            Integer has = jdbc.queryForObject("select count(*) from media_album_rule where dir_pattern = ?",
+                    Integer.class, d);
+            r.put("ruleCount", has == null ? Integer.valueOf(0) : has);
+        }
+        return rows;
+    }
+
+    /**
+     * 一键：按目录**建册 + 建规则 + 把该目录未归类照片移进去**
+     * {@code POST /media/admin/albums/photos/uncategorized/claim {dir, title?}}
+     *
+     * <p>这是规则模式下唯一"新增归属"的人手入口：册与规则同时落地，之后同目录的新文件
+     * 在下次扫描时会被规则自动认领（扫描只认领，不建册）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @PostMapping("/photos/uncategorized/claim")
+    public Map<String, Object> claimDir(@RequestBody Map<String, Object> body)
+    {
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        Object rawDir = body == null ? null : body.get("dir");
+        String dir = rawDir == null ? "" : String.valueOf(rawDir).trim();
+        if (dir.endsWith("/"))
+        {
+            dir = dir.substring(0, dir.length() - 1);
+        }
+        String like = dir.isEmpty() ? "%" : dir.replace("\\", "/") + "/%";
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "select id, rel_path, bytes from media_photo where album_id is null and rel_path like ?"
+                        + " order by rel_path asc", like);
+        if (rows.isEmpty())
+        {
+            throw new ServiceException("这个目录下没有未归类照片了：[" + dir + "]");
+        }
+        Object rawTitle = body.get("title");
+        String title = rawTitle == null ? "" : String.valueOf(rawTitle).trim();
+        if (title.isEmpty())
+        {
+            int slash = dir.lastIndexOf('/');
+            title = slash >= 0 ? dir.substring(slash + 1) : (dir.isEmpty() ? "未命名册" : dir);
+        }
+        if (title.length() > 300)
+        {
+            throw new ServiceException("标题过长（上限 300 字）");
+        }
+        String id = allocAlbumId(jdbc);
+        jdbc.update("insert into media_album (id, person_id, title, dir, photo_count, bytes, cover_path,"
+                + " note, sort, hidden, dir_key, identity_key, source, confirmed, review_state)"
+                + " values (?, null, ?, ?, 0, 0, null, '', 0, 0, ?, '*', 'manual', 1, 'approved')",
+                id, title, dir, dir);
+        // 规则：同目录后续自动认领（不带前缀 = 同目录全部文件）
+        try
+        {
+            jdbc.update("insert ignore into media_album_rule (album_id, dir_pattern, file_prefix, priority, note)"
+                    + " values (?, ?, null, 100, '未归类一键建册')", id, dir);
+        }
+        catch (RuntimeException e)
+        {
+            // 规则表缺失不该让这次归册失败：先归上，规则留给运维补
+            log.warn("建规则失败（album={} dir={}）：{}", id, dir, e.getMessage());
+        }
+        // 按 rel_path 顺序落 seq（P6.47 起 (album_id,seq) 只是普通索引，不会撞唯一键）
+        for (int i = 0; i < rows.size(); i++)
+        {
+            jdbc.update("update media_photo set album_id = ?, seq = ? where id = ?",
+                    id, Integer.valueOf(i), rows.get(i).get("id"));
+        }
+        jdbc.update("update media_album a set photo_count = (select count(*) from media_photo p where p.album_id = a.id),"
+                + " bytes = (select coalesce(sum(p.bytes),0) from media_photo p where p.album_id = a.id)"
+                + " where a.id = ?", id);
+        mediaIndexService.invalidateSnapshot();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("albumId", id);
+        out.put("title", title);
+        out.put("dir", dir);
+        out.put("moved", Integer.valueOf(rows.size()));
+        log.info("未归类一键建册：dir={} album={} title={} 移入 {} 张", dir, id, title, rows.size());
+        return out;
+    }
+
     /** 某本册当前挂了哪些「并入目录」 */
     @PreAuthorize("@ss.hasPermi('media:admin:list')")
     @GetMapping("/{id}/dirs")
