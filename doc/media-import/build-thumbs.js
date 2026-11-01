@@ -729,9 +729,17 @@ function runFfmpeg(ffmpeg, args) {
   if (r.error) return { ok: false, reason: 'ffmpeg 启动失败：' + r.error.message };
   if (r.status !== 0) {
     const tail = ((r.stderr || '') + (r.stdout || '')).replace(/\s+/g, ' ').trim().slice(0, 200);
-    return { ok: false, reason: 'ffmpeg 退出码 ' + r.status + (tail ? '：' + tail : '') };
+    return { ok: false, reason: 'ffmpeg 退出码 ' + r.status + (tail ? '：' + tail : ''), stderr: r.stderr || '' };
   }
-  return { ok: true, reason: null };
+  // P6.87：退出码 0 也可能是"半个文件"——JPEG 缺尾部（下载没下完）时 mjpeg 只报 overread，
+  // 仍然吐出一张**绿色/错色**的图。把 stderr 带回去让调用方判断。
+  return { ok: true, reason: null, stderr: r.stderr || '' };
+}
+
+/** 源文件"看着能用其实不完整"的特征（mjpeg overread / truncated / 数据不完整） */
+function looksTruncated(stderr) {
+  const s = String(stderr || '');
+  return /overread|truncat|Invalid data|incomplete|could not find codec parameters|partial file/i.test(s);
 }
 
 function ffmpegArgsFor(item, src, o) {
@@ -759,6 +767,20 @@ function buildOne(ffmpeg, item, root, o) {
   }
   if (!r.ok) return { ok: false, reason: r.reason };
   if (!alreadyDone(item.out)) return { ok: false, reason: 'ffmpeg 返回 0 但没有产物' };
+  // P6.87：源文件不完整（JPEG 缺尾部 / 下载没下完）时 ffmpeg 仍返回 0，但产物是**绿色错色图**。
+  // 这种"看着有图其实是垃圾"的产物比没有更糟：用户会以为图库坏了。删掉它 + 记为 suspect，
+  // 前端拿不到缩略图就会显示占位，来源一目了然。
+  if (item.kind === 'photo' || item.kind === 'preview' || item.kind === 'cover') {
+    if (looksTruncated(r.stderr)) {
+      try {
+        fs.unlinkSync(item.out);
+      } catch (e) {
+        // 删不掉就留着（至少不阻断流程）
+      }
+      warn('源文件可能不完整（已删除错色缩略图）：' + src);
+      return { ok: false, reason: '来源不完整（' + (item.src || '') + '）', suspect: true };
+    }
+  }
   return { ok: true, reason: null };
 }
 
@@ -1260,7 +1282,7 @@ function main() {
         doneByMate.set(mate, Object.assign({ skip: false }, pair[mate.kind]));
       } else {
         const r = buildOne(ffmpeg, t, root, o);
-        result = { ok: r.ok, skip: false, reason: r.reason };
+        result = { ok: r.ok, skip: false, reason: r.reason, suspect: !!r.suspect };
       }
     }
     const rootStat = rootStatOf(t);
@@ -1268,6 +1290,10 @@ function main() {
       counts.fail += 1;
       perTask[t.task].fail += 1;
       rootStat.fail += 1;
+      // P6.87：来源不完整单独计数，DONE 行里给出，便于批量重下这些文件
+      if (result.suspect) {
+        counts.suspect = (counts.suspect || 0) + 1;
+      }
       if (rootStat.reasons.length < ROOT_FAIL_REASONS) rootStat.reasons.push(result.reason);
       log('FAIL ' + t.src + ': ' + result.reason);
     } else if (result.skip) {
@@ -1317,8 +1343,9 @@ function main() {
     gcTail = ' GC removed=' + gc.removed + ' kept=' + gc.kept;
   }
 
-  log('DONE ok=' + counts.ok + ' skip=' + counts.skip + ' fail=' + counts.fail +
-    ' seconds=' + Math.round((Date.now() - startedAt) / 1000) + gcTail + ' ids=' + doneIdsText(processedIds));
+  log('DONE ok=' + counts.ok + ' skip=' + counts.skip + ' fail=' + counts.fail
+    + (counts.suspect ? ' suspect=' + counts.suspect : '')
+    + ' seconds=' + Math.round((Date.now() - startedAt) / 1000) + gcTail + ' ids=' + doneIdsText(processedIds));
   return 0; // 单条失败不改变退出码（与原作者 build_thumbs.js 一致）
 }
 
