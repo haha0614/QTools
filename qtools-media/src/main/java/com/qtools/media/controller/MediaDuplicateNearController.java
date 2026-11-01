@@ -436,6 +436,78 @@ public class MediaDuplicateNearController
     }
 
     /**
+     * 某一对册的**重叠明细**：{@code GET /near/albums/photos?albumId&otherAlbumId&threshold&limit=200}
+     *
+     * <p>给"删之前先看一眼"用：每一组取 A 的一张与 B 的一张配成一对，返回可直接出缩略图的地址。
+     * 数量可能很大（019↔130 曾达 587 对），所以有 limit 上限、只用于预览与单张操作。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/albums/photos")
+    public Map<String, Object> albumOverlapPhotos(
+            @RequestParam("albumId") String albumId,
+            @RequestParam("otherAlbumId") String otherAlbumId,
+            @RequestParam(value = "threshold", required = false, defaultValue = "0") int threshold,
+            @RequestParam(value = "limit", required = false, defaultValue = "200") int limit)
+    {
+        int th = Math.max(0, Math.min(MAX_THRESHOLD, threshold));
+        int max = Math.max(1, Math.min(500, limit));
+        List<Map<String, Object>> pairs = new ArrayList<>();
+        int total = 0;
+        for (List<Map<String, Object>> group : grouped(th))
+        {
+            Map<String, Object> a = null;
+            Map<String, Object> b = null;
+            for (Map<String, Object> m : group)
+            {
+                String al = String.valueOf(m.get("albumId"));
+                if (a == null && albumId.equals(al))
+                {
+                    a = m;
+                }
+                else if (b == null && otherAlbumId.equals(al))
+                {
+                    b = m;
+                }
+            }
+            if (a == null || b == null)
+            {
+                continue;
+            }
+            total++;
+            if (pairs.size() >= max)
+            {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("a", mvt(a));
+            row.put("b", mvt(b));
+            row.put("groupSize", Integer.valueOf(group.size()));
+            pairs.add(row);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("albumId", albumId);
+        out.put("otherAlbumId", otherAlbumId);
+        out.put("threshold", Integer.valueOf(th));
+        out.put("total", Integer.valueOf(total));
+        out.put("rows", pairs);
+        return out;
+    }
+
+    /** 成员的精简视图（带缩略图与预览地址，前端直接用） */
+    private static Map<String, Object> mvt(Map<String, Object> m)
+    {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", m.get("id"));
+        out.put("albumId", m.get("albumId"));
+        out.put("albumTitle", m.get("albumTitle"));
+        out.put("seq", m.get("seq"));
+        out.put("relPath", m.get("relPath"));
+        out.put("bytes", m.get("bytes"));
+        out.put("thumb", m.get("thumb"));
+        return out;
+    }
+
+    /**
      * 清理「这本册里与另一本册重复的图」：{@code POST /near/albums/clean {albumId, otherAlbumId, threshold}}
      *
      * <p>只删 albumId 这一侧的成员，另一册原样保留——这正是「同一套图进了两本册」时该做的动作：
