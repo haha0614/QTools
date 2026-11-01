@@ -138,11 +138,11 @@ public class MediaScanServiceImpl implements IMediaScanService
     private static final String DATE_PATTERN = "yyyy-MM-dd HH:mm:ss";
 
     /** 允许的 mode 原子值 */
-    private static final List<String> MODES = List.of("scan", "thumb", "sprite", "preview", "gc",
+    private static final List<String> MODES = List.of("scan", "thumb", "sprite", "preview", "photo-preview", "gc",
             "enrich", "backfill-hash", "fix-poster", "export");
 
     /** 只能单独使用的 mode（sprite / preview 允许组合成 sprite,preview） */
-    private static final List<String> SINGLE_MODES = List.of("scan", "thumb", "gc",
+    private static final List<String> SINGLE_MODES = List.of("scan", "thumb", "photo-preview", "gc",
             "enrich", "backfill-hash", "fix-poster", "export");
 
     /** limit 上限：176 个视频的真实规模下，超过这个数只可能是手滑 */
@@ -161,6 +161,30 @@ public class MediaScanServiceImpl implements IMediaScanService
     private static final String TYPE_SCAN = "full";
 
     private static final String TYPE_THUMB = "thumb";
+
+    /**
+     * 后端启动时收尾「上次遗留的 running」（P6.65）
+     *
+     * <p>互斥判据是库里 status='running' 的行数；进程被强杀/重启后这些行不会自己结束，
+     * 维护面板于是永久禁用。启动这一刻 JVM 里没有任何子进程，所以这类行必然是遗留。</p>
+     */
+    @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
+    public void reconcileStaleJobs()
+    {
+        try
+        {
+            int n = mediaScanJobMapper.failRunning("failed",
+                    "\n== 后端重启：上次任务被中断，已自动收尾 ==\n", new java.util.Date());
+            if (n > 0)
+            {
+                log.warn("P6.65 收尾遗留扫描任务 {} 条（上次进程已不在）", n);
+            }
+        }
+        catch (RuntimeException e)
+        {
+            log.warn("P6.65 收尾遗留扫描任务失败（不影响启动）：{}", e.getMessage());
+        }
+    }
 
     private static final String TYPE_GC = "gc";
 
@@ -1100,6 +1124,11 @@ public class MediaScanServiceImpl implements IMediaScanService
         // 之前只传配置里的单一 --root（默认根），别的库根的条目全部「源文件不存在」——
         // 实测 239 条里 63 条失败，正好等于新库根的行数。--root 仍传，作为 root_id 为空的兜底。
         command.add("--root-from-db");
+        // P6.65：照片预览档（pv/<hash>.jpg，约 2000px）——脚本侧是 --only=previews
+        if (jobType.contains("photo-preview"))
+        {
+            command.add("--only=previews");
+        }
         // jobType 是 normalizeMode 归一化后的逗号拼接值：sprite,preview 两个开关都会带上
         if (jobType.contains("sprite"))
         {
@@ -1276,7 +1305,7 @@ public class MediaScanServiceImpl implements IMediaScanService
         {
             return TYPE_SCAN;
         }
-        if (tokens.contains("thumb"))
+        if (tokens.contains("thumb") || tokens.contains("photo-preview"))
         {
             return TYPE_THUMB;
         }

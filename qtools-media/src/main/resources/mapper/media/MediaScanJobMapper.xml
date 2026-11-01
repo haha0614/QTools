@@ -22,6 +22,15 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         values (#{type}, #{status}, 0, 0, now())
     </insert>
 
+    <!-- P6.65：后端启动时收尾遗留任务（否则 running 永远挡着互斥） -->
+    <update id="failRunning">
+        update media_scan_job
+           set status = #{status},
+               finished_at = #{finishedAt},
+               log = concat(coalesce(log, ''), #{log})
+         where status = 'running'
+    </update>
+
     <select id="countRunning" resultType="int">
         select count(*) from media_scan_job where status = 'running'
     </select>

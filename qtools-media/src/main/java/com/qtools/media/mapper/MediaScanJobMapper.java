@@ -30,6 +30,14 @@ public interface MediaScanJobMapper
     /** 运行中刷新进度 */
     int updateProgress(@Param("id") Long id, @Param("total") Integer total, @Param("done") Integer done);
 
+    /**
+     * 把「遗留的 running」一次性收尾（P6.65）
+     *
+     * <p>后端重启后，上次跑到一半的任务在库里仍是 running，而互斥判据就是这个状态——
+     * 于是维护面板所有按钮永久灰掉，谁也点不动。启动时把这类行置 failed 即可解锁。</p>
+     */
+    int failRunning(@Param("status") String status, @Param("log") String log, @Param("finishedAt") Date finishedAt);
+
     /** 结束任务：置 done/failed + finished_at + log 尾部 */
     int finishJob(@Param("id") Long id, @Param("status") String status, @Param("total") Integer total,
             @Param("done") Integer done, @Param("log") String log, @Param("finishedAt") Date finishedAt);
