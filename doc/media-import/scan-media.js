@@ -125,6 +125,8 @@ const DEFAULTS = {
   batch: 400,
   hashBytes: 65536,
   albumMode: 'dir',
+  // P6.88：归属来源。dir=沿用"目录即册"（默认，行为不变）；rule=按 media_album_rule 决定归属
+  assignBy: 'dir',
   exclude: ['_媒体站', 'trash', '.git', 'node_modules', 'thumbs', 'pv'],
   // null = 「没给 --cover-suffixes」：由 MS_COVER_SUFFIXES 或 COVER_SUFFIX_DEFAULT 决定
   coverSuffixes: null,
@@ -283,6 +285,7 @@ function parseArgs(argv) {
     else if (a.startsWith('--limit=')) o.limit = Number(a.slice('--limit='.length));
     else if (a.startsWith('--root-id=')) o.rootId = Number(a.slice('--root-id='.length));
     else if (a.startsWith('--album-mode=')) o.albumMode = a.slice('--album-mode='.length);
+  else if (a.startsWith('--assign-by=')) o.assignBy = a.slice('--assign-by='.length);
     else if (a.startsWith('--exclude=')) {
       o.exclude = a.slice('--exclude='.length).split(',').map((s) => s.trim()).filter(Boolean);
     } else {
@@ -297,6 +300,10 @@ function parseArgs(argv) {
   if (o.albumMode !== 'dir' && o.albumMode !== 'prefix') {
     throw new Error('--album-mode 只接受 dir 或 prefix（收到：' + o.albumMode + '）');
   }
+  if (o.assignBy !== 'dir' && o.assignBy !== 'rule') {
+    throw new Error('--assign-by 只接受 dir 或 rule（收到：' + o.assignBy + '）');
+  }
+  o.assignByRule = o.assignBy === 'rule';
   if (o.limit !== null && (!Number.isFinite(o.limit) || o.limit <= 0)) throw new Error('--limit 必须是正整数');
   if (o.rootId !== null && (!Number.isInteger(o.rootId) || o.rootId <= 0)) {
     throw new Error('--root-id 必须是正整数（media_root.id）；不确定就省略它，脚本会取 kind=root 的第一行');
@@ -708,6 +715,8 @@ function scanDisk(root, o) {
   const rootTitle = path.basename(root) || '未分组';
   const videos = [];
   const groups = new Map();
+  // P6.88：--assign-by=rule 时，规则命中不了的图片放这里（最终 album_id=NULL）
+  const unassigned = [];
   const warnings = [];
   const coverPhotos = [];      // 本次判定的自带封面图片（不入相册；旧行由 buildSql 删掉）
   let skipped = 0;
@@ -776,11 +785,40 @@ function scanDisk(root, o) {
       dirKey = dirKey.slice(0, MAX_DIR_KEY);
     }
     const m = o.albumMode === 'prefix' ? PREFIX_RE.exec(base) : null;
-    const gkey = dirKey + '\u0000' + (m ? '#' + m[1] : '*');
-    let g = groups.get(gkey);
-    if (!g) {
-      g = { key: gkey, dirKey, prefix: m ? m[1] : null, titleGuess: null, dirMtimeMs: null, photos: [] };
-      groups.set(gkey, g);
+    let gkey;
+    let g;
+    if (o.assignByRule) {
+      // P6.88：归属由规则决定。命中 → 该册一个分组；命中不了 → 未归类（album_id=NULL），
+      // 扫描器**不再创建相册**，也不再拿目录当"决定"。
+      const rule = matchAlbumRule(o.albumRules, dirKey, base);
+      if (!rule) {
+        unassigned.push({
+          hash,
+          rel: f.rel,
+          name: f.name,
+          base,
+          bytes: st.size,
+          isBig: st.size >= o.bigBytes ? 1 : 0,
+          dirKey,
+        });
+        continue;
+      }
+      gkey = 'album:' + rule.albumId;
+      g = groups.get(gkey);
+      if (!g) {
+        g = {
+          key: gkey, dirKey, prefix: rule.filePrefix || null, albumId: rule.albumId,
+          titleGuess: null, dirMtimeMs: null, photos: [], fromRule: true,
+        };
+        groups.set(gkey, g);
+      }
+    } else {
+      gkey = dirKey + '\u0000' + (m ? '#' + m[1] : '*');
+      g = groups.get(gkey);
+      if (!g) {
+        g = { key: gkey, dirKey, prefix: m ? m[1] : null, titleGuess: null, dirMtimeMs: null, photos: [] };
+        groups.set(gkey, g);
+      }
     }
     g.photos.push({
       id: null,
@@ -795,6 +833,16 @@ function scanDisk(root, o) {
   }
 
   const list = [...groups.values()];
+  if (o.assignByRule) {
+    for (const g of list) {
+      g.dirMtimeMs = sink.dirMtime.has(g.dirKey) ? sink.dirMtime.get(g.dirKey) : null;
+      g.photos.sort((a, b) => naturalCompare(a.name, b.name));
+    }
+    if (unassigned.length) {
+      warnings.push('按规则无法确定归属的照片 ' + unassigned.length + ' 张：album_id 置空（未归类），请在管理端建规则或手工归册');
+    }
+    return { videos, groups: list, unassigned, warnings, skipped, rootTitle, present, coverPhotos };
+  }
   for (const g of list) {
     // 同一目录的多本册（--album-mode=prefix）共用同一个目录 mtime，与磁盘事实一致
     g.dirMtimeMs = sink.dirMtime.has(g.dirKey) ? sink.dirMtime.get(g.dirKey) : null;
@@ -974,6 +1022,41 @@ function aliasTablesReady(o, mysqlExe, password) {
  * 标题会随「目录里只分出一册时改用目录名」这条规则变化，拿它当身份键就会在换模式/改推导时
  * 造出第二套相册行（就是 a308 幽灵相册的成因）。</p>
  */
+/**
+ * 规则匹配（P6.88）
+ *
+ * <p>命中条件：目录完全相等；规则若带 file_prefix，再要求文件名以该前缀开头。
+ * 多条命中时取 priority 最小、file_prefix 非空优先（更具体的规则赢）。</p>
+ */
+function matchAlbumRule(rules, dirKey, base) {
+  if (!rules || !rules.length) return null;
+  let best = null;
+  for (const r of rules) {
+    if (r.dirPattern !== dirKey) continue;
+    if (r.filePrefix && String(base).indexOf(r.filePrefix) !== 0) continue;
+    if (!best) {
+      best = r;
+      continue;
+    }
+    const a = r.filePrefix ? 0 : 1;
+    const b = best.filePrefix ? 0 : 1;
+    if (a < b || (a === b && r.priority < best.priority)) best = r;
+  }
+  return best;
+}
+
+/** 读归属规则（只在 --assign-by=rule 时调用） */
+function loadAlbumRules(mysqlExe, password, o) {
+  const rows = queryRows(o, mysqlExe, password,
+    "SELECT album_id, dir_pattern, IFNULL(file_prefix, ''), priority FROM media_album_rule ORDER BY priority ASC;");
+  return rows.map((r) => ({
+    albumId: r[0],
+    dirPattern: r[1],
+    filePrefix: r[2] || null,
+    priority: Number(r[3]) || 100,
+  }));
+}
+
 function albumIdentityOf(g) {
   return g.prefix ? '#' + g.prefix : '*';
 }
@@ -1182,6 +1265,26 @@ function planPhotos(albums, state, ctx) {
   return { rows, moves, parks, pinnedFrom: Array.from(pinnedFrom) };
 }
 
+/**
+ * 规则没命中的照片：album_id = NULL（未归类），不建册、不建册内 seq（P6.88）
+ *
+ * <p>为什么这样最安全：照片 upsert 的 ON DUPLICATE KEY UPDATE 只写
+ * rel_path / bytes / is_big / content_hash / root_id，**不碰 album_id**
+ * （scan-media.js 的图片 upsert 一列里没有它）。所以：
+ * 已存在的行——无论是人工归册的、还是之前目录建册的——都原样保留归属；
+ * 只有全新的行才以 NULL 落库。扫描从此不"抢"归属。</p>
+ */
+function planUnassigned(photos, albums, state, photoPlan) {
+  const claimedAlbums = new Set(albums.map((a) => a.id));
+  for (const p of photos) {
+    // 已经属于一本被认领的册的行，交给 planPhotos 处理，别重复写
+    const rows = state.photoByHash.get(p.hash) || [];
+    const inClaimed = rows.some((r) => r.albumId != null && claimedAlbums.has(r.albumId));
+    if (inClaimed) continue;
+    photoPlan.rows.push({ albumId: null, seq: 0, photo: p, unassigned: true });
+  }
+}
+
 function planImport(scan, state, o) {
   const stats = { insert: 0, move: 0, update: 0, dup: 0, skip: scan.skipped, alias: 0, pinned: 0 };
   const dupList = [];
@@ -1192,6 +1295,22 @@ function planImport(scan, state, o) {
   const albums = [];
 
   for (const g of scan.groups) {
+    // P6.88：规则模式下册是**已存在的**，扫描只认领不创建
+    if (o.assignByRule) {
+      const known = state.albumById.get(g.albumId);
+      if (!known) continue;
+      claimed.add(known.id);
+      albums.push({
+        id: known.id, reused: true, copyOf: null, title: known.title,
+        dirKey: g.dirKey, prefix: g.prefix, sort: known.sort, photos: g.photos,
+        photoCount: g.photos.length,
+        bytes: g.photos.reduce((s, p) => s + p.bytes, 0),
+        identityKey: known.identityKey || '*', source: known.source || 'rule',
+        cover: 'thumbs/p/' + known.id + '/0000.jpg',
+        dirMtimeMs: g.dirMtimeMs,
+      });
+      continue;
+    }
     const hit = findAlbum(state, g, o, claimed);
     let id;
     let title;
@@ -1232,6 +1351,9 @@ function planImport(scan, state, o) {
 
   const videoPlan = planVideos(scan.videos, state, ctx);
   const photoPlan = planPhotos(albums, state, ctx);
+  if (o.assignByRule && scan.unassigned && scan.unassigned.length) {
+    planUnassigned(scan.unassigned, albums, state, photoPlan);
+  }
 
   // P6.53：册的存在由「实际拥有几张图」决定，而不是「这个目录在不在」。
   // 一个目录分组里的图可能全被人工归属挡住了（pinned / 已移出成无册），这种册一张图都不拥有：
@@ -1253,11 +1375,17 @@ function planImport(scan, state, o) {
   }
   const keptAlbums = [];
   const droppedAlbums = [];
-  for (const a of albums) {
-    const owned = (rowsByAlbum.get(a.id) || 0) + (movesIn.get(a.id) || 0)
-      + (parkedByAlbum.get(a.id) || 0);
-    if (owned > 0) keptAlbums.push(a);
-    else droppedAlbums.push({ id: a.id, title: a.title, dirKey: a.dirKey, reused: a.reused });
+  // P6.88：规则模式下册的存在与否由人决定，扫描不删空册
+  if (o.assignByRule) {
+    for (const a of albums) keptAlbums.push(a);
+  }
+  if (!o.assignByRule) {
+    for (const a of albums) {
+      const owned = (rowsByAlbum.get(a.id) || 0) + (movesIn.get(a.id) || 0)
+        + (parkedByAlbum.get(a.id) || 0);
+      if (owned > 0) keptAlbums.push(a);
+      else droppedAlbums.push({ id: a.id, title: a.title, dirKey: a.dirKey, reused: a.reused });
+    }
   }
 
   // 本次「没被任何分组认领」的旧行：册内 0 图 + dir_key 落在本次产物里。
@@ -1265,7 +1393,7 @@ function planImport(scan, state, o) {
   // 于是同一套内容并存两条（一条有图、一条永远打不开），photo_count 还停在旧值。
   const producedDirs = new Set(albums.map((a) => a.dirKey));
   const staleAlbums = [];
-  for (const a of state.albumById.values()) {
+  for (const a of (o.assignByRule ? [] : state.albumById.values())) {
     if (claimed.has(a.id) || a.dirKeyNull || !producedDirs.has(a.dirKey)) continue;
     const live = (state.photoByAlbum.get(a.id) || []).filter((r) => r.seq < PARK_BASE).length;
     if (live > 0) continue;
@@ -1276,7 +1404,7 @@ function planImport(scan, state, o) {
   // 图会被整本搬到新相册、旧行全变成空壳（2026-10-29 的 a308 幽灵相册就是这么来的）。
   // 默认报错不写库；给了 --purge-unclaimed 才删了重来。
   const modeConflicts = [];
-  for (const a of state.albumById.values()) {
+  for (const a of (o.assignByRule ? [] : state.albumById.values())) {
     if (a.dirKeyNull || claimed.has(a.id) || !producedDirs.has(a.dirKey)) continue;
     if (a.source && a.source !== o.albumMode) {
       modeConflicts.push({ id: a.id, dirKey: a.dirKey, title: a.title, source: a.source });
@@ -1467,7 +1595,8 @@ function buildSql(model, o) {
   //    P5.59：mtime = 所在目录的磁盘 mtime。老库没有该列时整段降级（SQL 逐字同改动前）。
   const mtimeCol = o.albumMtimeEnabled ? ',mtime' : '';
   const mtimeTouch = o.albumMtimeEnabled ? ',mtime=IFNULL(n.mtime,media_album.mtime)' : '';
-  const albumRows = model.albums.map((a) => '(' + [
+  // P6.88：--assign-by=rule 下册全部来自规则/人工，扫描不创建相册，一条 INSERT 都不发
+  const albumRows = o.assignByRule ? [] : model.albums.map((a) => '(' + [
     sqlStr(a.id), 'NULL', sqlStr(a.title), sqlStr(a.dirKey), sqlInt(a.photoCount),
     sqlInt(a.bytes), sqlStr(a.cover), "''", sqlInt(a.sort), '0', sqlStr(a.dirKey),
     ...(o.albumIdentityEnabled ? [sqlStr(a.identityKey), sqlStr(a.source)] : []),
@@ -1526,7 +1655,9 @@ function buildSql(model, o) {
   // 7) 目录里删过图：把每本相册 seq >= 当前张数 的历史残留清掉，否则相册会越重扫越多。
   //    seq >= PARK_BASE 的是已停泊的缺失行（要留着给管理端清理），绝不能在这里删掉。
   //    人工归属（album_pinned=1）的行 seq 落在本册磁盘张数之后，绝不能被当成残留删掉
-  for (const a of model.albums) {
+  // P6.88：规则模式**绝不**按"册内张数"删行。册的成员由规则/人决定，扫描只认领文件；
+  // 一旦这里按 a.photoCount 截断，会把"规则没命中但人工归在这本册里"的行当残留删掉。
+  for (const a of (o.assignByRule ? [] : model.albums)) {
     lines.push('DELETE FROM media_photo WHERE album_id = ' + sqlStr(a.id) +
       ' AND seq >= ' + sqlInt(a.photoCount) + ' AND seq < ' + PARK_BASE +
       (o.pinnedEnabled ? ' AND album_pinned = 0' : '') + ';');
@@ -2508,6 +2639,8 @@ function main() {
     o.albumConfirmedEnabled = o.truncate ? false : albumConfirmedReady(o, mysqlExe, password);
     // P6.86：title_pinned 列存在时，重扫不能覆盖人工改过的册名
     o.albumTitlePinnedEnabled = o.truncate ? false : albumTitlePinnedReady(o, mysqlExe, password);
+    // P6.88：规则模式的归属来源（表不存在时按空规则处理 → 全部未归类，只告警不炸）
+    o.albumRules = o.assignByRule ? loadAlbumRules(mysqlExe, password, o) : [];
     // --truncate 会清空这三张表：库内状态一律作废，按空库重新分配 aNNN（与旧行为一致）
     state = o.truncate ? emptyState() : loadState(o, mysqlExe, password);
     o.rootId = resolveRootId(o, mysqlExe, password);
