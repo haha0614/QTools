@@ -2064,6 +2064,40 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         return name != null && name.toString().startsWith(".");
     }
 
+    /**
+     * 「这条是什么时候被删的」（P6.79.1）
+     *
+     * <p>不能拿文件 mtime：搬移是保留 mtime 的，那是**内容时间**（照片拍摄/导出的那天），
+     * 拿它当删除时间就会出现「今天删的显示 10-16」。优先级：</p>
+     * <ol>
+     *   <li>旁注里的 {@code deleted=<epoch ms>}（新条目都有）；</li>
+     *   <li>旁注文件自身的创建时间 —— 旁注是在删除那一刻写的，对今天的存量条目也是准的；</li>
+     *   <li>退回文件 mtime（旁注功能之前的老条目，只能近似）；</li>
+     * </ol>
+     */
+    private static Date deletionTimeOf(Path path)
+    {
+        MediaTrashSupport.Meta meta = MediaTrashSupport.readMeta(path);
+        if (meta != null && meta.deletedAt != null && meta.deletedAt.longValue() > 0)
+        {
+            return new Date(meta.deletedAt.longValue());
+        }
+        Path sidecar = path.getParent() == null ? null
+                : path.getParent().resolve(".meta").resolve(path.getFileName().toString() + ".path");
+        if (sidecar != null && Files.isRegularFile(sidecar))
+        {
+            try
+            {
+                return new Date(Files.getLastModifiedTime(sidecar).toMillis());
+            }
+            catch (java.io.IOException e)
+            {
+                // 读不到就继续退回文件时间
+            }
+        }
+        return fileTime(path);
+    }
+
     /** 回收站里的库根桶：目录名是纯数字（{@code trash/<kind>/<rootId>}） */
     private static boolean isRootBucket(Path path)
     {
@@ -2103,8 +2137,7 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         }
         boolean isDir = Files.isDirectory(path);
         long bytes = isDir ? dirBytes(path) : fileBytes(path);
-        // 首次软删的文件名里没有时间戳 → 退回文件时间（排序仍按 TRASH_ORDER 视为最早）
-        Date deletedAt = stamp == null ? fileTime(path) : parseStamp(stamp);
+        Date deletedAt = stamp == null ? deletionTimeOf(path) : parseStamp(stamp);
         return new TrashEntry(kind, id, name, stamp, path, isDir, bytes, deletedAt, rootId);
     }
 

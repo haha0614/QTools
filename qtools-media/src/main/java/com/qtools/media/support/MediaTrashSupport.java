@@ -79,11 +79,19 @@ public final class MediaTrashSupport
     {
         public final String relPath;
         public final String contentHash;
+        /** 删除时刻（epoch 毫秒）；老条目为 null */
+        public final Long deletedAt;
 
         Meta(String relPath, String contentHash)
         {
+            this(relPath, contentHash, null);
+        }
+
+        Meta(String relPath, String contentHash, Long deletedAt)
+        {
             this.relPath = relPath;
             this.contentHash = contentHash;
+            this.deletedAt = deletedAt;
         }
     }
 
@@ -114,6 +122,9 @@ public final class MediaTrashSupport
             {
                 sb.append("hash=").append(contentHash).append('\n');
             }
+            // P6.79.1：删除时刻必须自己记下来 —— 搬移保留的是**文件 mtime**（内容时间），
+            // 拿它当"删除时间"会显示成文件当初的日期（实测今天删的显示 10-16）
+            sb.append("deleted=").append(System.currentTimeMillis()).append('\n');
             Files.writeString(dir.resolve(entryPath.getFileName().toString() + ".path"), sb.toString(),
                     StandardCharsets.UTF_8);
         }
@@ -162,6 +173,7 @@ public final class MediaTrashSupport
             }
             String rel = null;
             String hash = null;
+            Long deletedAt = null;
             for (String line : text.split("\r?\n"))
             {
                 int eq = line.indexOf('=');
@@ -179,6 +191,17 @@ public final class MediaTrashSupport
                 {
                     hash = value;
                 }
+                else if ("deleted".equals(key))
+                {
+                    try
+                    {
+                        deletedAt = Long.valueOf(value);
+                    }
+                    catch (NumberFormatException e)
+                    {
+                        deletedAt = null;
+                    }
+                }
             }
             if (rel == null || rel.isEmpty())
             {
@@ -188,7 +211,7 @@ public final class MediaTrashSupport
             {
                 return null;
             }
-            return new Meta(rel, hash);
+            return new Meta(rel, hash, deletedAt);
         }
         catch (IOException e)
         {
