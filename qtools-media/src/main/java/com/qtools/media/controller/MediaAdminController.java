@@ -220,10 +220,18 @@ public class MediaAdminController extends BaseController
         return mediaAdminService.renameAlbum(id, title == null ? null : String.valueOf(title));
     }
 
-    /** P6.86：删册（册内照片移出到「未归类」，不删文件） */
-    @PreAuthorize("@ss.hasPermission('media:admin:remove')")
+    /**
+     * P6.86：**删册行**（册内照片移出到「未归类」，不删文件）
+     *
+     * <p>路径必须带 {@code /row} 后缀：{@code DELETE /album/{id}} 已经被
+     * 「软删（整册移进回收站、行只置 hidden=1）」占用（见 {@code remove(kind,id)} 那条
+     * {@code @DeleteMapping("/{kind}/{id}")}）。P6.86 第一版占用了同一个路径，
+     * Spring 优先匹配字面量更具体的 {@code /album/{id}}，于是**软删被这个硬删接管**——
+     * 点回收站图标会真的把册行删掉、照片变成未归类（P6.92.1 修复）。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:remove')")
     @Log(title = "媒体库-删除相册", businessType = BusinessType.DELETE)
-    @DeleteMapping("/album/{id}")
+    @DeleteMapping("/album/{id}/row")
     public Map<String, Object> deleteAlbum(@PathVariable("id") String id)
     {
         return mediaAdminService.deleteAlbum(id);
