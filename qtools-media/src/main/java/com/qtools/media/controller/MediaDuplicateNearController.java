@@ -163,16 +163,18 @@ public class MediaDuplicateNearController
     @PreAuthorize("@ss.hasPermi('media:admin:list')")
     @GetMapping("/groups")
     public Map<String, Object> groups(@RequestParam(value = "threshold", required = false, defaultValue = "0") int threshold,
+            @RequestParam(value = "mode", required = false, defaultValue = "cross") String mode,
             @RequestParam(value = "page", required = false, defaultValue = "1") int page,
             @RequestParam(value = "size", required = false, defaultValue = "10") int size)
     {
         int th = Math.max(0, Math.min(MAX_THRESHOLD, threshold));
         int p = Math.max(1, page);
         int s = Math.max(1, Math.min(MAX_SIZE, size));
-        List<List<Map<String, Object>>> all = grouped(th);
+        List<List<Map<String, Object>>> all = filterByMode(grouped(th), mode);
         int total = all.size();
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("threshold", Integer.valueOf(th));
+        out.put("mode", normalizeMode(mode));
         out.put("total", Integer.valueOf(total));
         out.put("page", Integer.valueOf(p));
         out.put("size", Integer.valueOf(s));
@@ -199,7 +201,8 @@ public class MediaDuplicateNearController
         int th = Math.max(0, Math.min(MAX_THRESHOLD, intOf(body, "threshold", 0)));
         String keepRule = body.get("keepRule") == null ? "largest" : String.valueOf(body.get("keepRule")).trim();
         List<String> keys = keysOf(body.get("groupKeys"));
-        List<List<Map<String, Object>>> all = grouped(th);
+        String mode = body.get("mode") == null ? "cross" : String.valueOf(body.get("mode")).trim();
+        List<List<Map<String, Object>>> all = filterByMode(grouped(th), mode);
         List<Map<String, Object>> removedRows = new ArrayList<>();
         List<Map<String, Object>> failed = new ArrayList<>();
         int groups = 0;
@@ -235,6 +238,7 @@ public class MediaDuplicateNearController
         cache.clear();
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("groups", Integer.valueOf(groups));
+        out.put("mode", normalizeMode(mode));
         out.put("removed", Integer.valueOf(removedRows.size()));
         out.put("failed", failed);
         out.put("removedRows", removedRows);
@@ -336,18 +340,42 @@ public class MediaDuplicateNearController
             }
             // 组键 = 组内第一条的 content_hash（稳定、可回传给 clean）
             Map<String, Object> first = g.get(0);
+            java.util.Set<String> albums = new java.util.LinkedHashSet<>();
             for (Map<String, Object> m : g)
             {
+                albums.add(String.valueOf(m.get("albumId")));
                 m.put("groupKey", first.get("contentHash"));
                 m.put("thumb", m.get("contentHash") == null ? null
                         : "/api/media/thumb/p8/" + String.valueOf(m.get("contentHash")));
                 m.put("preview", m.get("contentHash") == null ? null
                         : "/api/media/preview/p/" + String.valueOf(m.get("contentHash")));
             }
-            g.sort(Comparator.comparingLong(m -> -((Number) m.get("bytes")).longValue()));
+            // 组内按「册 → 序号」排：同册的挨在一起，一眼看出"是这本册里的一组连拍"
+            // 还是"另外一本册里也有同一张"。保留哪份由 pickKeep 决定，与显示顺序无关。
+            g.sort((a, b) -> {
+                int c = String.valueOf(a.get("albumId")).compareTo(String.valueOf(b.get("albumId")));
+                if (c != 0)
+                {
+                    return c;
+                }
+                return Long.compare(((Number) a.get("seq")).longValue(), ((Number) b.get("seq")).longValue());
+            });
+            for (Map<String, Object> m : g)
+            {
+                m.put("albumCount", Integer.valueOf(albums.size()));
+                m.put("crossAlbum", Boolean.valueOf(albums.size() > 1));
+            }
             groups.add(g);
         }
         groups.sort((a, b) -> {
+            // P6.78：跨册组优先。同册内的相似多半是连拍/同场景换姿势（写真里极常见），
+            // 跨册的相似才更可能是"同一张图被重新压缩后放进了另一本册"。
+            boolean ca = Boolean.TRUE.equals(a.get(0).get("crossAlbum"));
+            boolean cb = Boolean.TRUE.equals(b.get(0).get("crossAlbum"));
+            if (ca != cb)
+            {
+                return ca ? -1 : 1;
+            }
             int c = Integer.compare(b.size(), a.size());
             if (c != 0)
             {
@@ -359,6 +387,33 @@ public class MediaDuplicateNearController
         });
         cache.put(Integer.valueOf(th), groups);
         return groups;
+    }
+
+    /** mode：cross=只看跨册（默认，更可能是真重复）/ same=只看同册（多半是连拍）/ all=全部 */
+    private static String normalizeMode(String mode)
+    {
+        String m = mode == null ? "cross" : mode.trim().toLowerCase();
+        return "same".equals(m) || "all".equals(m) ? m : "cross";
+    }
+
+    private static List<List<Map<String, Object>>> filterByMode(List<List<Map<String, Object>>> all, String mode)
+    {
+        String m = normalizeMode(mode);
+        if ("all".equals(m))
+        {
+            return all;
+        }
+        boolean wantCross = "cross".equals(m);
+        List<List<Map<String, Object>>> out = new ArrayList<>();
+        for (List<Map<String, Object>> g : all)
+        {
+            boolean cross = Boolean.TRUE.equals(g.get(0).get("crossAlbum"));
+            if (cross == wantCross)
+            {
+                out.add(g);
+            }
+        }
+        return out;
     }
 
     private static int find(int[] parent, int x)
