@@ -23,7 +23,10 @@ public interface IMediaAdminService
      *              （选中父标签必须能命中挂在子标签下的视频）；null = 不按标签过滤
      */
     TableDataInfo selectVideoPage(String keyword, String folder, String person, String vcodec, String hidden,
-            String sort, Long tagId, String ids, String rating);
+            String sort, Long tagId, Boolean noTag, String ids, String rating);
+
+    /** 标签覆盖：{@code {total, tagged, untagged}}——"还有多少条没打标签" */
+    java.util.Map<String, Object> videoTagStats();
 
     /** 相册分页 */
     TableDataInfo selectAlbumPage(String keyword, Long personId, String hidden, String sort, String rating);

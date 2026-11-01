@@ -125,6 +125,10 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
                 and exists (select 1 from media_video_tag vt where vt.video_id = v.id and vt.tag_id in
                     <foreach collection="tagIds" item="tid" open="(" separator="," close=")">#{tid}</foreach>)
             </if>
+            <!-- P6.82：无标签筛选（「分类」列下线后，"还没打标签"是最需要能筛出来的一档） -->
+            <if test="noTag != null and noTag">
+                and not exists (select 1 from media_video_tag vt where vt.video_id = v.id)
+            </if>
             <if test="ids != null and ids.size() > 0">
                 and v.id in
                 <foreach collection="ids" item="vid" open="(" separator="," close=")">#{vid}</foreach>
@@ -177,6 +181,14 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         from media_photo p
         where p.album_id = #{albumId}
         order by p.seq asc
+    </select>
+
+    <!-- P6.82 标签覆盖统计：总数 / 已打标签（未打标签 = total - tagged） -->
+    <select id="selectVideoTagStats" resultType="java.util.LinkedHashMap">
+        select count(*) as total,
+               sum(case when exists (select 1 from media_video_tag vt where vt.video_id = v.id) then 1 else 0 end)
+                   as tagged
+        from media_video v
     </select>
 
     <!-- 单行 -->

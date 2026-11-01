@@ -186,13 +186,13 @@ public class MediaAdminServiceImpl implements IMediaAdminService
 
     @Override
     public TableDataInfo selectVideoPage(String keyword, String folder, String person, String vcodec,
-            String hidden, String sort, Long tagId, String ids, String rating)
+            String hidden, String sort, Long tagId, Boolean noTag, String ids, String rating)
     {
         // 层级筛选语义：选父标签 = 命中「自身 + 全部后代」标签下的视频（前端也能拿 tags 的 parentId 自行展开，
         // 这里做服务端展开是为了让管理端筛选与将来的服务端筛选共用同一份语义）
         List<Long> tagIds = tagId == null ? null : mediaOrganizeService.descendantTagIds(tagId);
         List<MediaVideo> rows = mediaAdminMapper.selectVideoPage(trimToNull(keyword), trimToNull(folder),
-                trimToNull(person), trimToNull(vcodec), normalizeHidden(hidden), trimToNull(sort), tagIds,
+                trimToNull(person), trimToNull(vcodec), normalizeHidden(hidden), trimToNull(sort), tagIds, noTag,
                 splitIds(ids), trimToNull(rating));
         long total = new PageInfo<>(rows).getTotal();
         List<Map<String, Object>> out = new ArrayList<>(rows.size());
@@ -204,6 +204,26 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         // 于是每次都从空白开始选（用户反馈）。这里一次批量取出本页视频的演员行，挂到对应行上。
         fillVideoPersons(rows, out);
         return dataTable(out, total);
+    }
+
+    @Override
+    public Map<String, Object> videoTagStats()
+    {
+        List<Map<String, Object>> rows = mediaAdminMapper.selectVideoTagStats();
+        long total = 0;
+        long tagged = 0;
+        if (rows != null && !rows.isEmpty())
+        {
+            Object t = rows.get(0).get("total");
+            Object g = rows.get(0).get("tagged");
+            total = t == null ? 0 : Long.parseLong(String.valueOf(t));
+            tagged = g == null ? 0 : Long.parseLong(String.valueOf(g));
+        }
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("total", Long.valueOf(total));
+        out.put("tagged", Long.valueOf(tagged));
+        out.put("untagged", Long.valueOf(Math.max(0, total - tagged)));
+        return out;
     }
 
     @Override

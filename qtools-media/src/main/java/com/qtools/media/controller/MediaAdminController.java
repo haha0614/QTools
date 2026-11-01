@@ -186,11 +186,26 @@ public class MediaAdminController extends BaseController
             @RequestParam(value = "hidden", required = false) String hidden,
             @RequestParam(value = "sort", required = false) String sort,
             @RequestParam(value = "tagId", required = false) Long tagId,
+            @RequestParam(value = "noTag", required = false) Boolean noTag,
             @RequestParam(value = "ids", required = false) String ids,
             @RequestParam(value = "rating", required = false) String rating)
     {
         startPage();
-        return mediaAdminService.selectVideoPage(keyword, folder, person, vcodec, hidden, sort, tagId, ids, rating);
+        return mediaAdminService.selectVideoPage(keyword, folder, person, vcodec, hidden, sort, tagId, noTag, ids,
+                rating);
+    }
+
+    /**
+     * 标签覆盖情况：{@code GET /media/admin/videos/tag-stats → {total, tagged, untagged}}
+     *
+     * <p>给"还有多少条没打标签"这个提醒用。P6.82 之后视频列表不再有「分类」列（那只是路径第一段，
+     * 和标签重复），打标签成了唯一的语义维度，所以这个数字要能一眼看到。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/videos/tag-stats")
+    public Map<String, Object> videoTagStats()
+    {
+        return mediaAdminService.videoTagStats();
     }
 
     /** 相册分页列表 */

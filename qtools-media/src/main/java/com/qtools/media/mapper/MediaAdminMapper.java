@@ -32,17 +32,30 @@ public interface MediaAdminMapper
      */
     List<MediaVideo> selectVideoPage(@Param("keyword") String keyword, @Param("folder") String folder,
             @Param("person") String person, @Param("vcodec") String vcodec, @Param("hidden") String hidden,
-            @Param("sort") String sort, @Param("tagIds") List<Long> tagIds, @Param("ids") List<String> ids);
+            @Param("sort") String sort, @Param("tagIds") List<Long> tagIds, @Param("noTag") Boolean noTag,
+            @Param("ids") List<String> ids, @Param("rating") String rating);
 
-    /** 相册分页查询（personId 为 null 时不按人物过滤） */
+    /** 标签覆盖统计 */
+    List<java.util.Map<String, Object>> selectVideoTagStats();
+
+    /** 相册分页查询（personId 为 null 时不按人物过滤；rating 为 null 时不按分级过滤） */
     List<MediaAlbum> selectAlbumPage(@Param("keyword") String keyword, @Param("personId") Long personId,
-            @Param("hidden") String hidden, @Param("sort") String sort);
+            @Param("hidden") String hidden, @Param("sort") String sort, @Param("rating") String rating);
 
     /** 某册图片分页查询（不过滤 hidden，含隐藏行） */
     List<MediaPhoto> selectPhotoPage(@Param("albumId") String albumId);
 
     /** 某册全部图片（只读库，不列磁盘）：缺失行排在最后；content_hash 一并带出 */
     List<MediaPhoto> selectAlbumPhotos(@Param("albumId") String albumId);
+
+    /** P6.12：列表页「修改人物」弹窗要回填当前人物——一次批量取这些视频的演员行 */
+    List<Map<String, Object>> selectActorsByVideoIds(@Param("ids") List<String> ids);
+
+    /** P6.09：图片自身分级；rating 为 null = 重新继承相册 */
+    int updatePhotoRating(@Param("id") Long id, @Param("rating") String rating);
+
+    int updatePhotoRatingBatch(@Param("ids") List<Long> ids, @Param("rating") String rating,
+            @Param("autoRating") String autoRating);
 
     /** 缺失图片分页（missing = 1）；albumId 非空时只查该册 */
     List<MediaPhoto> selectMissingPhotoPage(@Param("albumId") String albumId);
@@ -143,3 +156,4 @@ public interface MediaAdminMapper
      */
     List<String> selectSampleRelPaths(@Param("limit") int limit);
 }
+
