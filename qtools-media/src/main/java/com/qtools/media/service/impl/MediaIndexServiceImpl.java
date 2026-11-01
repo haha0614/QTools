@@ -319,14 +319,23 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     public Map<String, Object> selectAlbumDetail(String id, boolean includeMissing)
     {
         MediaAlbum album = mediaAlbumMapper.selectAlbumById(id);
-        if (album == null)
+        if (album == null || !isApproved(album.getReviewState()))
         {
+            // P6.35：未过审 / 驳回的相册，站端与「不存在」同口径
             throw MediaException.notFound();
         }
         Map<Long, String> personNames = loadPersonNames();
         List<Map<String, Object>> photos = new ArrayList<>();
+        boolean guest = mediaGuestAccessService.isStationGuest();
         for (MediaPhoto photo : mediaPhotoMapper.selectPhotoListByAlbumId(id, Boolean.valueOf(includeMissing)))
         {
+            // P6.25：生效档 = 图片自身档 ?? 相册档（图级优先）。册级只是默认值，个别图可以比册更宽。
+            String own = photo.getContentRating();
+            String effective = own != null && !own.isEmpty() ? own : album.getContentRating();
+            if (guest && mediaGuestAccessService.isRatingHidden(effective))
+            {
+                continue;
+            }
             photos.add(toPhotoNode(photo));
         }
         return toAlbumNode(album, personNames, photos, albumPersonNames(id));
@@ -341,12 +350,24 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     // ------------------------------------------------------------------ 可见性 / 缓存键
 
     /** 快照缓存键：{@code m<includeMissing>g<guest>}（两维四组合） */
-    private static String cacheKey(boolean includeMissing, boolean guest)
+    /**
+     * 快照缓存键（P6.26）：{@code includeMissing × 访问者档位}。
+     * 访问者档位来自 {@code viewerKey()}（guest / admin / owner / u:guidance …）——
+     * 登录用户现在按账号的可见上限过滤，不同档位看到的索引不同，必须各存一份，
+     * 否则会把 A 的可见结果当成 B 的（既是串数据，也是越权）。
+     */
+    private String cacheKey(boolean includeMissing, boolean guest)
     {
-        return (includeMissing ? "m1" : "m0") + (guest ? "g1" : "g0");
+        return (includeMissing ? "m1" : "m0") + "|" + (guest ? "g" : "n") + "|" + mediaGuestAccessService.stationViewerKey();
     }
 
     /** 该行是否落在「仅登录可见」的根下（root_id 为 NULL 的存量行走配置根，不在任何行下 → 不筛） */
+    /** P6.35：只有 approved 才对外展示；null / pending / rejected 一律不展示 */
+    private static boolean isApproved(String reviewState)
+    {
+        return reviewState != null && "approved".equalsIgnoreCase(reviewState.trim());
+    }
+
     private static boolean isHiddenRoot(Integer rootId, Set<Integer> hidden)
     {
         return rootId != null && !hidden.isEmpty() && hidden.contains(rootId);
@@ -375,20 +396,26 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     {
         Boolean keepMissing = Boolean.valueOf(includeMissing);
         Set<Integer> hidden = guest ? mediaGuestAccessService.hiddenRootIds() : Set.of();
-        Set<String> hiddenRatings = guest ? mediaGuestAccessService.hiddenRatings() : Set.of();
+        // P6.26：分级维度按「访问者上限」算（访客=策略表、登录用户=账号 max_rating、管理端=空）
+        Set<String> hiddenRatings = mediaGuestAccessService.stationHiddenRatings();
         List<MediaVideo> videoRows = mediaVideoMapper.selectVideoList(keepMissing);
-        List<MediaVideo> videos = videoRows;
-        if (!hidden.isEmpty() || !hiddenRatings.isEmpty())
+        // P6.35：审核状态恒定过滤 —— 未通过审核的内容站端不出现（根/分级条件照旧叠加）
+        List<MediaVideo> videos = new ArrayList<>(videoRows.size());
+        for (MediaVideo row : videoRows)
         {
-            videos = new ArrayList<>(videoRows.size());
-            for (MediaVideo row : videoRows)
+            if (!isApproved(row.getReviewState()))
             {
-                if (!isHiddenRoot(row.getRootId(), hidden) && !isHiddenRating(row.getContentRating(), hiddenRatings))
-                {
-                    videos.add(row);
-                }
+                continue;
             }
-            log.debug("索引未登录筛除：视频 {}/{} 可见", videos.size(), videoRows.size());
+            if (isHiddenRoot(row.getRootId(), hidden) || isHiddenRating(row.getContentRating(), hiddenRatings))
+            {
+                continue;
+            }
+            videos.add(row);
+        }
+        if (videos.size() != videoRows.size())
+        {
+            log.debug("索引筛除：视频 {}/{} 可见（审核 / 根 / 分级）", videos.size(), videoRows.size());
         }
         Map<String, List<String[]>> tagsByVideo = new HashMap<>();
         Set<String> facets = new LinkedHashSet<>();
@@ -485,32 +512,44 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             }
         }
 
-        List<MediaAlbum> albums = mediaAlbumMapper.selectAlbumList();
-        Map<String, List<Map<String, Object>>> photosByAlbum = new HashMap<>();
-        // 未登录时「含隐藏根图片」的相册整册不输出（相册自己没有 root_id，只能由图片反推）
-        // P5.99：分级收紧的相册同样整册不输出（整册一个分级，册内图片继承它）
-        Set<String> hiddenAlbums = new HashSet<>();
-        if (!hiddenRatings.isEmpty())
+        // P6.35：只有 approved 的相册进入站端索引（及其图片）
+        List<MediaAlbum> albums = new ArrayList<>();
+        Set<String> approvedAlbumIds = new HashSet<>();
+        for (MediaAlbum album : mediaAlbumMapper.selectAlbumList())
         {
-            for (MediaAlbum album : albums)
+            if (isApproved(album.getReviewState()))
             {
-                if (isHiddenRating(album.getContentRating(), hiddenRatings))
-                {
-                    hiddenAlbums.add(album.getId());
-                }
+                albums.add(album);
+                approvedAlbumIds.add(album.getId());
             }
         }
+        Map<String, String> albumRatingById = new HashMap<>();
+        for (MediaAlbum album : albums)
+        {
+            albumRatingById.put(album.getId(), album.getContentRating());
+        }
+        Map<String, List<Map<String, Object>>> photosByAlbum = new HashMap<>();
+        // 未登录时「含隐藏根图片」的相册整册不输出（相册自己没有 root_id，只能由图片反推）
+        Set<String> hiddenAlbums = new HashSet<>();
         int photoCount = 0;
         for (MediaPhoto photo : mediaPhotoMapper.selectPhotoList(keepMissing))
         {
-            if (hiddenAlbums.contains(photo.getAlbumId()))
+            if (!approvedAlbumIds.contains(photo.getAlbumId()))
             {
-                // 整册已因分级收紧被筛掉：它的图片也不该进 stats.photos
+                // 相册未过审（或被驳回）：整册的图都不进索引
                 continue;
             }
             if (isHiddenRoot(photo.getRootId(), hidden))
             {
                 hiddenAlbums.add(photo.getAlbumId());
+                continue;
+            }
+            // P6.25：生效档 = 图片自身档 ?? 相册档（图级优先）。册级收紧不再一票否决整册，
+            // 只决定「没单独设置过的图」；单独设得更宽的图照样可见。
+            String own = photo.getContentRating();
+            String effective = own != null && !own.isEmpty() ? own : albumRatingById.get(photo.getAlbumId());
+            if (isHiddenRating(effective, hiddenRatings))
+            {
                 continue;
             }
             photosByAlbum.computeIfAbsent(photo.getAlbumId(), k -> new ArrayList<>()).add(toPhotoNode(photo));
@@ -526,8 +565,15 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             {
                 continue;
             }
+            List<Map<String, Object>> visiblePhotos = photosByAlbum.getOrDefault(album.getId(), List.of());
+            // P6.25：册级只是默认值——一张可见图都没有的册才对访客整册不输出。
+            int totalPhotos = album.getPhotoCount() == null ? 0 : album.getPhotoCount();
+            if ((!hidden.isEmpty() || !hiddenRatings.isEmpty()) && totalPhotos > 0 && visiblePhotos.isEmpty())
+            {
+                continue;
+            }
             albumNodes.add(toAlbumNode(album, personNames,
-                    photosByAlbum.getOrDefault(album.getId(), List.of()),
+                    visiblePhotos,
                     personNamesByAlbum.getOrDefault(album.getId(), List.of())));
             if (album.getPersonId() != null)
             {
@@ -544,10 +590,22 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             List<MediaAlbum> own = albumsByPerson.getOrDefault(person.getId(), List.of());
             List<String> albumIds = new ArrayList<>(own.size());
             long photos = 0;
+            // P6.27：人物的「张数 / 分档」必须按**可见的图**算，不能再用相册的全量张数和相册默认档——
+            // 否则一本「册=限制、里面有 171 张大众」的册会把人物记成 1166 张 + restricted，
+            // 访客按档位过滤时整个人物就消失了（念念就是这样没的）。
+            Map<String, Integer> photoRatings = new LinkedHashMap<>();
             for (MediaAlbum album : own)
             {
                 albumIds.add(album.getId());
-                photos += album.getPhotoCount() == null ? 0 : album.getPhotoCount();
+                List<Map<String, Object>> visible = photosByAlbum.getOrDefault(album.getId(), List.of());
+                photos += visible.size();
+                String albumRating = album.getContentRating();
+                for (Map<String, Object> photoNode : visible)
+                {
+                    String ownRating = stringOf(photoNode.get("contentRating"));
+                    String effective = ownRating != null && !ownRating.isEmpty() ? ownRating : albumRating;
+                    bumpRating(photoRatings, effective);
+                }
             }
             int ownVideos = visibleVideosByPerson.getOrDefault(person.getName(), Integer.valueOf(0))
                     .intValue();
@@ -565,7 +623,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             node.put("videos", ownVideos);
             // P6.09：该人物在每个分级下有多少**可见**作品（相册 + 视频合计）—— 人物页分级筛选的判定数据。
             // 只输出 > 0 的档位（与 ratings[]「只含有条目的分级」同一约定），档位顺序 = MediaRating 展示顺序。
-            node.put("byRating", personRatingCounts(own, videoRatingsByPerson.get(person.getName())));
+            node.put("byRating", personRatingCounts(photoRatings, videoRatingsByPerson.get(person.getName())));
             node.put("photos", photos);
             node.put("albums", albumIds);
             node.put("cover", own.isEmpty() ? null : own.get(0).getCoverPath());
@@ -686,15 +744,19 @@ public class MediaIndexServiceImpl implements IMediaIndexService
      * @param videoCounts   该人物名下可见视频的分级分布（可为 null）
      * @return 有序分级计数；没有任何可见作品时是空 map（前端据此隐藏该人物）
      */
-    private static Map<String, Integer> personRatingCounts(List<MediaAlbum> albums,
+    private static Map<String, Integer> personRatingCounts(Map<String, Integer> photoCounts,
             Map<String, Integer> videoCounts)
     {
         Map<String, Integer> merged = new LinkedHashMap<>();
-        for (MediaAlbum album : albums)
+        if (photoCounts != null)
         {
-            String value = MediaRating.normalize(album.getContentRating());
-            Integer prev = merged.get(value);
-            merged.put(value, Integer.valueOf(prev == null ? 1 : prev.intValue() + 1));
+            for (Map.Entry<String, Integer> entry : photoCounts.entrySet())
+            {
+                String value = MediaRating.normalize(entry.getKey());
+                Integer prev = merged.get(value);
+                merged.put(value, Integer.valueOf((prev == null ? 0 : prev.intValue())
+                        + (entry.getValue() == null ? 0 : entry.getValue().intValue())));
+            }
         }
         if (videoCounts != null)
         {
@@ -720,11 +782,9 @@ public class MediaIndexServiceImpl implements IMediaIndexService
     private static void bumpRating(Map<String, Integer> counts, Object rating)
     {
         String value = MediaRating.normalize(rating == null ? null : String.valueOf(rating));
-        Integer prev = counts.get(value);
-        if (prev != null)
-        {
-            counts.put(value, Integer.valueOf(prev.intValue() + 1));
-        }
+        // P6.27：原来只在「键已存在」时 +1，第一次遇到这一档永远不落键 —— 人物节点的 byRating
+        // 因此对「全靠图片累计」的人物恒为空（念念就是这样被人物页筛掉的）。
+        counts.merge(value, Integer.valueOf(1), Integer::sum);
     }
 
     /**
@@ -941,9 +1001,15 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         node.put("folder", parentOf(album.getDir()));
         node.put("dir", album.getDir());
         node.put("person", album.getPersonId() == null ? null : personNames.get(album.getPersonId()));
-        node.put("count", album.getPhotoCount() == null ? photos.size() : album.getPhotoCount());
+        // P6.09：count 改成「这次真正输出的张数」——访客若有个别图按图片级分级被隐藏，
+        // 页头数字就跟着变小，不会出现「写着 73 张、只给 72 张」。
+        node.put("count", photos != null ? photos.size() : (album.getPhotoCount() == null ? 0 : album.getPhotoCount()));
         node.put("bytes", album.getBytes());
-        node.put("cover", album.getCoverPath());
+        // P6.60：封面必须是「这次真正输出的第一张图」的内容寻址缩略图。
+        // 老写法直接给库里的 cover_path（thumbs/p/<albumId>/0000.jpg）有两个坑：
+        //   ① seq 会漂移（人工排序/移入移出）——同一个 URL 先后指向不同的图；
+        //   ② 缩略图响应是 immutable 长缓存——浏览器永远不回源，于是「张冠李戴」且可能展示已被分级/审核挡掉的内容。
+        node.put("cover", coverOf(album, photos));
         node.put("note", album.getNote());
         // P5.99 内容分级：恒输出（与视频条目同名同义）
         node.put("contentRating", MediaRating.normalize(album.getContentRating()));
@@ -970,11 +1036,37 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         node.put("rel", photo.getRelPath());
         node.put("i", photo.getSeq());
         node.put("big", isTrue(photo.getIsBig()));
+        // P6.27：把这张图自己的分级带出来（NULL 不输出）。人物节点的「分档计数」要靠它算生效档；
+        // 只对已经通过可见性筛选的图输出，不会泄露被藏起来的图的分级。
+        if (StringUtils.isNotEmpty(photo.getContentRating()))
+        {
+            node.put("contentRating", photo.getContentRating());
+        }
         if (StringUtils.isNotEmpty(photo.getContentHash()))
         {
             node.put("hash", photo.getContentHash());
         }
         return node;
+    }
+
+    /**
+     * 相册封面：优先用「本次可见的第一张图」的内容寻址缩略图，拿不到哈希才回退库里的 cover_path。
+     *
+     * <p>为什么不用 cover_path：它指向 {@code thumbs/p/<albumId>/0000.jpg}（按 seq 定位），
+     * 而 seq 会随人工排序/移入移出漂移、缩略图又带 immutable 长缓存 —— 结果就是访客看到
+     * 「别的图」甚至「已经被分级挡掉的那张」。</p>
+     */
+    private String coverOf(MediaAlbum album, List<Map<String, Object>> photos)
+    {
+        if (photos != null && !photos.isEmpty())
+        {
+            Object hash = photos.get(0).get("hash");
+            if (hash != null && !String.valueOf(hash).trim().isEmpty())
+            {
+                return "thumbs/p/" + String.valueOf(hash).trim() + ".jpg";
+            }
+        }
+        return album.getCoverPath();
     }
 
     // ------------------------------------------------------------------ 工具
@@ -1084,3 +1176,11 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         }
     }
 }
+
+
+
+
+
+
+
+
