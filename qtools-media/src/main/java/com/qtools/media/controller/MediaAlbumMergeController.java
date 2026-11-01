@@ -105,6 +105,11 @@ public class MediaAlbumMergeController
         }
         // 原本指向源册的别名改指目标册，避免悬空
         jdbc.update("update media_album_dir set album_id = ? where album_id = ?", target, source);
+        // P6.92：源册的归属规则改指目标册（否则并入后规则变孤儿，同目录新文件又进未归类）
+        jdbc.update("delete r from media_album_rule r join media_album_rule t"
+                + " on t.album_id = ? and t.dir_pattern = r.dir_pattern and t.file_prefix <=> r.file_prefix"
+                + " where r.album_id = ?", target, source);
+        jdbc.update("update media_album_rule set album_id = ? where album_id = ?", target, source);
         jdbc.update("delete from media_album_person where album_id = ?", source);
         jdbc.update("delete from media_album where id = ?", source);
         recompute(jdbc, target);
@@ -270,6 +275,11 @@ public class MediaAlbumMergeController
             }
         }
         jdbc.update("update media_album_dir set album_id = ? where album_id = ?", target, source);
+        // P6.92：源册规则改指目标册（同 dir+前缀 已存在则删掉源的，避免唯一键冲突）
+        jdbc.update("delete r from media_album_rule r join media_album_rule t"
+                + " on t.album_id = ? and t.dir_pattern = r.dir_pattern and t.file_prefix <=> r.file_prefix"
+                + " where r.album_id = ?", target, source);
+        jdbc.update("update media_album_rule set album_id = ? where album_id = ?", target, source);
         jdbc.update("delete from media_album_person where album_id = ?", source);
         jdbc.update("delete from media_album where id = ?", source);
         recompute(jdbc, target);
