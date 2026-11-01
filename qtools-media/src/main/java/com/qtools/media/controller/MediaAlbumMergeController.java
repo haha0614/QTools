@@ -2,6 +2,8 @@ package com.qtools.media.controller;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.qtools.common.annotation.Log;
+import com.qtools.common.enums.BusinessType;
 import com.qtools.common.exception.ServiceException;
 import com.qtools.media.service.IMediaIndexService;
 import com.qtools.media.support.MediaPhotoRemover;
@@ -42,6 +44,13 @@ import java.util.Set;
 @RequestMapping("/media/admin/albums")
 public class MediaAlbumMergeController
 {
+    /**
+     * 相似插入的距离上限（0..64 的汉明距离）：超过它就认为"不像"，追加到末尾。
+     * 实测同一组写真里不同照片的距离多在 7~20，跨套素材更远；12 是保守值，
+     * 只让"确实像"的插进去，避免把无关内容塞到某张后面。
+     */
+    private static final int MAX_INSERT_DISTANCE = 12;
+
     private static final Logger log = LoggerFactory.getLogger(MediaAlbumMergeController.class);
 
     @Autowired
@@ -107,6 +116,176 @@ public class MediaAlbumMergeController
         out.put("target", target);
         out.put("aliasDir", src.get("dir"));
         out.put("aliasRoot", rootId);
+        return out;
+    }
+
+    /**
+     * 并入并把源册的照片**按相似度插到目标册里**（P6.91）
+     * {@code POST /media/admin/albums/merge/similar {source, target}}
+     *
+     * <p>为什么需要：直接并入是把源册整段追加到目标册末尾（{@code seq + offset}），
+     * 于是两套同一次拍摄的内容被切成两段，翻起来毫无连贯性。这里改成：
+     * 目标册保持原有顺序（spine），源册每一张按 64 位 dHash 找 spine 里最像的那一张，
+     * 插在它后面 —— 结果就是"同一姿势/同一场景的凑在一起"。</p>
+     *
+     * <p>没有指纹（phash 为空）或距离过大的，统一追加到末尾，不强行插入。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-按相似度并入", businessType = BusinessType.UPDATE)
+    @PostMapping("/merge/similar")
+    public Map<String, Object> mergeSimilar(@RequestBody Map<String, Object> body)
+    {
+        String source = text(body.get("source"));
+        String target = text(body.get("target"));
+        if (source == null || source.isEmpty() || target == null || target.isEmpty())
+        {
+            throw new ServiceException("缺少 source / target");
+        }
+        if (source.equals(target))
+        {
+            throw new ServiceException("不能并入自己");
+        }
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        Map<String, Object> src = album(jdbc, source);
+        Map<String, Object> dst = album(jdbc, target);
+        if (src == null || dst == null)
+        {
+            throw new ServiceException("册不存在");
+        }
+        List<Map<String, Object>> spine = jdbc.queryForList(
+                "select id, phash from media_photo where album_id = ? and seq < 1000000 order by seq asc", target);
+        List<Map<String, Object>> moving = jdbc.queryForList(
+                "select id, phash from media_photo where album_id = ? and seq < 1000000 order by seq asc", source);
+        // 每张源图 → 最像的 spine 下标 + 距离；找不到（无指纹）记为 -1（追加末尾）
+        List<int[]> anchors = new ArrayList<>(moving.size());
+        long[] spineCodes = new long[spine.size()];
+        boolean[] spineHas = new boolean[spine.size()];
+        for (int i = 0; i < spine.size(); i++)
+        {
+            Object ph = spine.get(i).get("phash");
+            if (ph != null)
+            {
+                spineCodes[i] = ((Number) ph).longValue();
+                spineHas[i] = true;
+            }
+        }
+        long totalDistance = 0;
+        int matched = 0;
+        for (Map<String, Object> m : moving)
+        {
+            Object ph = m.get("phash");
+            int best = -1;
+            int bestD = Integer.MAX_VALUE;
+            if (ph != null && spineHas.length > 0)
+            {
+                long code = ((Number) ph).longValue();
+                for (int i = 0; i < spineCodes.length; i++)
+                {
+                    if (!spineHas[i])
+                    {
+                        continue;
+                    }
+                    int d = Long.bitCount(code ^ spineCodes[i]);
+                    if (d < bestD)
+                    {
+                        bestD = d;
+                        best = i;
+                        if (d == 0)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            if (best >= 0 && bestD <= MAX_INSERT_DISTANCE)
+            {
+                totalDistance += bestD;
+                matched++;
+                anchors.add(new int[] { best, bestD });
+            }
+            else
+            {
+                anchors.add(new int[] { -1, 999 });
+            }
+        }
+        // 组装最终顺序：spine[i] 后面紧跟"以它为锚"的源图（距离小的先）
+        Map<Integer, List<Integer>> byAnchor = new LinkedHashMap<>();
+        List<Integer> tail = new ArrayList<>();
+        for (int k = 0; k < anchors.size(); k++)
+        {
+            int[] a = anchors.get(k);
+            if (a[0] < 0)
+            {
+                tail.add(Integer.valueOf(k));
+            }
+            else
+            {
+                byAnchor.computeIfAbsent(Integer.valueOf(a[0]), x -> new ArrayList<>()).add(Integer.valueOf(k));
+            }
+        }
+        for (List<Integer> list : byAnchor.values())
+        {
+            list.sort((x, y) -> {
+                int c = Integer.compare(anchors.get(x.intValue())[1], anchors.get(y.intValue())[1]);
+                return c != 0 ? c : Integer.compare(x.intValue(), y.intValue());
+            });
+        }
+        List<Object> order = new ArrayList<>(spine.size() + moving.size());
+        for (int i = 0; i < spine.size(); i++)
+        {
+            order.add(spine.get(i).get("id"));
+            List<Integer> list = byAnchor.get(Integer.valueOf(i));
+            if (list != null)
+            {
+                for (Integer k : list)
+                {
+                    order.add(moving.get(k.intValue()).get("id"));
+                }
+            }
+        }
+        for (Integer k : tail)
+        {
+            order.add(moving.get(k.intValue()).get("id"));
+        }
+        // 审核：并进已上站的册，搬过去的照片单独过一遍（触发器只覆盖 INSERT）
+        if (isLiveAlbum(jdbc, target))
+        {
+            jdbc.update("update media_photo set review_state = 'pending' where album_id = ?"
+                    + " and (review_state is null or review_state = 'approved')", source);
+        }
+        // 落库：先全改成目标册（保住行），再按最终顺序写 seq
+        jdbc.update("update media_photo set album_id = ? where album_id = ?", target, source);
+        for (int i = 0; i < order.size(); i++)
+        {
+            jdbc.update("update media_photo set seq = ? where id = ?", Integer.valueOf(i), order.get(i));
+        }
+        Integer rootId = dominantRoot(jdbc, target);
+        if (rootId != null || src.get("dir") != null)
+        {
+            String dir = String.valueOf(src.get("dir"));
+            if (rootId != null && dir != null && !dir.isEmpty())
+            {
+                jdbc.update("insert into media_album_dir (album_id, root_id, dir) values (?, ?, ?)"
+                        + " on duplicate key update album_id = ?", target, rootId, dir, target);
+            }
+        }
+        jdbc.update("update media_album_dir set album_id = ? where album_id = ?", target, source);
+        jdbc.update("delete from media_album_person where album_id = ?", source);
+        jdbc.update("delete from media_album where id = ?", source);
+        recompute(jdbc, target);
+        mediaIndexService.invalidateSnapshot();
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("moved", Integer.valueOf(moving.size()));
+        out.put("insertedBySimilarity", Integer.valueOf(matched));
+        out.put("appended", Integer.valueOf(tail.size()));
+        out.put("avgDistance", Integer.valueOf(matched == 0 ? 0
+                : (int) Math.round((double) totalDistance / matched)));
+        out.put("source", source);
+        out.put("target", target);
+        out.put("total", Integer.valueOf(order.size()));
+        log.info("按相似度并入：{} → {} 移动 {} 张（按相似插入 {}，追加 {}，平均距离 {}）", source, target,
+                moving.size(), matched, tail.size(), out.get("avgDistance"));
         return out;
     }
 
