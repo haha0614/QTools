@@ -64,10 +64,22 @@ public class MediaPhotoRemover
         Object rawHash = row.get("content_hash");
         String hash = rawHash == null ? null : String.valueOf(rawHash);
 
-        Path source = mediaFileService.resolveMedia(rel, rootId);
+        // P6.76：resolveMedia 对「文件已不在磁盘」是直接 404 抛出，而重复文件页里正好有这种行
+        //（另一份是同一内容的副本，原件早被删/搬走），于是「清理这份」整条失败、永远清不掉。
+        // 这里退化成「只删行」：没有文件可搬，就没有复活风险。
+        Path source = null;
+        try
+        {
+            source = mediaFileService.resolveMedia(rel, rootId);
+        }
+        catch (MediaException e)
+        {
+            log.info("照片删除：源文件解析不到（按文件缺失处理，只删行）id={} rel={} 原因={}", photoId, rel,
+                    e.getMessage());
+        }
         boolean trashed = false;
         String trashRel = null;
-        if (Files.exists(source))
+        if (source != null && Files.exists(source))
         {
             Path targetDir = mediaFileService.resolveTrashDir("photo", rootId);
             Path target = MediaTrashSupport.uniqueTarget(targetDir, String.valueOf(photoId),
