@@ -350,6 +350,178 @@ public class MediaDuplicateNearController
         return out;
     }
 
+    /**
+     * 册级重复：{@code GET /near/albums?threshold=0&minOverlap=2&limit=30}
+     *
+     * <p>不逐张看，先看「哪两本册其实是同一套图」：把相似组按册摊开，累计"两本册各有多少张
+     * 落在同一组里"，得到册对的重叠张数与占比。实测最有说服力的一对是
+     * 019 2023写真合集(1127 张) ↔ 130 2023全裸写真(724 张)：阈值 0 重叠 386 张（占小册 53%），
+     * 阈值 1 重叠 587 张（81%）——这种规模逐组点是不现实的。</p>
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:list')")
+    @GetMapping("/albums")
+    public Map<String, Object> albumPairs(
+            @RequestParam(value = "threshold", required = false, defaultValue = "0") int threshold,
+            @RequestParam(value = "minOverlap", required = false, defaultValue = "2") int minOverlap,
+            @RequestParam(value = "limit", required = false, defaultValue = "30") int limit)
+    {
+        int th = Math.max(0, Math.min(MAX_THRESHOLD, threshold));
+        int min = Math.max(1, minOverlap);
+        int max = Math.max(1, Math.min(100, limit));
+        // albumId 对 → 重叠张数
+        Map<String, Map<String, Object>> pairs = new LinkedHashMap<>();
+        Map<String, Integer> albumCount = new LinkedHashMap<>();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        for (List<Map<String, Object>> group : grouped(th))
+        {
+            Map<String, Integer> per = new LinkedHashMap<>();
+            for (Map<String, Object> m : group)
+            {
+                String al = String.valueOf(m.get("albumId"));
+                per.merge(al, Integer.valueOf(1), (a, b) -> Integer.valueOf(a.intValue() + b.intValue()));
+                albumCount.merge(al, Integer.valueOf(1), (a, b) -> Integer.valueOf(a.intValue() + b.intValue()));
+            }
+            if (per.size() < 2)
+            {
+                continue;
+            }
+            List<String> keys = new ArrayList<>(per.keySet());
+            for (int i = 0; i < keys.size(); i++)
+            {
+                for (int j = i + 1; j < keys.size(); j++)
+                {
+                    String a = keys.get(i);
+                    String b = keys.get(j);
+                    String key = a.compareTo(b) <= 0 ? a + "|" + b : b + "|" + a;
+                    int overlap = Math.min(per.get(a).intValue(), per.get(b).intValue());
+                    Map<String, Object> agg = pairs.get(key);
+                    if (agg == null)
+                    {
+                        agg = new LinkedHashMap<>();
+                        agg.put("albumA", a.compareTo(b) <= 0 ? a : b);
+                        agg.put("albumB", a.compareTo(b) <= 0 ? b : a);
+                        agg.put("overlap", Integer.valueOf(0));
+                        pairs.put(key, agg);
+                    }
+                    agg.put("overlap", Integer.valueOf(((Integer) agg.get("overlap")).intValue() + overlap));
+                }
+            }
+        }
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map<String, Object> agg : pairs.values())
+        {
+            if (((Integer) agg.get("overlap")).intValue() < min)
+            {
+                continue;
+            }
+            String a = String.valueOf(agg.get("albumA"));
+            String b = String.valueOf(agg.get("albumB"));
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("albumA", albumInfo(jdbc, a));
+            row.put("albumB", albumInfo(jdbc, b));
+            row.put("overlap", agg.get("overlap"));
+            rows.add(row);
+        }
+        rows.sort((x, y) -> Integer.compare(((Integer) y.get("overlap")).intValue(),
+                ((Integer) x.get("overlap")).intValue()));
+        if (rows.size() > max)
+        {
+            rows = new ArrayList<>(rows.subList(0, max));
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("threshold", Integer.valueOf(th));
+        out.put("total", Integer.valueOf(rows.size()));
+        out.put("rows", rows);
+        return out;
+    }
+
+    /**
+     * 清理「这本册里与另一本册重复的图」：{@code POST /near/albums/clean {albumId, otherAlbumId, threshold}}
+     *
+     * <p>只删 albumId 这一侧的成员，另一册原样保留——这正是「同一套图进了两本册」时该做的动作：
+     * 先决定留哪本册，再把另一本里的重叠项清掉。</p>
+     */
+    @PreAuthorize("@ss.hasAnyPermi('media:admin:scan,media:admin:edit')")
+    @Log(title = "媒体库-清理册级重复", businessType = BusinessType.DELETE)
+    @PostMapping("/albums/clean")
+    public Map<String, Object> cleanAlbumOverlap(@RequestBody Map<String, Object> body)
+    {
+        String albumId = body.get("albumId") == null ? null : String.valueOf(body.get("albumId")).trim();
+        String otherId = body.get("otherAlbumId") == null ? null : String.valueOf(body.get("otherAlbumId")).trim();
+        if (albumId == null || albumId.isEmpty() || otherId == null || otherId.isEmpty())
+        {
+            throw new ServiceException("缺少 albumId / otherAlbumId");
+        }
+        int th = Math.max(0, Math.min(MAX_THRESHOLD, intOf(body, "threshold", 0)));
+        List<Long> victims = new ArrayList<>();
+        for (List<Map<String, Object>> group : grouped(th))
+        {
+            boolean hasOther = false;
+            for (Map<String, Object> m : group)
+            {
+                if (otherId.equals(String.valueOf(m.get("albumId"))))
+                {
+                    hasOther = true;
+                    break;
+                }
+            }
+            if (!hasOther)
+            {
+                continue;
+            }
+            for (Map<String, Object> m : group)
+            {
+                if (albumId.equals(String.valueOf(m.get("albumId"))))
+                {
+                    victims.add(Long.valueOf(((Number) m.get("id")).longValue()));
+                }
+            }
+        }
+        List<Map<String, Object>> failed = new ArrayList<>();
+        int removed = 0;
+        for (Long id : victims)
+        {
+            try
+            {
+                photoRemover.remove(id.longValue());
+                removed++;
+            }
+            catch (RuntimeException e)
+            {
+                Map<String, Object> f = new LinkedHashMap<>();
+                f.put("id", id);
+                f.put("reason", e.getMessage());
+                failed.add(f);
+            }
+        }
+        cache.clear();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("albumId", albumId);
+        out.put("otherAlbumId", otherId);
+        out.put("candidates", Integer.valueOf(victims.size()));
+        out.put("removed", Integer.valueOf(removed));
+        out.put("failed", failed);
+        log.info("册级重复清理：{} 与 {} 重叠，删除 {} 张（失败 {}）", albumId, otherId, removed, failed.size());
+        return out;
+    }
+
+    private static Map<String, Object> albumInfo(JdbcTemplate jdbc, String albumId)
+    {
+        List<Map<String, Object>> found = jdbc.queryForList(
+                "select id, title, photo_count from media_album where id = ?", albumId);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", albumId);
+        if (found.isEmpty())
+        {
+            out.put("title", albumId);
+            out.put("photoCount", Integer.valueOf(0));
+            return out;
+        }
+        out.put("title", found.get(0).get("title"));
+        out.put("photoCount", found.get(0).get("photo_count"));
+        return out;
+    }
+
     // ------------------------------------------------------------------ 内部
 
     /** 按阈值分组（带缓存）：同一候选集只算一次，页面翻页不重复做 O(n²) */
