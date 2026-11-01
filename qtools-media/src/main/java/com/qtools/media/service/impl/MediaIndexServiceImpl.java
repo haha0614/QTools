@@ -558,6 +558,8 @@ public class MediaIndexServiceImpl implements IMediaIndexService
 
         Map<Long, String> personNames = loadPersonNames();
         List<Map<String, Object>> albumNodes = new ArrayList<>(albums.size());
+        // P6.61：人物卡封面要跟相册卡一致——用「这本册这次可见的第一张图」的内容寻址封面
+        Map<String, String> albumCoverById = new LinkedHashMap<>();
         Map<Long, List<MediaAlbum>> albumsByPerson = new LinkedHashMap<>();
         for (MediaAlbum album : albums)
         {
@@ -572,9 +574,12 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             {
                 continue;
             }
-            albumNodes.add(toAlbumNode(album, personNames,
+            Map<String, Object> albumNode = toAlbumNode(album, personNames,
                     visiblePhotos,
-                    personNamesByAlbum.getOrDefault(album.getId(), List.of())));
+                    personNamesByAlbum.getOrDefault(album.getId(), List.of()));
+            albumNodes.add(albumNode);
+            Object albumCover = albumNode.get("cover");
+            albumCoverById.put(album.getId(), albumCover == null ? null : String.valueOf(albumCover));
             if (album.getPersonId() != null)
             {
                 albumsByPerson.computeIfAbsent(album.getPersonId(), k -> new ArrayList<>()).add(album);
@@ -626,7 +631,9 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             node.put("byRating", personRatingCounts(photoRatings, videoRatingsByPerson.get(person.getName())));
             node.put("photos", photos);
             node.put("albums", albumIds);
-            node.put("cover", own.isEmpty() ? null : own.get(0).getCoverPath());
+            // P6.61：与相册卡同一套封面（索引已算好内容寻址路径），拿不到才回退 cover_path
+            node.put("cover", own.isEmpty() ? null
+                    : albumCoverById.getOrDefault(own.get(0).getId(), own.get(0).getCoverPath()));
             // P5.45：最近更新 = 名下相册 / 视频的 mtime 最大值（epoch 毫秒，站端按本地时区格式化成 YYYY-MM-DD）。
             // 两者都没有（空壳人物）时整键不输出 —— 前端据此不渲染「最近」行，不留空洞。
             Date latest = later(albumMtimeByPerson.get(person.getId()), videoMtimeByPerson.get(person.getName()));
