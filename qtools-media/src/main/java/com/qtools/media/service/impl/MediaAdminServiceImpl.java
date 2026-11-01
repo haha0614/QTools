@@ -121,6 +121,9 @@ public class MediaAdminServiceImpl implements IMediaAdminService
 
     private static final String PREVIEW_PHOTO_PREFIX = "/api/media/preview/p/";
 
+    /** P6.67：800 宽缩略图路由（产物在 thumbs/p8/，服务端没有则回退 p/） */
+    private static final String THUMB_PHOTO_BIG_PREFIX = "/api/media/thumb/p8/";
+
     /** thumbVersion 长度：内容哈希本身就是 16 位，回退的短哈希也对齐这个长度 */
     private static final int VERSION_WIDTH = 16;
 
@@ -1803,6 +1806,11 @@ public class MediaAdminServiceImpl implements IMediaAdminService
      */
     private String photoUrl(String prefix, String albumId, Integer seq, String contentHash, boolean preview)
     {
+        // P6.67：缩略图（非预览档）优先 800 宽那张；服务端对缺产物会自动回退 400 宽的 p/
+        if (!preview && contentHash != null && mediaFileService.hasPhotoArtifactBig(contentHash))
+        {
+            return THUMB_PHOTO_BIG_PREFIX + contentHash;
+        }
         if (contentHash != null && mediaFileService.hasPhotoArtifact(contentHash, preview))
         {
             return prefix + contentHash;

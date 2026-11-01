@@ -55,6 +55,9 @@ public class MediaFileServiceImpl implements IMediaFileService
 
     private static final String PREVIEW_PHOTO_DIR = "pv";
 
+    /** P6.67：照片缩略图的新规格目录（800 宽）。老 p/ 仍是 400 宽，继续当回退 */
+    private static final String THUMB_PHOTO_BIG_DIR = "p8";
+
     /** 视频精灵图目录（build-thumbs.js --sprite，20x20 网格 = 400 格，成品 3200x1800） */
     private static final String SPRITE_DIR = "s";
 
@@ -602,9 +605,69 @@ public class MediaFileServiceImpl implements IMediaFileService
     }
 
     @Override
-    public boolean hasPhotoArtifact(String contentHash, boolean preview)
+    public Path resolvePhotoOriginal(String albumId, String seq)
+    {
+        if (albumId == null || !SAFE_ALBUM_ID.matcher(albumId).matches())
+        {
+            throw MediaException.forbidden();
+        }
+        if (seq == null || !SAFE_INDEX.matcher(seq).matches())
+        {
+            throw MediaException.forbidden();
+        }
+        java.util.Map<String, Object> row = mediaPhotoMapper.selectPhotoPathByAlbumSeq(albumId, Integer.valueOf(seq));
+        if (row == null || row.get("relPath") == null)
+        {
+            throw MediaException.notFound();
+        }
+        String rel = String.valueOf(row.get("relPath"));
+        Integer rootId = row.get("rootId") == null ? null : ((Number) row.get("rootId")).intValue();
+        Path path = resolveMedia(rel, rootId);
+        if (!Files.isRegularFile(path))
+        {
+            // 缺失行（磁盘上已经没有）不能拿来做头像源，调用方会回退缩略图
+            throw MediaException.notFound();
+        }
+        return path;
+    }
+
+    @Override
+    /**
+     * P6.67：800 宽缩略图（{@code p8/<hash>.jpg}）在不在
+     *
+     * <p>换了规格就必须换 URL —— 老的 p/ 带 immutable 缓存，原地覆盖会永远看不到新图。</p>
+     */
+    public boolean hasPhotoArtifactBig(String contentHash)
     {
         if (contentHash == null || !SAFE_CONTENT_HASH.matcher(contentHash).matches())
+        {
+            return false;
+        }
+        return existingFile(thumbsDir().resolve(THUMB_PHOTO_BIG_DIR), contentHash.toLowerCase() + JPG_SUFFIX) != null;
+    }
+
+    @Override
+    public Path resolveThumbPhotoBigByHash(String hash)
+    {
+        if (hash == null || !SAFE_CONTENT_HASH.matcher(hash).matches())
+        {
+            throw MediaException.forbidden();
+        }
+        Path hit = existingFile(thumbsDir().resolve(THUMB_PHOTO_BIG_DIR), hash.toLowerCase() + JPG_SUFFIX);
+        if (hit == null)
+        {
+            // 还没生成 p8（新扫进来的图 / 只跑过老缩略图）：退回 400 宽那张，别给破图
+            hit = existingFile(thumbsDir().resolve(THUMB_PHOTO_DIR), hash.toLowerCase() + JPG_SUFFIX);
+        }
+        if (hit == null)
+        {
+            throw MediaException.notFound();
+        }
+        return hit;
+    }
+
+    public boolean hasPhotoArtifact(String contentHash, boolean preview)
+    {        if (contentHash == null || !SAFE_CONTENT_HASH.matcher(contentHash).matches())
         {
             return false;
         }

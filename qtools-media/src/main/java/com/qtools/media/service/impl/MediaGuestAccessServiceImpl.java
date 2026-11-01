@@ -547,6 +547,8 @@ public class MediaGuestAccessServiceImpl implements IMediaGuestAccessService
                 // ---- 图片：内容寻址（hash）与老序号 URL
                 case "/media/thumb/p/{i}":
                 case "/media/preview/p/{i}":
+                // P6.67：800 宽缩略图同口径——不登记会落到 default「放行」，等于绕过分级
+                case "/media/thumb/p8/{i}":
                     return photoHashBlocked(index);
                 case "/media/thumb/p/{albumId}/{i}":
                 case "/media/preview/p/{albumId}/{i}":

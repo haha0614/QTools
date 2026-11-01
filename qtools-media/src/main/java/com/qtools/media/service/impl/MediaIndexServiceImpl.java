@@ -1070,7 +1070,13 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             Object hash = photos.get(0).get("hash");
             if (hash != null && !String.valueOf(hash).trim().isEmpty())
             {
-                return "thumbs/p/" + String.valueOf(hash).trim() + ".jpg";
+                String h = String.valueOf(hash).trim();
+                // P6.67：有 800 宽那张就用它（站端封面更清晰）；没有仍给 400 宽的老路径
+                if (mediaFileService.hasPhotoArtifactBig(h))
+                {
+                    return "thumbs/p8/" + h + ".jpg";
+                }
+                return "thumbs/p/" + h + ".jpg";
             }
         }
         return album.getCoverPath();

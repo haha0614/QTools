@@ -6,7 +6,7 @@
  * 从库里读 media_video / media_photo，按 Java 端（MediaFileServiceImpl）的磁盘约定生成：
  *   视频封面   <thumbs>/v/<content_hash>.jpg                  scale=480:-2
  *              content_hash 为 NULL 时回退 <thumbs>/v/<videoId>.jpg（老命名，仍可用）
- *   图片缩略图 <thumbs>/p/<content_hash>.jpg                   scale=400:-2
+ *   图片缩略图 <thumbs>/p8/<content_hash>.jpg                  scale=800:-2（P6.67；老 p/ 仍是 400，留作回退）
  *              content_hash 为 NULL 时回退 <thumbs>/p/<albumId>/<%04d>.jpg（老命名，仍可用）
  *   大图预览   <thumbs>/pv/<content_hash>.jpg（仅 is_big=1）     scale=1600:-2
  *              content_hash 为 NULL 时回退 <thumbs>/pv/<albumId>/<%04d>.jpg
@@ -148,7 +148,7 @@ const HELP = `
   --sprite-cols=<n>   精灵图列数，默认 20（1~64）
   --sprite-rows=<n>   精灵图行数，默认 20（1~64）；改了网格就必须整库重生成，见下
   --preview           顺手生成预览视频 pv2/<hash>.mp4|webm（静音 5~8 秒，帧数按影片时长取；默认关）
-  --gc                扫 v/ s/ pv2/ p/ pv/ frames/ 删孤儿派生文件（默认只打印，配 --yes 才真删）
+  --gc                扫 v/ s/ pv2/ p/ p8/ pv/ frames/ 删孤儿派生文件（默认只打印，配 --yes 才真删）
   --yes, -y           确认 --gc 的删除动作（不给就只是干跑统计）
   --secret=<file>     密码来源②：从 secret.yml 取 spring.datasource.druid.master.password
                       （管理端「重建缩略图」按钮触发时没有 MYSQL_PWD，用它）
@@ -532,7 +532,10 @@ function photoHashOf(p) {
  * 回退老命名 {@code p|pv/<albumId>/<%04d>.jpg}（Java 端同样先内容寻址再回退，两处必须一致）。</p>
  */
 function photoOutPath(thumbs, p, preview) {
-  const sub = preview ? 'pv' : 'p';
+  // P6.67：照片缩略图规格 400 → 800，落到**新子目录 p8/**（老 p/ 保持原样当回退）。
+  // 为什么不原地覆盖 p/<hash>.jpg：那个 URL 带 immutable 长缓存，换了内容浏览器永远不回源，
+  // 就是我们这几天反复踩的"缩略图张冠李戴"。换目录 = 换 URL，旧缓存自然失效。
+  const sub = preview ? 'pv' : 'p8';
   const hash = photoHashOf(p);
   if (hash !== '') return path.join(thumbs, sub, hash + '.jpg');
   return path.join(thumbs, sub, p.albumId, pad4(p.seq) + '.jpg');
@@ -737,7 +740,7 @@ function ffmpegArgsFor(item, src, o) {
   // P6.00 自带封面：静态图，没有 -ss（对图片 seek 会抽不到帧），参数其余与视频封面一致，
   // 这样「截帧封面」和「自带封面」落盘的分辨率/质量完全一样，换来源时视觉上不跳。
   if (item.kind === 'cover') return base.concat(['-i', src, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', item.out]);
-  if (item.kind === 'photo') return base.concat(['-i', src, '-frames:v', '1', '-vf', 'scale=400:-2', '-q:v', '4', item.out]);
+  if (item.kind === 'photo') return base.concat(['-i', src, '-frames:v', '1', '-vf', 'scale=800:-2', '-q:v', '4', item.out]);
   if (item.kind === 'sprite') return base.concat(['-i', src, '-vf', spriteFilter(item, o), '-frames:v', '1', '-q:v', '4', item.out]);
   if (item.kind === 'pvclip') return base.concat(pvclipArgs(item, src, o));
   return base.concat(['-i', src, '-frames:v', '1', '-vf', 'scale=1600:-2', '-q:v', '4', item.out]);
@@ -1024,7 +1027,7 @@ function gcDerived(o, videos, photos) {
   }
   const scanPlan = [
     { sub: 'v', keep: videoKeep }, { sub: 's', keep: videoKeep }, { sub: 'pv2', keep: videoKeep },
-    { sub: 'p', keep: photoKeep }, { sub: 'pv', keep: photoKeep },
+    { sub: 'p', keep: photoKeep }, { sub: 'p8', keep: photoKeep }, { sub: 'pv', keep: photoKeep },
   ];
   const scanned = [];
   scanFrameBuckets(o, videoKeep, scanned);

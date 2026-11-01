@@ -232,6 +232,27 @@ public interface IMediaFileService
     Path resolveThumbPhotoByHash(String hash, boolean preview);
 
     /**
+     * P6.67：取 800 宽缩略图（{@code p8/<hash>.jpg}）；没有则回退 400 宽的 {@code p/<hash>.jpg}
+     *
+     * <p>为什么单独一个目录而不是原地改规格：老的 p/ URL 带 {@code immutable} 长缓存，
+     * 原地覆盖内容浏览器永远不回源 —— 换目录就是换 URL，旧缓存自然失效。</p>
+     *
+     * @throws com.qtools.media.exception.MediaException 403 非法哈希 / 404 两档产物都没有
+     */
+    Path resolveThumbPhotoBigByHash(String hash);
+
+    /**
+     * 按 (albumId, seq) 定位**原图**（P6.08）
+     *
+     * <p>只给「裁头像 / 渲染人物卡背景」用：这两处要的是清晰度，而 400px 缩略图放大必糊、
+     * 1600px 预览图又只对 is_big=1 的图存在。原图只有一行定位信息（rel_path + root_id），
+     * 读出来交给 {@code MediaAvatarCrop} 按源采样缩放，内存可控。</p>
+     *
+     * @throws com.qtools.media.exception.MediaException 403 非法 albumId/seq；404 行不存在或文件不在
+     */
+    Path resolvePhotoOriginal(String albumId, String seq);
+
+    /**
      * 内容寻址产物是否已经落盘（thumbs/p 或 thumbs/pv 下有没有 {@code <hash>.jpg}）
      *
      * <p>管理端拼 URL 前必须先问这一句：内容寻址 URL 没有序号回退，产物缺失就是 404，
@@ -242,6 +263,9 @@ public interface IMediaFileService
      * @param preview     true=预览图（pv），false=缩略图（p）
      */
     boolean hasPhotoArtifact(String contentHash, boolean preview);
+
+    /** P6.67：800 宽缩略图（{@code p8/<hash>.jpg}）是否存在 */
+    boolean hasPhotoArtifactBig(String contentHash);
 
     /**
      * 缩略图根目录（{@code qtools.media.thumbsPath} 的 realpath），派生资源目录的父目录

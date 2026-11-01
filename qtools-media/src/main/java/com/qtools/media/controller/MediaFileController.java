@@ -202,7 +202,9 @@ public class MediaFileController
                     .body(exact);
         }
         int sec = MediaFrameCommand.secondOf(raw, dur);
-        byte[] bytes = MediaAvatarCrop.cropJpeg(mediaFrameService.frame(id, sec), cropParam);
+        // P6.07：裁头像的帧按 960 宽取（默认 480 裁出来再放大一样糊）；不裁剪的仍走默认宽度与永久缓存
+        byte[] source = hasCrop(cropParam) ? mediaFrameService.frameAt(id, sec, 960) : mediaFrameService.frame(id, sec);
+        byte[] bytes = MediaAvatarCrop.cropJpeg(source, cropParam);
         return ResponseEntity.ok()
                 .contentType(MediaType.IMAGE_JPEG)
                 // 按秒寻址：内容永不变化，永久缓存
@@ -391,10 +393,24 @@ public class MediaFileController
             @RequestParam(value = "crop", required = false) String crop, HttpServletRequest request)
     {
         Path path = mediaFileService.resolveThumbPhotoByHash(i, false);
+        if (hasCrop(crop))
+        {
+            // 头像裁剪走大图：400px 缩略图裁出来再放大必糊（P6.07）
+            path = preferLargeCropSource(path, null, i);
+        }
         return croppedImageResponse(path, i, crop, request);
     }
 
     /** 相册预览图（内容寻址）thumbs/pv/<content_hash>.jpg */
+    /** P6.67：800 宽缩略图（p8/<hash>.jpg）；没生成过则服务端回退 400 宽的 p/<hash>.jpg */
+    @GetMapping("/thumb/p8/{i}")
+    public ResponseEntity<Resource> thumbPhotoBigByHash(@PathVariable("i") String i,
+            HttpServletRequest request)
+    {
+        Path path = mediaFileService.resolveThumbPhotoBigByHash(i);
+        return imageResponse(path, true, request);
+    }
+
     @GetMapping("/preview/p/{i}")
     public ResponseEntity<Resource> previewPhotoByHash(@PathVariable("i") String i, HttpServletRequest request)
     {
@@ -414,8 +430,58 @@ public class MediaFileController
             @RequestParam(value = "crop", required = false) String crop, HttpServletRequest request)
     {
         Path path = mediaFileService.resolveThumbPhoto(albumId, i, false);
+        if (hasCrop(crop))
+        {
+            // 头像裁剪走大图：400px 缩略图裁出来再放大必糊（P6.07）
+            path = preferLargeCropSource(path, albumId, i);
+        }
         // 序号 URL 可能先指向 A 图、重建后指向 B 图，判定只看定位符本身，不看落盘命中的文件名
         return croppedImageResponse(path, albumId + "/" + i, crop, request);
+    }
+
+    /** 是否带裁剪参数（只有裁剪才需要换成大图源；普通缩略图保持 400px 的轻量口径） */
+    private static boolean hasCrop(String crop)
+    {
+        return crop != null && !crop.isBlank();
+    }
+
+    /**
+     * 裁剪用的源图优先取预览图（1600px），拿不到才退回缩略图（400px）
+     *
+     * <p>P6.07：头像在页面上按 150–200 CSS px 显示，Retina 要 2 倍像素。用 400px 缩略图裁一块
+     * 0.6 宽的脸 ≈ 240px，再被放大到 400px 就糊了；预览图裁同样区域 ≈ 960px，清晰度够了。
+     * 预览图只有 {@code is_big=1} 的图才有，所以必须容错回退，不能让没预览图的相册头像 404。</p>
+     */
+    private Path preferLargeCropSource(Path fallback, String albumId, String index)
+    {
+        // 1) 原图：最清晰，且 MediaAvatarCrop 按源采样读（2400px 上限），不吃堆内存
+        if (albumId != null)
+        {
+            try
+            {
+                Path origin = mediaFileService.resolvePhotoOriginal(albumId, index);
+                if (origin != null)
+                {
+                    return origin;
+                }
+            }
+            catch (RuntimeException e)
+            {
+                // 行缺失 / 文件不在：继续往下退，不能因为清晰度优化让头像 404
+            }
+        }
+        // 2) 预览图（1600px，只有 is_big=1 的图才有）
+        try
+        {
+            Path large = albumId == null
+                    ? mediaFileService.resolveThumbPhotoByHash(index, true)
+                    : mediaFileService.resolveThumbPhoto(albumId, index, true);
+            return large != null ? large : fallback;
+        }
+        catch (RuntimeException e)
+        {
+            return fallback;
+        }
     }
 
     /**
