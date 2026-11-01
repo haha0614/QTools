@@ -197,6 +197,11 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         delete from media_album where id = #{id}
     </delete>
 
+    <!-- P6.93：册被删掉后，指向它的规则必须一起清掉，否则规则页出现"点进去没有册"的死规则 -->
+    <delete id="deleteAlbumRules">
+        delete from media_album_rule where album_id = #{albumId}
+    </delete>
+
     <!-- P6.83：一页视频各自的标签（videoId + tagId/name/color） -->
     <select id="selectVideoTagsByVideoIds" resultType="java.util.LinkedHashMap">
         select vt.video_id as videoId, t.id as tagId, t.name as name, t.color as color

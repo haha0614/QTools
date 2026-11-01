@@ -44,6 +44,9 @@ public interface MediaAdminMapper
     /** P6.86：删掉册行 */
     int deleteAlbumRow(@Param("id") String id);
 
+    /** P6.93：删掉指向这本册的归属规则（否则又留下孤儿规则） */
+    int deleteAlbumRules(@Param("albumId") String albumId);
+
     /** 标签覆盖统计 */
     List<java.util.Map<String, Object>> selectVideoTagStats();
 

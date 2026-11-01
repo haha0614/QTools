@@ -245,13 +245,17 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         }
         // 照片不跟着消失：移出到「未归类」（album_id 允许 NULL，是设计内状态）
         int detached = mediaAdminMapper.detachPhotosOfAlbum(id);
+        // P6.93：规则也要一起清，否则残留孤儿规则（规则页点进去没有册）
+        int rules = mediaAdminMapper.deleteAlbumRules(id);
         mediaAdminMapper.deleteAlbumRow(id);
         mediaIndexService.invalidateSnapshot();
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("id", id);
         out.put("title", album.getTitle());
         out.put("detached", Integer.valueOf(detached));
-        // 目录型册（dir_key 非空）：下一次扫描还会按目录重新建出来，必须让调用方知道
+        out.put("rulesRemoved", Integer.valueOf(rules));
+        // 规则模式（P6.88）下扫描不再按目录建册，所以删册不会被重扫建回来；
+        // 保留 recreatable 字段只为兼容旧前端提示
         out.put("dirKey", album.getDirKey());
         out.put("recreatable", Boolean.valueOf(album.getDirKey() != null && !album.getDirKey().isEmpty()));
         return out;
