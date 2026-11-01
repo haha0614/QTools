@@ -14,6 +14,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -203,6 +204,8 @@ public class MediaAdminServiceImpl implements IMediaAdminService
         // P6.12：列表页「修改人物」弹窗要回填当前人物。前端原来读 row.persons，但列表行没有这个键，
         // 于是每次都从空白开始选（用户反馈）。这里一次批量取出本页视频的演员行，挂到对应行上。
         fillVideoPersons(rows, out);
+        // P6.83：列表「标签」列——一次把本页所有视频的标签取回来，避免 N+1
+        fillVideoTags(rows, out);
         return dataTable(out, total);
     }
 
@@ -1658,6 +1661,48 @@ public class MediaAdminServiceImpl implements IMediaAdminService
     }
 
     // ------------------------------------------------------------------ 行整形
+
+    /**
+     * 给列表行补 {@code tags:[{id,name,color}]}（P6.83）
+     *
+     * <p>「分类」列下线后，标签成了唯一的语义维度，列表必须能看到"这条有没有标签"。
+     * 一次 in 查询取本页全部标签，页内不产生 N+1；没有标签的行给空数组（前端渲染灰色「无」）。</p>
+     */
+    private void fillVideoTags(List<MediaVideo> rows, List<Map<String, Object>> nodes)
+    {
+        if (rows == null || rows.isEmpty() || nodes == null || nodes.isEmpty())
+        {
+            return;
+        }
+        List<String> ids = new ArrayList<>(rows.size());
+        for (MediaVideo row : rows)
+        {
+            if (row.getId() != null)
+            {
+                ids.add(String.valueOf(row.getId()));
+            }
+        }
+        if (ids.isEmpty())
+        {
+            return;
+        }
+        Map<String, List<Map<String, Object>>> byVideo = new HashMap<>();
+        for (Map<String, Object> tag : mediaAdminMapper.selectVideoTagsByVideoIds(ids))
+        {
+            String vid = String.valueOf(tag.get("videoId"));
+            Map<String, Object> node = new LinkedHashMap<>();
+            node.put("id", tag.get("tagId"));
+            node.put("name", tag.get("name"));
+            node.put("color", tag.get("color"));
+            byVideo.computeIfAbsent(vid, k -> new ArrayList<>()).add(node);
+        }
+        for (Map<String, Object> out : nodes)
+        {
+            Object id = out.get("id");
+            List<Map<String, Object>> tags = id == null ? null : byVideo.get(String.valueOf(id));
+            out.put("tags", tags == null ? new ArrayList<Map<String, Object>>() : tags);
+        }
+    }
 
     /**
      * 给列表行补 {@code persons:[{id,name,role}]}（P6.12）

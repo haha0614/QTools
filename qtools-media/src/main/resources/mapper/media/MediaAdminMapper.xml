@@ -183,6 +183,16 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         order by p.seq asc
     </select>
 
+    <!-- P6.83：一页视频各自的标签（videoId + tagId/name/color） -->
+    <select id="selectVideoTagsByVideoIds" resultType="java.util.LinkedHashMap">
+        select vt.video_id as videoId, t.id as tagId, t.name as name, t.color as color
+        from media_video_tag vt
+        join media_tag t on t.id = vt.tag_id
+        where vt.tag_id is not null and vt.video_id in
+        <foreach collection="videoIds" item="vid" open="(" separator="," close=")">#{vid}</foreach>
+        order by t.name asc
+    </select>
+
     <!-- P6.82 标签覆盖统计：总数 / 已打标签（未打标签 = total - tagged） -->
     <select id="selectVideoTagStats" resultType="java.util.LinkedHashMap">
         select count(*) as total,

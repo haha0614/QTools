@@ -38,6 +38,10 @@ public interface MediaAdminMapper
     /** 标签覆盖统计 */
     List<java.util.Map<String, Object>> selectVideoTagStats();
 
+    /** 一页视频的标签（P6.83：列表「标签」列 + 行内编辑入口） */
+    List<java.util.Map<String, Object>> selectVideoTagsByVideoIds(
+            @Param("videoIds") List<String> videoIds);
+
     /** 相册分页查询（personId 为 null 时不按人物过滤；rating 为 null 时不按分级过滤） */
     List<MediaAlbum> selectAlbumPage(@Param("keyword") String keyword, @Param("personId") Long personId,
             @Param("hidden") String hidden, @Param("sort") String sort, @Param("rating") String rating);
