@@ -72,8 +72,24 @@ public class MediaAlbumRuleController
         List<Map<String, Object>> rows = jdbc.queryForList(sql.toString(), args.toArray());
         for (Map<String, Object> r : rows)
         {
+            // enabled 是 tinyint(1)：MySQL 驱动会把它当成 Boolean 返回，这里必须三态兼容，
+            // 直接 parseInt(String.valueOf(e)) 会拿到 "true" 而抛 NumberFormatException（P6.90.1 就是这么 500 的）
             Object e = r.get("enabled");
-            r.put("enabled", Boolean.valueOf(e != null && Integer.parseInt(String.valueOf(e).trim()) == 1));
+            boolean on = false;
+            if (e instanceof Boolean)
+            {
+                on = ((Boolean) e).booleanValue();
+            }
+            else if (e instanceof Number)
+            {
+                on = ((Number) e).intValue() == 1;
+            }
+            else if (e != null)
+            {
+                String s = String.valueOf(e).trim();
+                on = "1".equals(s) || "true".equalsIgnoreCase(s);
+            }
+            r.put("enabled", Boolean.valueOf(on));
         }
         return rows;
     }
