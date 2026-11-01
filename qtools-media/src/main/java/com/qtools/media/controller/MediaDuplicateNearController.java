@@ -61,8 +61,20 @@ public class MediaDuplicateNearController
     @Autowired
     private MediaProperties mediaProperties;
 
-    /** 分组结果缓存（阈值 → 分组）；任何清理/重建都整体失效 */
+    /** 分组结果缓存（阈值 → 分组）；任何删除/重建都整体失效 */
     private final Map<Integer, List<List<Map<String, Object>>>> cache = new HashMap<>();
+
+    /**
+     * 任何路径删掉一条照片行 → 分组缓存立刻作废（P6.78.1）
+     *
+     * <p>少了这一步就会出现"清理完那项还在、再点一次报「照片不存在」"：
+     * 删行是别的入口干的，而这个缓存还在原地发旧分组。</p>
+     */
+    @org.springframework.context.event.EventListener
+    public void onPhotoRemoved(com.qtools.media.support.MediaPhotoRemovedEvent event)
+    {
+        cache.clear();
+    }
 
     /**
      * 指纹覆盖情况：{@code {total, hashed, remaining}}

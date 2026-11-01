@@ -41,6 +41,9 @@ public class MediaPhotoRemover
     @Autowired
     private IMediaIndexService mediaIndexService;
 
+    @Autowired
+    private org.springframework.context.ApplicationEventPublisher eventPublisher;
+
     /**
      * 删除一条照片行：文件移入回收站（存在才搬）+ 删行 + 重算所属册 + 索引失效。
      *
@@ -105,6 +108,8 @@ public class MediaPhotoRemover
         mediaIndexService.invalidateSnapshot();
         log.info("照片删除（含回收站）id={} album={} rel={} trashed={} trash={}", photoId, albumId, rel,
                 trashed, trashRel);
+        // 通知缓存方（相似分组等）：有行被删了，别再拿旧结果糊弄用户
+        eventPublisher.publishEvent(new MediaPhotoRemovedEvent(this, photoId));
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("id", photoId);
