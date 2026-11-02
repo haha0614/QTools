@@ -376,8 +376,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <!-- 缺失图片分页（按最后 seen 升序：越早消失的排前面） -->
     <select id="selectMissingPhotoPage" resultMap="MediaAdminPhotoResult">
-/
-               p.hidden, p.missing, p.last_seen, p.content_hash
+        select p.id, p.root_id, p.album_id, p.seq, p.rel_path, p.bytes, p.w, p.h, p.is_big,
+               p.hidden, p.missing, p.last_seen, p.content_hash, p.content_rating
         from media_photo p
         where p.missing = 1
         <if test="albumId != null and albumId != ''">
