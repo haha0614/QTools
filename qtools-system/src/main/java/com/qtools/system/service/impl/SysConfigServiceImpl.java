@@ -94,6 +94,25 @@ public class SysConfigServiceImpl implements ISysConfigService
     }
 
     /**
+     * 登录验证码形式（sys.account.captchaType）
+     */
+    @Override
+    public String selectCaptchaType()
+    {
+        String type = selectConfigByKey("sys.account.captchaType");
+        if (StringUtils.isEmpty(type))
+        {
+            return "char";
+        }
+        String t = type.trim().toLowerCase();
+        if (!"slider".equals(t) && !"behavior".equals(t) && !"math".equals(t))
+        {
+            return "char";
+        }
+        return t;
+    }
+
+    /**
      * 查询参数配置列表
      * 
      * @param config 参数配置信息

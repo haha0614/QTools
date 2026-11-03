@@ -110,10 +110,34 @@ public class SysLoginService
     public void validateCaptcha(String username, String code, String uuid)
     {
         boolean captchaEnabled = configService.selectCaptchaEnabled();
-        if (captchaEnabled)
+        if (!captchaEnabled)
         {
-            // 滑块验证码：拖动通过后服务端发放一次性 permit（放在 code 里），
-            // 这里校验 permit 与 uuid 是否匹配；旧的字符/算术验证码不再参与登录。
+            return;
+        }
+
+        // 验证码形式由 sys.account.captchaType 决定：
+        //   char / math -> 比对 Redis 里的字符答案（sys.account.captchaType=char 的老路径）
+        //   slider / behavior -> 拖动通过后服务端发的 permit，放在 code 里
+        String type = configService.selectCaptchaType();
+        if ("char".equals(type) || "math".equals(type))
+        {
+            String verifyKey = CacheConstants.CAPTCHA_CODE_KEY + StringUtils.nvl(uuid, "");
+            String captcha = redisCache.getCacheObject(verifyKey);
+            if (captcha == null)
+            {
+                AsyncManager.me().execute(AsyncFactory.recordLogininfor(username, Constants.LOGIN_FAIL, MessageUtils.message("user.jcaptcha.expire")));
+                throw new CaptchaExpireException();
+            }
+            redisCache.deleteObject(verifyKey);
+            if (!StringUtils.nvl(code, "").equalsIgnoreCase(captcha))
+            {
+                AsyncManager.me().execute(AsyncFactory.recordLogininfor(username, Constants.LOGIN_FAIL, MessageUtils.message("user.jcaptcha.error")));
+                throw new CaptchaException();
+            }
+            return;
+        }
+
+        {
             String permitKey = "slider_ok:" + StringUtils.nvl(uuid, "");
             String permit = redisCache.getCacheObject(permitKey);
             if (permit == null)

@@ -34,6 +34,13 @@ public interface ISysConfigService
     public boolean selectCaptchaEnabled();
 
     /**
+     * 登录验证码形式：char（数字/字母）/ slider（滑块拼图）/ behavior（行为）
+     *
+     * @return 验证码形式，未配置时按 char 处理
+     */
+    public String selectCaptchaType();
+
+    /**
      * 查询参数配置列表
      * 
      * @param config 参数配置信息

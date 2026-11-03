@@ -40,6 +40,19 @@ public class CaptchaController
     @Autowired
     private ISysConfigService configService;
     /**
+     * 登录页需要的验证码配置：是否开启 + 形式（char / slider / behavior）
+     */
+    @GetMapping("/captchaConfig")
+    public AjaxResult config()
+    {
+        AjaxResult ajax = AjaxResult.success();
+        boolean captchaEnabled = configService.selectCaptchaEnabled();
+        ajax.put("captchaEnabled", captchaEnabled);
+        ajax.put("captchaType", captchaEnabled ? configService.selectCaptchaType() : "none");
+        return ajax;
+    }
+
+    /**
      * 生成验证码
      */
     @GetMapping("/captchaImage")
