@@ -1,0 +1,10 @@
+{
+  "name": "qtools-media-import",
+  "private": true,
+  "description": "媒体库导入/分级脚本的本地依赖（classify-photos.js 需要 nsfwjs）；不参与任何前端构建",
+  "dependencies": {
+    "@tensorflow/tfjs": "^4.22.0",
+    "nsfwjs": "^4.3.0",
+    "sharp": "^0.35.5"
+  }
+}

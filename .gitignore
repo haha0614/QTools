@@ -59,5 +59,8 @@ application-secret.yml
 # 媒体索引迁移的生成物（import.js 每次运行重写，不入库）
 doc/media-import/*.sql
 
+# 导入/分类脚本的依赖（P6.242：原来没排除，一次 git add -A 就会把几万个文件塞进仓库）
+doc/media-import/node_modules/
+
 # 私密配置（两种命名都排除：旧 application-secret.yml / 新 secret.yml）
 secret.yml
