@@ -193,8 +193,11 @@ public class MediaAlbumRuleController
     {
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         return jdbc.queryForList(
+                /* P6.260：与 MediaAlbumMergeController.uncategorizedDirs 同一处坑 ——
+                   length() 是**字节数**而 substring/locate 按**字符**算，中文路径会截出半个文件名。
+                   这里返回的目录会直接变成新建规则的 dir_pattern，截错就等于规则永远匹配不到。 */
                 "select case when locate('/', rel_path) > 0"
-                        + " then substring(rel_path, 1, length(rel_path) - locate('/', reverse(rel_path)))"
+                        + " then left(rel_path, char_length(rel_path) - char_length(substring_index(rel_path, '/', -1)) - 1)"
                         + " else '' end as dir, count(*) as photos"
                         + " from media_photo where album_id is null group by dir order by photos desc limit 200");
     }
