@@ -89,6 +89,16 @@ public class AppUserAdminController
         return appUserAdminService.updateProfile(id, parseObject(rawBody), SecurityUtils.getUserId());
     }
 
+    /** P6.26：设置该账号的可见内容上限（body {maxRating: general|guidance|restricted}；owner 不生效，始终全量） */
+    @PreAuthorize("@ss.hasPermi('app:user:edit')")
+    @org.springframework.web.bind.annotation.PutMapping("/{id}/max-rating")
+    public Map<String, Object> updateMaxRating(@PathVariable("id") Long id,
+            @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody);
+        return appUserAdminService.updateMaxRating(id, text(body.get("maxRating")), SecurityUtils.getUserId());
+    }
+
     /** 重置密码：body 可空；带 {@code {"password":"..."}} 用手填，否则生成随机密码并一次性返回 */
     @PreAuthorize("@ss.hasPermi('app:user:edit')")
     @PostMapping("/{id}/reset-password")
@@ -252,3 +262,4 @@ public class AppUserAdminController
         return trimmed.isEmpty() ? null : trimmed;
     }
 }
+

@@ -13,6 +13,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="passwordHash" column="password_hash" />
         <result property="status"       column="status"        />
         <result property="role"         column="role"          />
+        <result property="maxRating"    column="max_rating"    />
         <result property="banned"       column="banned"        />
         <result property="bannedReason" column="banned_reason" />
         <result property="bannedAt"     column="banned_at"     />
@@ -27,7 +28,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </resultMap>
 
     <sql id="selectUserColumns">
-        id, username, nickname, avatar, password_hash, status, role, banned, banned_reason, banned_at,
+        id, username, nickname, avatar, password_hash, status, role, max_rating, banned, banned_reason, banned_at,
         review_note, reviewed_at, reviewed_by, invite_code, register_ip, created_at, last_login_at, updated_at
     </sql>
 
@@ -45,6 +46,10 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             </if>
         </where>
     </sql>
+
+    <update id="updateMaxRating">
+        update app_user set max_rating = #{maxRating}, updated_at = now() where id = #{id}
+    </update>
 
     <select id="selectById" resultMap="AppUserResult">
         select <include refid="selectUserColumns"/> from app_user where id = #{id}
@@ -185,3 +190,5 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </update>
 
 </mapper>
+
+

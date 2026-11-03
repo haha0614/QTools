@@ -84,6 +84,37 @@ public class TokenService
     }
 
     /**
+     * 按原始 token 取登录用户（没有 {@code Authorization} 头时用）
+     *
+     * <p>典型场景：{@code <img src>} / {@code <video src>} 这类标签发出的请求无法带请求头，
+     * 但浏览器会自动带上同源 cookie，管理端 SPA 的登录态就在 {@code Admin-Token} 这个 cookie 里
+     * （见 {@code QTools-M/src/utils/auth.js}）。这里只做一次 JWT 解析 + Redis 取用户，
+     * 与 {@link #getLoginUser(HttpServletRequest)} 同口径：失效、被篡改、过期一律返回 null。</p>
+     *
+     * @param token 原始 token（不带 {@code Bearer } 前缀）
+     * @return 登录用户；不可用时 null
+     */
+    public LoginUser getLoginUserByToken(String token)
+    {
+        if (StringUtils.isEmpty(token))
+        {
+            return null;
+        }
+        try
+        {
+            Claims claims = parseToken(token);
+            String uuid = (String) claims.get(Constants.LOGIN_USER_KEY);
+            return redisCache.getCacheObject(getTokenKey(uuid));
+        }
+        catch (Exception e)
+        {
+            // 与 getLoginUser 不同：这里可能是访客随手带来的脏 cookie，用 debug 不刷 error
+            log.debug("按 token 获取用户信息失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * 设置用户身份信息
      */
     public void setLoginUser(LoginUser loginUser)

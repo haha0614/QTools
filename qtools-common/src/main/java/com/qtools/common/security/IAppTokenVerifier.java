@@ -26,4 +26,16 @@ public interface IAppTokenVerifier
      * @return 校验通过返回 app_user.id；否则返回 null（不抛异常）
      */
     Long verifyUserId(String token);
+
+    /**
+     * 用户端账号档案（P6.26）：角色 + 可见内容上限。默认返回 null，老实现/单模块测试不受影响。
+     *
+     * @param userId {@link #verifyUserId(String)} 的返回值
+     * @return 查不到返回 null（调用方按「默认 guidance」或按原策略兜底）
+     */
+    default AppUserProfile profileOf(Long userId)
+    {
+        return null;
+    }
 }
+

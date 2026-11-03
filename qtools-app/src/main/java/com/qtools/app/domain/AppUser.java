@@ -34,6 +34,9 @@ public class AppUser
      */
     private String role;
 
+    /** P6.26：可见内容上限（general/guidance/restricted）；owner 不受限 */
+    private String maxRating;
+
     /** 审核备注（拒绝原因等） */
     private String reviewNote;
 
@@ -126,6 +129,16 @@ public class AppUser
     public String getRole()
     {
         return role;
+    }
+
+    public String getMaxRating()
+    {
+        return maxRating;
+    }
+
+    public void setMaxRating(String maxRating)
+    {
+        this.maxRating = maxRating;
     }
 
     public void setRole(String role)
@@ -255,3 +268,4 @@ public class AppUser
         this.updatedAt = updatedAt;
     }
 }
+

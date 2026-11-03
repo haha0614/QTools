@@ -97,4 +97,6 @@ public interface AppUserMapper
 
     /** 删除账号前解绑媒体所有权（media_owner.user_id -> NULL，避免留下指向不存在账号的绑定） */
     int clearOwnerBinding(@Param("userId") Long userId);
+    /** P6.26：设置账号的可见内容上限（general/guidance/restricted） */
+    int updateMaxRating(@Param("id") Long id, @Param("maxRating") String maxRating);
 }

@@ -54,4 +54,6 @@ public interface IAppUserAdminService
 
     /** 批量解封 */
     Map<String, Object> batchUnban(List<Long> ids, Long operatorId);
+    /** P6.26：设置账号的可见内容上限（general/guidance/restricted；owner 不受限） */
+    Map<String, Object> updateMaxRating(Long id, String maxRating, Long operatorId);
 }

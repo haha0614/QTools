@@ -587,6 +587,8 @@ public class AppUserAdminServiceImpl implements IAppUserAdminService
         // P5.89：两档角色（user 普通用户 / owner 站长）—— 管理端列表「角色」列与行内切换读它
         view.put("role", roleOf(user));
         view.put("roleText", roleText(roleOf(user)));
+        // P6.26：可见内容上限（owner 不受限，前端据此禁用下拉）
+        view.put("maxRating", user.getMaxRating());
         view.put("banned", user.isBanned());
         view.put("bannedReason", user.getBannedReason());
         view.put("bannedAt", format(user.getBannedAt()));
@@ -824,5 +826,27 @@ public class AppUserAdminServiceImpl implements IAppUserAdminService
             return null;
         }
         return trimmed.length() <= max ? trimmed : trimmed.substring(0, max);
+    }
+    @Override
+    public Map<String, Object> updateMaxRating(Long id, String maxRating, Long operatorId)
+    {
+        if (id == null)
+        {
+            throw AppException.badRequest("缺少账号 id");
+        }
+        String value = maxRating == null ? "" : maxRating.trim().toLowerCase(java.util.Locale.ROOT);
+        if (!"general".equals(value) && !"guidance".equals(value) && !"restricted".equals(value))
+        {
+            throw AppException.badRequest("maxRating 只能是 general / guidance / restricted");
+        }
+        AppUser user = appUserMapper.selectById(id);
+        if (user == null)
+        {
+            throw AppException.badRequest("账号不存在: " + id);
+        }
+        appUserMapper.updateMaxRating(id, value);
+        Map<String, Object> view = adminView(appUserMapper.selectById(id));
+        view.put("changed", true);
+        return view;
     }
 }
