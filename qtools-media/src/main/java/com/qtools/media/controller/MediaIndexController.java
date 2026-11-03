@@ -54,7 +54,8 @@ public class MediaIndexController
     {
         // includeMissing=false 时服务端滤掉 missing=1 的行；默认 true = 老行为（前端自行过滤）
         // P5.78：未登录访客走 guest 版快照 —— guest_visible=0 的根下内容整行不出现（ETag 也分开）
-        boolean guest = mediaGuestAccessService.isGuest(request);
+        // P6.29：站端口径只认 app token，Admin-Token 不算登录（否则管理端登录会让站端"退出也全量"）
+        boolean guest = mediaGuestAccessService.isStationGuest();
         MediaIndexSnapshot snapshot = mediaIndexService.indexSnapshot(includeMissing, guest);
         String etag = snapshot.getEtag();
         response.setHeader("ETag", etag);
@@ -143,3 +144,4 @@ public class MediaIndexController
         return "HEAD".equalsIgnoreCase(request.getMethod());
     }
 }
+

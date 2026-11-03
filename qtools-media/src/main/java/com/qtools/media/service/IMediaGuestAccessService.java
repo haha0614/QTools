@@ -41,6 +41,9 @@ public interface IMediaGuestAccessService
     /** 当前线程正在处理的请求是否未登录（拿不到请求上下文时按「已登录」处理，即不收紧） */
     boolean isGuest();
 
+    /** P6.29：站端（公开内容）的访客判定 —— 只看 app token，Admin-Token 不算登录 */
+    boolean isStationGuest();
+
     /** {@code guest_visible = 0} 的库根 id 集合（恒非 null；空集合 = 没有收紧的根） */
     Set<Integer> hiddenRootIds();
 
@@ -59,6 +62,36 @@ public interface IMediaGuestAccessService
 
     /** {@code guest_visible = 0} 的分级值集合（恒非 null；空集合 = 三档都对未登录可见） */
     Set<String> hiddenRatings();
+
+    /**
+     * P6.26：按<b>当前访问者</b>算「要隐藏的分级」（不再只是访客策略）。
+     *
+     * <ul>
+     *   <li>管理端（Admin-Token）→ 空集：站长在管理端看全部；</li>
+     *   <li>未登录访客 → {@code media_rating_policy} 里 guest_visible=0 的档；</li>
+     *   <li>登录用户 → 比 {@code app_user.max_rating} 更严的档；owner → 空集。</li>
+     * </ul>
+     */
+    Set<String> viewerHiddenRatings();
+
+    /**
+     * P6.26：索引快照缓存键用的「访问者档位」标识（guest / admin / owner / u:guidance …）。
+     * 不同访问者看到的索引不同，缓存键必须分开，否则会把 A 的可见结果发给 B。
+     */
+    String viewerKey();
+
+    /**
+     * P6.28：站端内容只认「站端身份」——Admin-Token <b>不算</b>登录。
+     *
+     * <p>管理端和站端同源，管理员在同一个浏览器里打开站端时，Admin-Token cookie 会被自动带上；
+     * 如果按它放行，就会「站端退出登录了仍然能看全部」。所以索引/人物/相册这些<b>公开内容</b>
+     * 一律按 app token 判：没有 app 登录态就是访客。管理端的预览类接口（thumb/preview/file）
+     * 仍然走 {@link #viewerHiddenRatings()}，不受影响。</p>
+     */
+    Set<String> stationHiddenRatings();
+
+    /** P6.28：站端索引缓存键用的身份（guest / owner / u:guidance …），不含管理端身份 */
+    String stationViewerKey();
 
     /** 这个分级值是否对未登录访客隐藏；{@code null} / 未知值按 {@code general} 处理（不隐藏） */
     boolean isRatingHidden(String rating);
@@ -105,3 +138,6 @@ public interface IMediaGuestAccessService
     /** 未登录且该根收紧时抛 404（服务层自查用：不经过拦截器的读路径可调它） */
     void requireVisible(Integer rootId);
 }
+
+
+

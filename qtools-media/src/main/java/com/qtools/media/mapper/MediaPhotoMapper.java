@@ -43,4 +43,14 @@ public interface MediaPhotoMapper
      * 老命名 {@code p/<albumId>/<seq4>.jpg}。</p>
      */
     String selectPhotoContentHashByAlbumSeq(@Param("albumId") String albumId, @Param("seq") Integer seq);
+
+    /**
+     * 按 (album_id, seq) 取图片的<b>源文件定位信息</b>（P6.08）
+     *
+     * <p>裁头像 / 渲染人物卡背景时，400px 缩略图放大必糊，1600px 预览图又只对 {@code is_big=1}
+     * 的图存在，所以这两处改成直接读原图、按源采样缩放。返回 {@code {relPath, rootId, missing}}；
+     * 行不存在返回 null。</p>
+     */
+    java.util.Map<String, Object> selectPhotoPathByAlbumSeq(@Param("albumId") String albumId,
+            @Param("seq") Integer seq);
 }

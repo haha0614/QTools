@@ -700,9 +700,35 @@ public class MediaPersonCardBgServiceImpl implements IMediaPersonCardBgService
             String albumId = body.substring(0, colon).trim();
             String seqText = body.substring(colon + 1).trim();
             Path path = mediaFileService.resolveThumbPhoto(albumId, seqText, false);
+            // P6.08：卡背景是一整块大图，从 400px 缩略图裁再放大会糊。
+            // 顺序：原图（最清晰，按源采样读）→ 1600px 预览图（仅 is_big=1 有）→ 缩略图兜底
             try
             {
-                BufferedImage image = ImageIO.read(path.toFile());
+                Path origin = mediaFileService.resolvePhotoOriginal(albumId, seqText);
+                if (origin != null)
+                {
+                    path = origin;
+                }
+            }
+            catch (RuntimeException e)
+            {
+                try
+                {
+                    Path large = mediaFileService.resolveThumbPhoto(albumId, seqText, true);
+                    if (large != null)
+                    {
+                        path = large;
+                    }
+                }
+                catch (RuntimeException ignored)
+                {
+                    // 原图与预览图都没有（行缺失 / 文件不在）：继续用缩略图，不能因为清晰度优化让卡片 404
+                }
+            }
+            try
+            {
+                // P6.08：原图可能有 6000px，按 2400 上限源采样后再裁，避免整张进内存
+                BufferedImage image = MediaAvatarCrop.readForCrop(path, 2400);
                 if (image == null)
                 {
                     throw MediaException.notFound("头像缩略图不可解码: " + path);
@@ -733,8 +759,9 @@ public class MediaPersonCardBgServiceImpl implements IMediaPersonCardBgService
                 double sec = Double.parseDouble(secText);
                 if (sec == Math.rint(sec))
                 {
-                    bytes = mediaFrameService.frame(videoId, (int) sec);
-                    sig = "frame|" + videoId + "|" + (int) sec;
+                    // P6.08：卡背景按 960 宽取帧（默认 480 放大到整块卡片同样糊）；签名带上宽度，缓存不会串
+                    bytes = mediaFrameService.frameAt(videoId, sec, 960);
+                    sig = "frame|" + videoId + "|" + (int) sec + "|w960";
                 }
                 else
                 {

@@ -606,6 +606,23 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         List<Long> target = distinctIds(personIds);
         requirePersonsExist(target);
 
+        // P6.28：与视频同一条「素人」规则 —— 清空人物 = 回到素人，不允许把册留成「未归类」。
+        // 原来相册这条路径没有兜底：清空后 person_id 变 NULL，相册列表就多出一个「未归类」分组。
+        Long amateurId = resolveAmateurId();
+        if (amateurId != null)
+        {
+            if (target.isEmpty())
+            {
+                target = new ArrayList<>();
+                target.add(amateurId);
+            }
+            else if (target.size() > 1 && target.contains(amateurId))
+            {
+                target = new ArrayList<>(target);
+                target.remove(amateurId);
+            }
+        }
+
         Set<Long> touched = new LinkedHashSet<>(mediaPersonMapper.selectPersonIdsByAlbumIds(List.of(albumId)));
         mediaPersonMapper.deleteAlbumPersons(albumId);
         for (Long personId : target)
@@ -840,7 +857,7 @@ public class MediaPersonServiceImpl implements IMediaPersonService
      */
     private List<Integer> guestHiddenRootIds()
     {
-        if (!mediaGuestAccessService.isGuest())
+        if (!mediaGuestAccessService.isStationGuest())
         {
             return null;
         }
@@ -851,11 +868,8 @@ public class MediaPersonServiceImpl implements IMediaPersonService
     /** 未登录访客要排除的分级值（P5.99，口径同 {@link #guestHiddenRootIds()}：登录用户恒 null） */
     private List<String> guestHiddenRatings()
     {
-        if (!mediaGuestAccessService.isGuest())
-        {
-            return null;
-        }
-        Set<String> hidden = mediaGuestAccessService.hiddenRatings();
+        // P6.29：站端口径 —— 访客按策略表、登录用户按账号上限；owner 为空集（不筛）
+        Set<String> hidden = mediaGuestAccessService.stationHiddenRatings();
         return hidden.isEmpty() ? null : new ArrayList<>(hidden);
     }
 
@@ -867,7 +881,9 @@ public class MediaPersonServiceImpl implements IMediaPersonService
      */
     private Map<Long, Map<String, Object>> guestPersonStats()
     {
-        if (!mediaGuestAccessService.isGuest() || !mediaGuestAccessService.hasGuestRestriction())
+        // P6.29：站端身份（不看 Admin-Token）；owner 无上限且无根收紧时才跳过统计
+        if (!mediaGuestAccessService.isStationGuest()
+                && mediaGuestAccessService.stationHiddenRatings().isEmpty())
         {
             return null;
         }
@@ -1612,3 +1628,4 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         return text.isEmpty() ? null : text;
     }
 }
+

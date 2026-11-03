@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.exception.MediaException;
+import com.qtools.media.mapper.MediaAdminMapper;
 import com.qtools.media.mapper.MediaRatingMapper;
 import com.qtools.media.service.IMediaGuestAccessService;
 import com.qtools.media.service.IMediaIndexService;
@@ -40,6 +41,10 @@ public class MediaRatingServiceImpl implements IMediaRatingService
 
     @Autowired
     private MediaRatingMapper mediaRatingMapper;
+
+    /** P6.09：图片级分级的写入语句在 MediaAdminMapper（updatePhotoRatingBatch） */
+    @Autowired
+    private MediaAdminMapper mediaAdminMapper;
 
     /** 访客可见性快照：改分级 / 改策略后必须立刻失效，否则未登录最多 5s 还是旧口径 */
     @Autowired
@@ -86,7 +91,9 @@ public class MediaRatingServiceImpl implements IMediaRatingService
     public Map<String, Object> batch(String type, List<String> ids, String rating)
     {
         String kind = normalizeType(type);
-        String value = MediaRating.parse(rating);
+        // P6.09：图片允许「回到继承相册」= inherit，此时清空 content_rating，由相册那一档决定。
+        boolean photoInherit = "photo".equals(kind) && rating != null && "inherit".equalsIgnoreCase(rating.trim());
+        String value = photoInherit ? null : MediaRating.parse(rating);
         LinkedHashSet<String> unique = new LinkedHashSet<>();
         if (ids != null)
         {
@@ -107,6 +114,32 @@ public class MediaRatingServiceImpl implements IMediaRatingService
             throw MediaException.badRequest("ids 一次最多 " + BATCH_MAX + " 个，本次: " + unique.size());
         }
         List<String> targets = new ArrayList<>(unique);
+        if ("photo".equals(kind))
+        {
+            // P6.09：图片级分级的批量入口。value 由 MediaRating.parse 校验过；
+            // 但图片还允许“回到继承相册”，所以这里认 inherit。
+            List<Long> photoIds = new ArrayList<>(targets.size());
+            for (String target : targets)
+            {
+                try
+                {
+                    photoIds.add(Long.valueOf(target));
+                }
+                catch (NumberFormatException e)
+                {
+                    throw MediaException.badRequest("photo 的 ids 必须是 media_photo.id（数字），本次含: " + target);
+                }
+            }
+            String photoValue = value;   // inherit 时上面已经解析成 null
+            // P6.44：人工定档（大众/指导/限制）同时覆盖 auto_rating，这张就不会再挂在「分级复核」队列；
+            // 选「继承相册」不带 autoRating，模型结论保留（下次复核仍能看到它，这是有意的）
+            int changed = mediaAdminMapper.updatePhotoRatingBatch(photoIds, photoValue, photoValue);
+            afterWrite("photo", photoIds.size() + " ids", String.valueOf(photoValue));
+            Map<String, Object> out = node("photo", null, String.valueOf(photoValue));
+            out.put("requested", photoIds.size());
+            out.put("updated", changed);
+            return out;
+        }
         long matched = "album".equals(kind) ? mediaRatingMapper.countAlbumsByIds(targets)
                 : mediaRatingMapper.countVideosByIds(targets);
         int updated = "album".equals(kind) ? mediaRatingMapper.updateAlbumsRating(targets, value)
@@ -132,7 +165,11 @@ public class MediaRatingServiceImpl implements IMediaRatingService
         {
             return "album";
         }
-        throw MediaException.badRequest("type 只能是 video 或 album，本次: " + type);
+        if ("photo".equals(text) || "photos".equals(text))
+        {
+            return "photo";
+        }
+        throw MediaException.badRequest("type 只能是 video / album / photo，本次: " + type);
     }
 
     private static String requireId(String id, String field)
@@ -276,3 +313,4 @@ public class MediaRatingServiceImpl implements IMediaRatingService
         return text.isEmpty() ? null : text;
     }
 }
+

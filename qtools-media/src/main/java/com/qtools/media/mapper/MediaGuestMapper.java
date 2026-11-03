@@ -60,6 +60,9 @@ public interface MediaGuestMapper
     /** 按「册内序号」找图片所在根（老 URL {@code /thumb/p/<albumId>/<seq>} 用） */
     Integer selectRootIdOfPhotoBySeq(@Param("albumId") String albumId, @Param("seq") Integer seq);
 
+    /** 图片自身分级（P6.09；null = 继承相册） */
+    String selectRatingOfPhotoBySeq(@Param("albumId") String albumId, @Param("seq") Integer seq);
+
     /**
      * 人物头像来源 + 备用路径（P5.90 / P5.99）
      *
@@ -75,4 +78,26 @@ public interface MediaGuestMapper
 
     /** 按相对路径找图片所属相册的分级（同上；{@code media_photo.rel_path} 的前缀索引由本次迁移补上） */
     String selectRatingOfAlbumByPhotoRelPath(@Param("rel") String rel);
+
+    /**
+     * 相册里还有几张「访客可见」的图（P6.25）。
+     *
+     * <p>图片的生效档 = {@code coalesce(图片自身档, 相册档)}：图级优先、未设才继承。
+     * 只数 {@code missing=0 且 hidden=0} 的行；{@code hiddenRatings} 为空时不加分级条件。</p>
+     */
+    Integer countVisiblePhotosOfAlbum(@Param("albumId") String albumId,
+            @Param("hiddenRatings") List<String> hiddenRatings);
+
+    /**
+     * 按相对路径取「这张图的自身档 + 所属相册档」（P6.25，原文件/流/字幕的可见性判定用）。
+     *
+     * <p>返回 {@code {albumRating, ownRating}}；查不到返回 null。</p>
+     */
+    Map<String, Object> selectPhotoRatingsByRelPath(@Param("rel") String rel);
+    /** P6.35：相册 / 视频的审核状态（站端闸门用） */
+    String selectReviewStateOfAlbum(@Param("albumId") String albumId);
+
+    String selectReviewStateOfVideo(@Param("videoId") String videoId);
 }
+
+

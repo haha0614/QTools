@@ -401,8 +401,14 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
                             <foreach collection="hiddenRootIds" item="rid" open="(" separator="," close=")">#{rid}</foreach>)
         </if>
         <if test="hiddenRatings != null and hiddenRatings.size() > 0">
-            and (al.content_rating is null or al.content_rating not in
-            <foreach collection="hiddenRatings" item="rt" open="(" separator="," close=")">#{rt}</foreach>)
+            <!-- P6.28：册的可见性 = 还有至少一张可见的图（图级优先，与 P6.25 的索引口径一致）。
+                 原来按册级一刀切，会把「册=限制、里面有几张大众」的册判成不可见，人物因此整条消失。 -->
+            and exists (select 1 from media_photo vp
+                         where vp.album_id = al.id
+                           and coalesce(vp.missing, 0) = 0
+                           and coalesce(vp.hidden, 0) = 0
+                           and coalesce(vp.content_rating, al.content_rating) not in
+                           <foreach collection="hiddenRatings" item="rt" open="(" separator="," close=")">#{rt}</foreach>)
         </if>
     </sql>
 
@@ -486,8 +492,14 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
                             <foreach collection="hiddenRootIds" item="rid" open="(" separator="," close=")">#{rid}</foreach>)
         </if>
         <if test="hiddenRatings != null and hiddenRatings.size() > 0">
-            and (al.content_rating is null or al.content_rating not in
-            <foreach collection="hiddenRatings" item="rt" open="(" separator="," close=")">#{rt}</foreach>)
+            <!-- P6.28：册的可见性 = 还有至少一张可见的图（图级优先，与 P6.25 的索引口径一致）。
+                 原来按册级一刀切，会把「册=限制、里面有几张大众」的册判成不可见，人物因此整条消失。 -->
+            and exists (select 1 from media_photo vp
+                         where vp.album_id = al.id
+                           and coalesce(vp.missing, 0) = 0
+                           and coalesce(vp.hidden, 0) = 0
+                           and coalesce(vp.content_rating, al.content_rating) not in
+                           <foreach collection="hiddenRatings" item="rt" open="(" separator="," close=")">#{rt}</foreach>)
         </if>
     </sql>
 
@@ -496,25 +508,32 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
                (select count(distinct a.video_id)
                   from media_video_actor a
                   join media_video v on v.id = a.video_id
-                 where a.person_id = p.id and v.hidden = 0
+                 where a.person_id = p.id and v.hidden = 0 and v.review_state = 'approved'
                 <include refid="guestVideoVisible"/>) as videoCount,
                (select count(*)
                   from media_album al
-                 where al.hidden = 0
+                 where al.hidden = 0 and al.review_state = 'approved'
                    and (al.person_id = p.id
                         or exists (select 1 from media_album_person ap
                                     where ap.album_id = al.id and ap.person_id = p.id))
                 <include refid="guestAlbumVisible"/>) as albumCount,
-               ((select coalesce(sum(al.photo_count), 0)
-                   from media_album al
-                  where al.hidden = 0
-                    and (al.person_id = p.id
-                         or exists (select 1 from media_album_person ap
-                                     where ap.album_id = al.id and ap.person_id = p.id))
-                <include refid="guestAlbumVisible"/>)) as photoCount,
+               (select count(*)
+                  from media_album al
+                  join media_photo vp on vp.album_id = al.id
+                 where al.hidden = 0 and al.review_state = 'approved'
+                   and coalesce(vp.missing, 0) = 0
+                   and coalesce(vp.hidden, 0) = 0
+                   and (al.person_id = p.id
+                        or exists (select 1 from media_album_person ap
+                                    where ap.album_id = al.id and ap.person_id = p.id))
+                <include refid="guestAlbumVisible"/>
+                <if test="hiddenRatings != null and hiddenRatings.size() > 0">
+                   and coalesce(vp.content_rating, al.content_rating) not in
+                   <foreach collection="hiddenRatings" item="rt" open="(" separator="," close=")">#{rt}</foreach>
+                </if>) as photoCount,
                (select al.cover_path
                   from media_album al
-                 where al.hidden = 0
+                 where al.hidden = 0 and al.review_state = 'approved'
                    and (al.person_id = p.id
                         or exists (select 1 from media_album_person ap
                                     where ap.album_id = al.id and ap.person_id = p.id))
@@ -523,7 +542,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
                  limit 1) as coverPath,
                (select v.id
                   from media_video v
-                 where v.hidden = 0
+                 where v.hidden = 0 and v.review_state = 'approved'
                    and exists (select 1 from media_video_actor a where a.video_id = v.id and a.person_id = p.id)
                 <include refid="guestVideoVisible"/>
                  order by v.folder asc, v.title asc, v.id asc
@@ -546,3 +565,6 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </select>
 
 </mapper>
+
+
+

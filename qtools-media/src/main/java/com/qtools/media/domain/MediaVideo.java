@@ -98,6 +98,12 @@ public class MediaVideo
     /** 最后一次在磁盘上看到该文件的扫描时间（缺失行即「最后 seen」） */
     private Date lastSeen;
 
+    /** 列表展示：演员/人物名聚合串（由 MediaAdminMapper.xml 的子查询填充，不是表列） */
+    private String personText;
+
+    /** 列表展示：工作室名聚合串（同上） */
+    private String studioText;
+
     /**
      * 人工评分 0-100（100 最好；<b>null = 未评分</b>，0 是有效的最低分）
      *
@@ -119,6 +125,9 @@ public class MediaVideo
      * {@code media_rating_policy} 里是不是 guest_visible=0」——两者都通过才可见。</p>
      */
     private String contentRating;
+
+    /** P6.35：审核状态 pending/approved/rejected */
+    private String reviewState;
 
     /**
      * 作品简介 / 剧情梗概（P5.38，长文本，保留换行；{@code null} = 没有简介）
@@ -348,6 +357,15 @@ public class MediaVideo
     {
         return contentRating;
     }
+    public String getReviewState()
+    {
+        return reviewState;
+    }
+
+    public void setReviewState(String reviewState)
+    {
+        this.reviewState = reviewState;
+    }
 
     public void setContentRating(String contentRating)
     {
@@ -383,4 +401,28 @@ public class MediaVideo
     {
         this.lastSeen = lastSeen;
     }
+
+    /** 列表展示用：演员 / 人物名的聚合串（管理端列表「人物」列） */
+    public String getPersonText()
+    {
+        return personText;
+    }
+
+    public void setPersonText(String personText)
+    {
+        this.personText = personText;
+    }
+
+    /** 列表展示用：工作室名的聚合串（管理端列表「工作室」列） */
+    public String getStudioText()
+    {
+        return studioText;
+    }
+
+    public void setStudioText(String studioText)
+    {
+        this.studioText = studioText;
+    }
 }
+
+

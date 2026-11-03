@@ -12,6 +12,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
 import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
+import javax.imageio.ImageReader;
 import javax.imageio.ImageWriteParam;
 import javax.imageio.ImageWriter;
 import javax.imageio.stream.ImageOutputStream;
@@ -179,7 +180,7 @@ public final class MediaAvatarCrop
                 return out;
             }
             Files.createDirectories(dir);
-            BufferedImage image = ImageIO.read(src.toFile());
+            BufferedImage image = readForCrop(src, MAX_SOURCE_DIM);
             if (image == null)
             {
                 throw new IOException("源图不是可解码的图片: " + src);
@@ -193,6 +194,64 @@ public final class MediaAvatarCrop
             // 裁剪失败不能让头像 404：退回整图，用户看到的是「没裁」，不是「没有头像」
             log.warn("头像裁剪失败，退回整图 src={} crop={} err={}", src, crop, e.getMessage());
             return src;
+        }
+    }
+
+    /**
+     * 源图上限边长（像素）
+     *
+     * <p>头像显示 150–200 CSS px、人物卡背景最宽 1200 px，源图 2400 px 已经足够；
+     * 原图动辄 6000×8000，整张 {@code ImageIO.read} 会瞬间吃掉一两百 MB 堆内存。</p>
+     */
+    private static final int MAX_SOURCE_DIM = 2400;
+
+    /**
+     * 按上限做「源采样」读图（P6.08）
+     *
+     * <p>原图直接交给 {@link ImageIO#read} 是全尺寸解码；这里用 {@code setSourceSubsampling}
+     * 让解码器隔行隔列取样，6000px 的图只解出 ~2400px 的位图，内存与耗时都降一个量级，
+     * 而裁出来的头像仍远大于显示尺寸。解码器不支持采样时退回普通读。</p>
+     */
+    public static BufferedImage readForCrop(Path src, int maxDim)
+    {
+        try (javax.imageio.stream.ImageInputStream in = ImageIO.createImageInputStream(src.toFile()))
+        {
+            if (in == null)
+            {
+                return null;
+            }
+            java.util.Iterator<ImageReader> readers = ImageIO.getImageReaders(in);
+            if (!readers.hasNext())
+            {
+                return ImageIO.read(src.toFile());
+            }
+            ImageReader reader = readers.next();
+            try
+            {
+                reader.setInput(in, true, true);
+                int w = reader.getWidth(0);
+                int h = reader.getHeight(0);
+                int step = Math.max(1, (int) Math.ceil((double) Math.max(w, h) / Math.max(1, maxDim)));
+                javax.imageio.ImageReadParam param = reader.getDefaultReadParam();
+                param.setSourceSubsampling(step, step, 0, 0);
+                return reader.read(0, param);
+            }
+            finally
+            {
+                reader.dispose();
+            }
+        }
+        catch (IOException | RuntimeException e)
+        {
+            log.debug("按源采样读图失败，退回普通读 src={}：{}", src, e.getMessage());
+            try
+            {
+                return ImageIO.read(src.toFile());
+            }
+            catch (IOException again)
+            {
+                return null;
+            }
         }
     }
 

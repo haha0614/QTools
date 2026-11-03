@@ -211,6 +211,10 @@ public class MediaScanIngestServiceImpl implements IMediaScanIngestService
     @Autowired
     private MediaScanGate mediaScanGate;
 
+    /** P6.27：扫描完成后补素人兜底 */
+    @Autowired
+    private MediaPersonFallbackService mediaPersonFallbackService;
+
     /**
      * 维护任务执行器：流水线后续阶段（补哈希 / 缩略图 / 精灵图预览）<b>整段交给它跑</b>，
      * 不自己拼命令行——命令白名单、超时、MS_MYSQL / MS_FFPROBE 注入、进度解析都在那边，
@@ -1400,6 +1404,18 @@ public class MediaScanIngestServiceImpl implements IMediaScanIngestService
 
     private void finish(Job job, Integer exit, long begin)
     {
+        // P6.27：扫描入库后补「素人兜底」——不允许留下没有人物归属的视频 / 相册
+        if (!job.cancelRequested && exit != null && exit == 0)
+        {
+            try
+            {
+                mediaPersonFallbackService.ensureFallback();
+            }
+            catch (RuntimeException e)
+            {
+                log.warn("素人兜底失败（不影响扫描结果）: {}", e.getMessage());
+            }
+        }
         String status;
         String reason = null;
         if (job.cancelRequested)
@@ -2012,3 +2028,5 @@ public class MediaScanIngestServiceImpl implements IMediaScanIngestService
         }
     }
 }
+
+
