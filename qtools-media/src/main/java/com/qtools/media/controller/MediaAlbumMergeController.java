@@ -775,8 +775,12 @@ public class MediaAlbumMergeController
     {
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         List<Map<String, Object>> rows = jdbc.queryForList(
+                /* P6.259：取“最后一段之前”的半截路径。旧写法用 length()（字节数）配 locate()，
+                   遇到中文路径算出来是错的 —— 会把文件名截一半混进目录名，
+                   于是「按目录归册」拿这个错目录去 claim，后端查不到照片直接 400。
+                   改用 char_length() + substring_index，按**字符**算。 */
                 "select case when locate('/', rel_path) > 0"
-                        + " then substring(rel_path, 1, length(rel_path) - locate('/', reverse(rel_path)))"
+                        + " then left(rel_path, char_length(rel_path) - char_length(substring_index(rel_path, '/', -1)) - 1)"
                         + " else '' end as dir,"
                         + " count(*) as photos, coalesce(sum(bytes), 0) as bytes,"
                         + " min(root_id) as rootId"
