@@ -63,9 +63,16 @@ public class SliderCaptchaController
     @Autowired
     private ISysConfigService configService;
 
+    @Autowired
+    private CaptchaRateLimiter rateLimiter;
+
     @GetMapping("/captchaSlider")
-    public AjaxResult create() throws IOException
+    public AjaxResult create(jakarta.servlet.http.HttpServletRequest request) throws IOException
     {
+        if (!rateLimiter.allowImage(request))
+        {
+            return AjaxResult.error("请求过于频繁，请稍后再试");
+        }
         Map<String, Object> data = new HashMap<>();
         boolean enabled = configService.selectCaptchaEnabled();
         data.put("captchaEnabled", enabled);
@@ -119,8 +126,12 @@ public class SliderCaptchaController
     }
 
     @PostMapping("/captchaSliderVerify")
-    public AjaxResult verify(@RequestBody Map<String, Object> body)
+    public AjaxResult verify(@RequestBody Map<String, Object> body, jakarta.servlet.http.HttpServletRequest request)
     {
+        if (!rateLimiter.allowVerify(request))
+        {
+            return AjaxResult.error("请求过于频繁，请稍后再试");
+        }
         String uuid = body.get("uuid") == null ? "" : String.valueOf(body.get("uuid"));
         int offset = body.get("x") == null ? -9999 : (int) Double.parseDouble(String.valueOf(body.get("x")));
 

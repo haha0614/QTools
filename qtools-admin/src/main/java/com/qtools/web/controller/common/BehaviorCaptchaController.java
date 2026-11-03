@@ -37,9 +37,16 @@ public class BehaviorCaptchaController
     @Autowired
     private ISysConfigService configService;
 
+    @Autowired
+    private CaptchaRateLimiter rateLimiter;
+
     @GetMapping("/captchaBehavior")
-    public AjaxResult create()
+    public AjaxResult create(jakarta.servlet.http.HttpServletRequest request)
     {
+        if (!rateLimiter.allowImage(request))
+        {
+            return AjaxResult.error("请求过于频繁，请稍后再试");
+        }
         Map<String, Object> data = new HashMap<>();
         boolean enabled = configService.selectCaptchaEnabled();
         data.put("captchaEnabled", enabled);
@@ -54,8 +61,12 @@ public class BehaviorCaptchaController
 
     @SuppressWarnings("unchecked")
     @PostMapping("/captchaBehaviorVerify")
-    public AjaxResult verify(@RequestBody Map<String, Object> body)
+    public AjaxResult verify(@RequestBody Map<String, Object> body, jakarta.servlet.http.HttpServletRequest request)
     {
+        if (!rateLimiter.allowVerify(request))
+        {
+            return AjaxResult.error("请求过于频繁，请稍后再试");
+        }
         String uuid = body.get("uuid") == null ? "" : String.valueOf(body.get("uuid"));
         if (uuid.isEmpty())
         {
