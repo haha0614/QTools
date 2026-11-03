@@ -419,6 +419,10 @@ public class MediaAlbumMergeController
         {
             policy = "keep";
         }
+        /* P6.254：插入位置。append（默认）= 追加到末尾，是搬进别的册的自然语义；
+           keep = 尽量保留照片原 seq（冲突则顺延），用于移回原册 / 纠正误操作。 */
+        String position = text(body.get("position"));
+        boolean appendSeq = !"keep".equals(position);
         if (!"keep".equals(policy) && !"skip".equals(policy) && !"replace".equals(policy))
         {
             throw new ServiceException("dupPolicy 只能是 keep / skip / replace");
@@ -471,12 +475,12 @@ public class MediaAlbumMergeController
                 none.put("dupPolicy", policy);
                 return none;
             }
-            out = relocate(jdbc, keepRows, target);
+            out = relocate(jdbc, keepRows, target, appendSeq);
             out.put("skipped", skipped);
         }
         else
         {
-            out = relocate(jdbc, rows, target);
+            out = relocate(jdbc, rows, target, appendSeq);
             out.put("skipped", 0);
             if ("replace".equals(policy) && !tw.isEmpty())
             {
@@ -495,6 +499,7 @@ public class MediaAlbumMergeController
             }
         }
         out.put("dupPolicy", policy);
+        out.put("position", appendSeq ? "append" : "keep");
         // 核对用：没有管理端 token 时，这行日志是唯一能证明「接口到底搬了哪几张」的证据
         log.info("按图改归属 target={} policy={} 选中={} 搬移={} 跳过={} 替换={}",
                 target, policy, ids.size(), out.get("moved"), out.get("skipped"), out.get("replaced"));
@@ -926,14 +931,70 @@ public class MediaAlbumMergeController
      */
     private Map<String, Object> relocate(JdbcTemplate jdbc, List<Map<String, Object>> rows, String target)
     {
+        return relocate(jdbc, rows, target, true);
+    }
+
+    /**
+     * @param append true = 追加到目标册末尾（原行为）；false = **尽量保留照片原来的 seq**，
+     *               与目标册已有序号冲突时顺延到末尾。用于「移回原册 / 纠正误操作」——
+     *               追加会让它跳到最后一页，用户会以为图丢了（P6.254）。
+     */
+    private Map<String, Object> relocate(JdbcTemplate jdbc, List<Map<String, Object>> rows, String target, boolean append)
+    {
         int base = nextSeq(jdbc, target);
+        Set<Integer> used = new LinkedHashSet<>();
+        if (!append)
+        {
+            // 目标册已有的 seq：保留原序号时不能和它们撞
+            for (Map<String, Object> row : jdbc.queryForList("select seq from media_photo where album_id = ?", target))
+            {
+                Object v = row.get("seq");
+                if (v != null)
+                {
+                    used.add(Integer.valueOf(String.valueOf(v)));
+                }
+            }
+        }
+        int spill = base;
         Set<String> sources = new LinkedHashSet<>();
         List<Object[]> batch = new ArrayList<>();
         for (int i = 0; i < rows.size(); i++)
         {
             Map<String, Object> r = rows.get(i);
             sources.add(String.valueOf(r.get("album_id")));
-            batch.add(new Object[] { target, Integer.valueOf(base + i), r.get("id") });
+            Integer seq;
+            if (append)
+            {
+                seq = Integer.valueOf(base + i);
+            }
+            else
+            {
+                Integer want = null;
+                Object rawSeq = r.get("seq");
+                if (rawSeq != null)
+                {
+                    try
+                    {
+                        want = Integer.valueOf(String.valueOf(rawSeq).trim());
+                    }
+                    catch (NumberFormatException ignore)
+                    {
+                        want = null;
+                    }
+                }
+                if (want == null || used.contains(want))
+                {
+                    while (used.contains(Integer.valueOf(spill)))
+                    {
+                        spill++;
+                    }
+                    want = Integer.valueOf(spill);
+                    spill++;
+                }
+                used.add(want);
+                seq = want;
+            }
+            batch.add(new Object[] { target, seq, r.get("id") });
         }
         // moved 取「实际更新了几行」而不是「打算更新几行」：批量写如果一行都没命中，
         // 返回 rows.size() 会让界面报成功、库里却什么都没变（P6.51 踩过一次）
