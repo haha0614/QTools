@@ -834,16 +834,25 @@ public class MediaAlbumMergeController
                 + " note, sort, hidden, dir_key, identity_key, source, confirmed, review_state)"
                 + " values (?, null, ?, ?, 0, 0, null, '', 0, 0, ?, '*', 'manual', 1, 'approved')",
                 id, title, dir, dir);
-        // 规则：同目录后续自动认领（不带前缀 = 同目录全部文件）
-        try
+        /* P6.258：建不建归属规则交给调用方决定。
+           规则会**改变以后扫描的行为**（同目录新文件自动归到这里），
+           有人只想“把已有这几张收进一本册”，不想让后续扫描自动认领。 */
+        Object rawCreateRule = body.get("createRule");
+        boolean createRule = rawCreateRule == null || Boolean.parseBoolean(String.valueOf(rawCreateRule));
+        int ruleCreated = 0;
+        if (createRule)
         {
-            jdbc.update("insert ignore into media_album_rule (album_id, dir_pattern, file_prefix, priority, note)"
-                    + " values (?, ?, null, 100, '未归类一键建册')", id, dir);
-        }
-        catch (RuntimeException e)
-        {
-            // 规则表缺失不该让这次归册失败：先归上，规则留给运维补
-            log.warn("建规则失败（album={} dir={}）：{}", id, dir, e.getMessage());
+            // 规则：同目录后续自动认领（不带前缀 = 同目录全部文件）
+            try
+            {
+                ruleCreated = jdbc.update("insert ignore into media_album_rule (album_id, dir_pattern, file_prefix, priority, note)"
+                        + " values (?, ?, null, 100, '未归类一键建册')", id, dir);
+            }
+            catch (RuntimeException e)
+            {
+                // 规则表缺失不该让这次归册失败：先归上，规则留给运维补
+                log.warn("建规则失败（album={} dir={}）：{}", id, dir, e.getMessage());
+            }
         }
         // 按 rel_path 顺序落 seq（P6.47 起 (album_id,seq) 只是普通索引，不会撞唯一键）
         for (int i = 0; i < rows.size(); i++)
@@ -860,7 +869,9 @@ public class MediaAlbumMergeController
         out.put("title", title);
         out.put("dir", dir);
         out.put("moved", Integer.valueOf(rows.size()));
-        log.info("未归类一键建册：dir={} album={} title={} 移入 {} 张", dir, id, title, rows.size());
+        out.put("ruleCreated", Integer.valueOf(ruleCreated));
+        log.info("未归类一键建册：dir={} album={} title={} 移入 {} 张 规则={}", dir, id, title, rows.size(),
+                createRule ? "已建" : "未建");
         return out;
     }
 
