@@ -112,15 +112,17 @@ public class SysLoginService
         boolean captchaEnabled = configService.selectCaptchaEnabled();
         if (captchaEnabled)
         {
-            String verifyKey = CacheConstants.CAPTCHA_CODE_KEY + StringUtils.nvl(uuid, "");
-            String captcha = redisCache.getCacheObject(verifyKey);
-            if (captcha == null)
+            // 滑块验证码：拖动通过后服务端发放一次性 permit（放在 code 里），
+            // 这里校验 permit 与 uuid 是否匹配；旧的字符/算术验证码不再参与登录。
+            String permitKey = "slider_ok:" + StringUtils.nvl(uuid, "");
+            String permit = redisCache.getCacheObject(permitKey);
+            if (permit == null)
             {
                 AsyncManager.me().execute(AsyncFactory.recordLogininfor(username, Constants.LOGIN_FAIL, MessageUtils.message("user.jcaptcha.expire")));
                 throw new CaptchaExpireException();
             }
-            redisCache.deleteObject(verifyKey);
-            if (!code.equalsIgnoreCase(captcha))
+            redisCache.deleteObject(permitKey);
+            if (!StringUtils.nvl(code, "").equals(permit))
             {
                 AsyncManager.me().execute(AsyncFactory.recordLogininfor(username, Constants.LOGIN_FAIL, MessageUtils.message("user.jcaptcha.error")));
                 throw new CaptchaException();
