@@ -35,6 +35,9 @@ public class ToolInfo extends BaseEntity
     @JsonProperty("icon")
     private String icon;
 
+    /** 分类：text / encode / generate / security / media（前端分类 chips 直接读它，不再按 id 硬编码） */
+    private String category;
+
     /** 显示顺序（升序） */
     @JsonProperty("sort")
     private Integer sort;
@@ -98,6 +101,16 @@ public class ToolInfo extends BaseEntity
     public void setIcon(String icon)
     {
         this.icon = icon;
+    }
+
+    public String getCategory()
+    {
+        return category;
+    }
+
+    public void setCategory(String category)
+    {
+        this.category = category;
     }
 
     public Integer getSort()

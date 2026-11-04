@@ -10,6 +10,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="toolDesc"    column="tool_desc"    />
         <result property="toolRoute"    column="tool_route"    />
         <result property="icon"    column="icon"    />
+        <result property="category"    column="category"    />
         <result property="sort"    column="sort"    />
         <result property="status"    column="status"    />
         <result property="createTime"    column="create_time"    />
@@ -19,7 +20,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <!-- 访问次数用相关子查询统计（工具数量少，无需 join 分组；tool_visit.tool_id 已有索引） -->
     <sql id="selectToolInfoVo">
-        select t.id, t.tool_name, t.tool_desc, t.tool_route, t.icon, t.sort, t.status, t.create_time, t.update_time,
+        select t.id, t.tool_name, t.tool_desc, t.tool_route, t.icon, t.category, t.sort, t.status, t.create_time, t.update_time,
                (select count(*) from tool_visit v where v.tool_id = t.id) as visit_count
         from tool_info t
     </sql>
@@ -48,6 +49,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="toolDesc != null">tool_desc,</if>
             <if test="toolRoute != null and toolRoute != ''">tool_route,</if>
             <if test="icon != null">icon,</if>
+            <if test="category != null">category,</if>
             <if test="sort != null">sort,</if>
             <if test="status != null">status,</if>
             <if test="createTime != null">create_time,</if>
@@ -58,6 +60,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="toolDesc != null">#{toolDesc},</if>
             <if test="toolRoute != null and toolRoute != ''">#{toolRoute},</if>
             <if test="icon != null">#{icon},</if>
+            <if test="category != null">#{category},</if>
             <if test="sort != null">#{sort},</if>
             <if test="status != null">#{status},</if>
             <if test="createTime != null">#{createTime},</if>
@@ -72,6 +75,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="toolDesc != null">tool_desc = #{toolDesc},</if>
             <if test="toolRoute != null and toolRoute != ''">tool_route = #{toolRoute},</if>
             <if test="icon != null">icon = #{icon},</if>
+            <if test="category != null">category = #{category},</if>
             <if test="sort != null">sort = #{sort},</if>
             <if test="status != null">status = #{status},</if>
             <if test="createTime != null">create_time = #{createTime},</if>
