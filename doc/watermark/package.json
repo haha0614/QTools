@@ -1,0 +1,9 @@
+{
+  "name": "qtools-watermark",
+  "private": true,
+  "type": "module",
+  "description": "抖音无水印取数侧车（playwright-core 驱动本机 Chrome）",
+  "dependencies": {
+    "playwright-core": "^1.49.0"
+  }
+}

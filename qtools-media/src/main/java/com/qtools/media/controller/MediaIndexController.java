@@ -76,6 +76,21 @@ public class MediaIndexController
         }
     }
 
+    /**
+     * 当前访问者可见的内容分级清单（P6.99）：{@code [{value,label}]}
+     *
+     * <p>站端筛选条需要「这个访客能看到哪几档」，原来只能靠整包索引的 {@code ratings[]}。
+     * 人物详情页深链直达时为了画一条筛选条去拉 2.7MB 的索引不划算，所以单独给一条轻量接口。</p>
+     *
+     * <p>{@code count} 刻意不出现：条目数是每一页各自数出来的（视频页数视频、相册页数相册），
+     * 这里给不出一个对所有页面都正确的数 —— 给错数字比不给更糟。</p>
+     */
+    @GetMapping("/ratings")
+    public java.util.List<java.util.Map<String, Object>> ratings()
+    {
+        return mediaIndexService.stationRatingOptions();
+    }
+
     /** 单片详情（含 tags/actors） */
     @GetMapping("/video/{id}")
     public Map<String, Object> video(@PathVariable("id") String id)

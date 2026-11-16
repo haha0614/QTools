@@ -72,6 +72,12 @@
             <artifactId>qtools-app</artifactId>
         </dependency>
 
+        <!-- 短链服务（P6.264）：不加这条，admin 打包时不会带上该模块的 Bean，接口会 404 -->
+        <dependency>
+            <groupId>com.qtools</groupId>
+            <artifactId>qtools-short</artifactId>
+        </dependency>
+
     </dependencies>
 
     <build>

@@ -19,12 +19,14 @@ import com.qtools.common.annotation.Anonymous;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.service.IMediaEditPolicyService;
 import com.qtools.media.service.IMediaOrganizeService;
+import com.qtools.media.service.IMediaPersonCoverService;
 import com.qtools.media.service.IMediaPersonService;
 import com.qtools.media.service.IMediaSynopsisService;
 import static com.qtools.media.support.MediaBodyParser.booleanValue;
 import static com.qtools.media.support.MediaBodyParser.longsValue;
 import static com.qtools.media.support.MediaBodyParser.metaPatch;
 import static com.qtools.media.support.MediaBodyParser.optionalDecimalValue;
+import static com.qtools.media.support.MediaBodyParser.stringValue;
 import static com.qtools.media.support.MediaBodyParser.parseObject;
 import static com.qtools.media.support.MediaBodyParser.rolesValue;
 import static com.qtools.media.support.MediaBodyParser.stringValue;
@@ -93,6 +95,10 @@ public class MediaEditController
     /** 站端演员（人物）绑定与现场建人：业务实现全部在 {@link IMediaPersonService}，本类只加闸门（P5.3-A） */
     @Autowired
     private IMediaPersonService mediaPersonService;
+
+    /** 四个视图各自的封面设置（P6.101） */
+    @Autowired
+    private IMediaPersonCoverService mediaPersonCoverService;
 
     /** 作品简介自动生成（P5.47）：站端只用一个「⚡ 自动生成」按钮，业务全部在服务层 */
     @Autowired
@@ -299,6 +305,40 @@ public class MediaEditController
         log.debug("站端保存人物背景调整 id={} scale={} dx={} dy={}", id, body.get("scale"), body.get("dx"),
                 body.get("dy"));
         return out;
+    }
+
+    /**
+     * 站端保存「某个视图」的封面（P6.101）：body {@code {kind, ref?, scale?, dx?, dy?}}
+     *
+     * <p>四个视图（poster / hero / masonry / compact）各自独立，互不影响；
+     * 写的是 {@code scope=user} 这一层，管理端配的 {@code default} 还在下面兜底。
+     * 闸门与其它站端写接口同一句 {@code requireWritable()}；人物不存在 → 404，
+     * 视图 / 图源非法 → 400。</p>
+     *
+     * @return {@code {views: {poster: {kind, ref, scale, dx, dy, source}, …}}}
+     */
+    @PutMapping("/person/{id}/view/{view}")
+    public Map<String, Object> setPersonViewCover(@PathVariable("id") Long id, @PathVariable("view") String view,
+            @RequestBody(required = false) String rawBody)
+    {
+        mediaEditPolicyService.requireWritable();
+        Map<String, Object> body = parseObject(rawBody, true);
+        Map<String, Object> views = mediaPersonCoverService.save(id, view, IMediaPersonCoverService.SCOPE_USER,
+                stringValue(body.get("kind")), stringValue(body.get("ref")),
+                optionalDecimalValue(body.get("scale"), "scale"), optionalDecimalValue(body.get("dx"), "dx"),
+                optionalDecimalValue(body.get("dy"), "dy"));
+        log.debug("站端保存人物封面 id={} view={} kind={}", id, view, body.get("kind"));
+        return Map.of("views", views);
+    }
+
+    /** 站端清除某个视图的用户封面（P6.101）：{@code DELETE /media/person/{id}/view/{view}} → 回落到管理端默认 */
+    @DeleteMapping("/person/{id}/view/{view}")
+    public Map<String, Object> clearPersonViewCover(@PathVariable("id") Long id, @PathVariable("view") String view)
+    {
+        mediaEditPolicyService.requireWritable();
+        Map<String, Object> views = mediaPersonCoverService.clear(id, view, IMediaPersonCoverService.SCOPE_USER);
+        log.debug("站端清除人物封面 id={} view={}", id, view);
+        return Map.of("views", views);
     }
 
     /** 站端重置人物卡背景调整（P5.89）：{@code DELETE /media/person/{id}/bg} → 三键不再出现在回包里 */

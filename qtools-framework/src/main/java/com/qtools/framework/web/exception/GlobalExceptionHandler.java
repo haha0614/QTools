@@ -1,10 +1,13 @@
 package com.qtools.framework.web.exception;
 
 import java.io.IOException;
+import java.util.Map;
 
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.validation.BindException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
@@ -17,6 +20,7 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 import com.qtools.common.constant.HttpStatus;
 import com.qtools.common.core.domain.AjaxResult;
 import com.qtools.common.core.text.Convert;
+import com.qtools.common.exception.AppUnauthorizedException;
 import com.qtools.common.exception.DemoModeException;
 import com.qtools.common.exception.ServiceException;
 import com.qtools.common.utils.ClientAbortUtils;
@@ -42,6 +46,21 @@ public class GlobalExceptionHandler
         String requestURI = request.getRequestURI();
         log.error("请求地址'{}',权限校验失败'{}'", requestURI, e.getMessage());
         return AjaxResult.error(HttpStatus.FORBIDDEN, "没有权限，请联系管理员授权");
+    }
+
+    /**
+     * 用户端未登录（{@code @CurrentAppUser} 解析不到账号）
+     *
+     * <p>必须给出用户端契约的形状（真 401 + {@code {"error":"..."}}）：控制器不在
+     * {@code com.qtools.app.controller} 下时 {@code AppExceptionHandler} 管不到，落到其它分支会变成
+     * {@code HTTP 200 + {code,msg}}，前端会把「未登录」当成「请求成功但没有数据」。</p>
+     */
+    @ExceptionHandler(AppUnauthorizedException.class)
+    public ResponseEntity<Map<String, String>> handleAppUnauthorized(AppUnauthorizedException e, HttpServletRequest request)
+    {
+        log.debug("用户端未登录 {} {} -> {}", request.getMethod(), request.getRequestURI(), e.getMessage());
+        String message = e.getMessage() == null ? "未登录或登录已过期" : e.getMessage();
+        return ResponseEntity.status(401).contentType(MediaType.APPLICATION_JSON).body(Map.of("error", message));
     }
 
     /**

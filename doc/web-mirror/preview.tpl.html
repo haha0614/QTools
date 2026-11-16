@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>工具原型 · 内容聚合</title>
+<style>
+  :root{--bg:#0f1115;--panel:#161a20;--line:#252b34;--fg:#e8ecf2;--dim:#8b94a3;--accent:#3b82f6;--accent-soft:#1e3a8a33}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  header{position:sticky;top:0;z-index:5;background:rgba(15,17,21,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:14px 24px}
+  .h1{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:600}
+  .badge{font-size:11px;padding:2px 8px;border-radius:999px;background:var(--accent-soft);color:#93c5fd}
+  .badge.ok{background:#16a34a22;color:#86efac}
+  .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
+  .chip{font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--dim);cursor:pointer}
+  .chip.on{background:var(--accent-soft);border-color:transparent;color:#93c5fd}
+  input.search{margin-left:auto;width:240px;padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:#1b2027;color:var(--fg);outline:none}
+  main{padding:18px 24px 20px}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;cursor:pointer;transition:.18s;display:flex;flex-direction:column}
+  .card:hover{border-color:var(--accent);transform:translateY(-2px)}
+  .cover{position:relative;aspect-ratio:16/10;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:600;font-size:13px;letter-spacing:.5px}
+  .play{position:absolute;right:10px;bottom:10px;width:30px;height:30px;border-radius:50%;background:rgba(8,10,14,.62);border:1px solid rgba(255,255,255,.28);display:flex;align-items:center;justify-content:center;font-size:11px}
+  .body{padding:10px 12px 12px}
+  .title{font-size:13.5px;line-height:1.45;height:2.9em;overflow:hidden}
+  .tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}
+  .tag{font-size:10.5px;padding:1px 7px;border-radius:999px;background:#ffffff14;color:#cfd6e2}
+  .meta{margin-top:8px;color:var(--dim);font-size:11.5px;display:flex;justify-content:space-between}
+  .mask{position:fixed;inset:0;background:rgba(6,8,12,.72);display:none;align-items:center;justify-content:center;padding:24px;z-index:20}
+  .mask.on{display:flex}
+  .sheet{width:min(880px,100%);max-height:calc(100vh - 48px);overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:14px}
+  .player{aspect-ratio:16/9;background:radial-gradient(120% 120% at 30% 20%,#1d2430,#0b0e13);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--dim);border-bottom:1px solid var(--line);text-align:center;padding:0 20px}
+  .player .big{width:64px;height:64px;border-radius:50%;border:1px solid #ffffff2e;display:flex;align-items:center;justify-content:center;font-size:20px;color:#e8ecf2}
+  .detail{padding:16px 18px 20px}
+  .detail h2{margin:0 0 8px;font-size:17px;line-height:1.5}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .btn{padding:7px 14px;border-radius:9px;border:1px solid var(--line);background:transparent;color:var(--dim);font-size:13px;cursor:pointer}
+  .foot{padding:0 24px 40px;color:var(--dim);font-size:12px;line-height:1.9}
+</style>
+</head>
+<body>
+<header>
+  <div class="h1">每日大赛 · 内容聚合 <span class="badge">原型</span> <span class="badge ok">无广告</span></div>
+  <div class="filters" id="filters"></div>
+</header>
+<main><div class="grid" id="grid"></div></main>
+<div class="foot">
+  这是<b>承载页原型</b>：内容来自源站，但页面是我们自己的 —— 去广告、我们的分类与标签、我们的收藏与播放进度。<br>
+  正式版接播放代理：点播放时后端实时换取签名地址，前端用我们自己的播放器播放（倍速 / 记忆进度 / 画中画）。<br>
+  数据：本轮真实抓取的 __COUNT__ 条条目（标题、标签、日期、分类均来自源站，封面暂用色块占位）。
+</div>
+<div class="mask" id="mask"><div class="sheet">
+  <div class="player"><div class="big">▶</div><div>播放器接这里：后端取签名 m3u8 → 反代分片 → hls.js</div></div>
+  <div class="detail">
+    <h2 id="dTitle"></h2>
+    <div class="tags" id="dTags"></div>
+    <div class="row"><span class="tag" id="dMeta"></span></div>
+    <div class="row">
+      <button class="btn">☆ 收藏（待接）</button>
+      <button class="btn">⬇ 下载入库（待接）</button>
+      <button class="btn">⏱ 继续上次进度（待接）</button>
+      <button class="btn" id="dClose">关闭</button>
+    </div>
+  </div>
+</div></div>
+<script>
+const ITEMS = __ITEMS__;
+const CATS = ['全部'].concat(Array.from(new Set(ITEMS.map(function (i) { return i.category; }))));
+const TAGS = Array.from(new Set(ITEMS.flatMap(function (i) { return i.tags; }))).slice(0, 14);
+var cat = '全部', tag = '', q = '';
+var filters = document.getElementById('filters');
+
+function renderFilters() {
+  filters.innerHTML = '';
+  CATS.forEach(function (c) {
+    var b = document.createElement('button');
+    b.className = 'chip' + (c === cat && !tag ? ' on' : '');
+    b.textContent = c;
+    b.onclick = function () { cat = c; tag = ''; renderFilters(); render(); };
+    filters.appendChild(b);
+  });
+  var sep = document.createElement('span');
+  sep.style.cssText = 'width:1px;height:16px;background:#252b34;margin:0 4px';
+  filters.appendChild(sep);
+  TAGS.forEach(function (t) {
+    var b = document.createElement('button');
+    b.className = 'chip' + (t === tag ? ' on' : '');
+    b.textContent = '#' + t;
+    b.onclick = function () { tag = tag === t ? '' : t; renderFilters(); render(); };
+    filters.appendChild(b);
+  });
+  var s = document.createElement('input');
+  s.className = 'search';
+  s.placeholder = '搜索标题 / 标签…';
+  s.value = q;
+  s.oninput = function (e) { q = e.target.value.trim(); render(); };
+  filters.appendChild(s);
+}
+
+function render() {
+  var grid = document.getElementById('grid');
+  var list = ITEMS.filter(function (i) {
+    var okCat = cat === '全部' || i.category === cat;
+    var okTag = !tag || i.tags.indexOf(tag) >= 0;
+    var okQ = !q || i.title.indexOf(q) >= 0 || i.tags.some(function (t) { return t.indexOf(q) >= 0; });
+    return okCat && okTag && okQ;
+  });
+  grid.innerHTML = list.map(function (i) {
+    var c1 = 'hsl(' + i.hue + ',45%,26%)';
+    var c2 = 'hsl(' + ((i.hue + 40) % 360) + ',40%,16%)';
+    return '<div class="card" data-id="' + i.id + '">' +
+      '<div class="cover" style="background:linear-gradient(135deg,' + c1 + ',' + c2 + ')"><span>' + i.category + '</span><span class="play">▶</span></div>' +
+      '<div class="body"><div class="title">' + i.title + '</div>' +
+      '<div class="tags">' + i.tags.map(function (t) { return '<span class="tag">#' + t + '</span>'; }).join('') + '</div>' +
+      '<div class="meta"><span>#' + i.id + '</span><span>' + i.date + '</span></div></div></div>';
+  }).join('');
+  Array.prototype.forEach.call(grid.querySelectorAll('.card'), function (el) {
+    el.onclick = function () { open(el.getAttribute('data-id')); };
+  });
+}
+
+function open(id) {
+  var i = ITEMS.filter(function (x) { return x.id === id; })[0];
+  if (!i) return;
+  document.getElementById('dTitle').textContent = i.title;
+  document.getElementById('dTags').innerHTML = i.tags.map(function (t) { return '<span class="tag">#' + t + '</span>'; }).join('');
+  document.getElementById('dMeta').textContent = i.category + ' · ' + i.date + ' · 源站 id ' + i.id;
+  document.getElementById('mask').classList.add('on');
+}
+
+document.getElementById('mask').onclick = function (e) { if (e.target.id === 'mask') this.classList.remove('on'); };
+document.getElementById('dClose').onclick = function () { document.getElementById('mask').classList.remove('on'); };
+renderFilters();
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.qtools.shortlink.mapper.ShortLinkMapper">
+    
+    <resultMap type="ShortLink" id="ShortLinkResult">
+        <result property="id"    column="id"    />
+        <result property="shortCode"    column="short_code"    />
+        <result property="longUrl"    column="long_url"    />
+        <result property="urlHash"    column="url_hash"    />
+        <result property="userId"    column="user_id"    />
+        <result property="password"    column="password"    />
+        <result property="expireAt"    column="expire_at"    />
+        <result property="status"    column="status"    />
+        <result property="clicks"    column="clicks"    />
+        <result property="createTime"    column="create_time"    />
+    </resultMap>
+
+    <sql id="selectShortLinkVo">
+        select id, short_code, long_url, url_hash, user_id, password, expire_at, status, clicks, create_time from short_link
+    </sql>
+
+    <select id="selectShortLinkList" parameterType="ShortLink" resultMap="ShortLinkResult">
+        <include refid="selectShortLinkVo"/>
+        <where>  
+            <if test="shortCode != null  and shortCode != ''"> and short_code = #{shortCode}</if>
+            <if test="longUrl != null  and longUrl != ''"> and long_url = #{longUrl}</if>
+            <if test="urlHash != null  and urlHash != ''"> and url_hash = #{urlHash}</if>
+            <if test="userId != null "> and user_id = #{userId}</if>
+            <if test="password != null  and password != ''"> and password = #{password}</if>
+            <if test="expireAt != null "> and expire_at = #{expireAt}</if>
+            <if test="status != null  and status != ''"> and status = #{status}</if>
+            <if test="clicks != null "> and clicks = #{clicks}</if>
+        </where>
+    </select>
+    
+    <select id="selectShortLinkById" parameterType="Long" resultMap="ShortLinkResult">
+        <include refid="selectShortLinkVo"/>
+        where id = #{id}
+    </select>
+    <select id="getShortLinkByShortCode" parameterType="string" resultMap="ShortLinkResult">
+        <include refid="selectShortLinkVo"/>
+        where short_code = #{alias}
+    </select>
+    <select id="getShortLinkByUserIdAndUrlHash" resultMap="ShortLinkResult">
+        <include refid="selectShortLinkVo"/>
+        where user_id = #{userId} and url_hash = #{urlHash}
+    </select>
+
+    <insert id="insertShortLink" parameterType="ShortLink" useGeneratedKeys="true" keyProperty="id">
+        insert into short_link
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="shortCode != null and shortCode != ''">short_code,</if>
+            <if test="longUrl != null and longUrl != ''">long_url,</if>
+            <if test="urlHash != null and urlHash != ''">url_hash,</if>
+            <if test="userId != null">user_id,</if>
+            <if test="password != null">password,</if>
+            <if test="expireAt != null">expire_at,</if>
+            <if test="status != null">status,</if>
+            <if test="clicks != null">clicks,</if>
+            <if test="createTime != null">create_time,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="shortCode != null and shortCode != ''">#{shortCode},</if>
+            <if test="longUrl != null and longUrl != ''">#{longUrl},</if>
+            <if test="urlHash != null and urlHash != ''">#{urlHash},</if>
+            <if test="userId != null">#{userId},</if>
+            <if test="password != null">#{password},</if>
+            <if test="expireAt != null">#{expireAt},</if>
+            <if test="status != null">#{status},</if>
+            <if test="clicks != null">#{clicks},</if>
+            <if test="createTime != null">#{createTime},</if>
+         </trim>
+    </insert>
+
+    <update id="updateShortLink" parameterType="ShortLink">
+        update short_link
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="shortCode != null and shortCode != ''">short_code = #{shortCode},</if>
+            <if test="longUrl != null and longUrl != ''">long_url = #{longUrl},</if>
+            <if test="urlHash != null and urlHash != ''">url_hash = #{urlHash},</if>
+            <if test="userId != null">user_id = #{userId},</if>
+            <if test="password != null">password = #{password},</if>
+            <if test="expireAt != null">expire_at = #{expireAt},</if>
+            <if test="status != null">status = #{status},</if>
+            <if test="clicks != null">clicks = #{clicks},</if>
+            <if test="createTime != null">create_time = #{createTime},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteShortLinkById" parameterType="Long">
+        delete from short_link where id = #{id}
+    </delete>
+
+    <delete id="deleteShortLinkByIds" parameterType="String">
+        delete from short_link where id in 
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>

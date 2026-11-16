@@ -52,6 +52,12 @@
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-lang3</artifactId>
         </dependency>
+
+        <!-- Hutool 纯 JDK 工具（只引 core，不引 hutool-all：后者含 javax.servlet 遗留模块，Boot 3 下是雷） -->
+        <dependency>
+            <groupId>cn.hutool</groupId>
+            <artifactId>hutool-core</artifactId>
+        </dependency>
   
         <!-- JSON工具类 -->
         <dependency>
@@ -112,6 +118,7 @@
             <groupId>jakarta.servlet</groupId>
             <artifactId>jakarta.servlet-api</artifactId>
         </dependency>
+
 
     </dependencies>
 

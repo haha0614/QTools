@@ -1,0 +1,14 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1905, height: 929 } });
+const p = await ctx.newPage();
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'networkidle', timeout: 60000 });
+await p.waitForTimeout(3500);
+const f = await p.evaluate(() => { const s = document.querySelector('.mr-featured'); return s ? [...s.querySelectorAll('.mr-ftitle')].slice(0, 4).map((t) => t.textContent.slice(0, 16)) : null; });
+console.log('featured titles:', JSON.stringify(f));
+await p.locator('.mr-bar .mr-chip', { hasText: '每日大赛' }).first().click();
+await p.waitForTimeout(2500);
+const pin = await p.evaluate(() => { const s = document.querySelector('.mr-pinned'); if (!s) return null; const c = s.querySelector('.mr-pcard'); const r = c && c.getBoundingClientRect(); const sec = s.getBoundingClientRect(); return { cardW: r ? Math.round(r.width) : 0, cardH: r ? Math.round(r.height) : 0, sectionH: Math.round(sec.height) }; });
+console.log('pinned size:', JSON.stringify(pin));
+await p.screenshot({ path: 'E:/111/project/QTools/doc/shots/mrds-featured2.png' });
+await b.close();

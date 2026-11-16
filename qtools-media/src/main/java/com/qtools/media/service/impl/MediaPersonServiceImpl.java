@@ -20,11 +20,13 @@ import com.qtools.media.domain.MediaPerson;
 import com.qtools.media.domain.dto.MediaPersonPatch;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.support.MediaAvatarCrop;
+import com.qtools.media.support.MediaRating;
 import com.qtools.media.mapper.MediaPersonMapper;
 import com.qtools.media.service.IMediaFrameService;
 import com.qtools.media.service.IMediaGuestAccessService;
 import com.qtools.media.service.IMediaIndexService;
 import com.qtools.media.service.IMediaPersonCardBgService;
+import com.qtools.media.service.IMediaPersonCoverService;
 import com.qtools.media.service.IMediaPersonService;
 
 /**
@@ -180,6 +182,10 @@ public class MediaPersonServiceImpl implements IMediaPersonService
      */
     @Autowired
     private IMediaPersonCardBgService mediaPersonCardBgService;
+
+    /** 四个视图各自的封面设置（P6.101）：人物墙与人物详情都要带出去，否则前端只能拿默认头像 */
+    @Autowired
+    private IMediaPersonCoverService mediaPersonCoverService;
 
     /** 后台预热一个人（失败只记日志：预热永远不能影响保存结果） */
     private void warmCardBg(Long id)
@@ -753,7 +759,47 @@ public class MediaPersonServiceImpl implements IMediaPersonService
             }
             out.add(node);
         }
+        attachCovers(out);
         return out;
+    }
+
+    /**
+     * 批量补 {@code views}（P6.101）：一次查询，把每个人物「四个视图各自的封面设置」挂上去
+     *
+     * <p>没设置过的视图不会出现在 {@code views} 里 —— 前端据此回落到自动头像，
+     * 回包也不会被「4 × 15 个空节点」撑胖。</p>
+     */
+    private void attachCovers(List<Map<String, Object>> nodes)
+    {
+        if (nodes == null || nodes.isEmpty() || mediaPersonCoverService == null)
+        {
+            return;
+        }
+        List<Long> ids = new ArrayList<>(nodes.size());
+        for (Map<String, Object> node : nodes)
+        {
+            if (node.get("id") instanceof Number num)
+            {
+                ids.add(Long.valueOf(num.longValue()));
+            }
+        }
+        if (ids.isEmpty())
+        {
+            return;
+        }
+        Map<Long, Map<String, Object>> covers = mediaPersonCoverService.effectiveMapByPersonIds(ids);
+        for (Map<String, Object> node : nodes)
+        {
+            if (!(node.get("id") instanceof Number num))
+            {
+                continue;
+            }
+            Map<String, Object> own = covers.get(Long.valueOf(num.longValue()));
+            if (own != null && !own.isEmpty())
+            {
+                node.put("views", own);
+            }
+        }
     }
 
     /**
@@ -815,7 +861,7 @@ public class MediaPersonServiceImpl implements IMediaPersonService
     }
 
     @Override
-    public Map<String, Object> personVideos(Long id, int page, int size)
+    public Map<String, Object> personVideos(Long id, int page, int size, String rating)
     {
         requirePerson(id);
         int safePage = page < 1 ? 1 : page;
@@ -823,16 +869,17 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         Map<String, Object> out = new LinkedHashMap<>();
         List<Integer> guestHidden = guestHiddenRootIds();
         List<String> guestRatings = guestHiddenRatings();
+        String filter = browseRating(rating);
         out.put("rows", mediaPersonMapper.selectPersonVideoPage(id, (safePage - 1) * safeSize, safeSize,
-                guestHidden, guestRatings));
-        out.put("total", mediaPersonMapper.countPersonVideos(id, guestHidden, guestRatings));
+                guestHidden, guestRatings, filter));
+        out.put("total", mediaPersonMapper.countPersonVideos(id, guestHidden, guestRatings, filter));
         out.put("page", safePage);
         out.put("size", safeSize);
         return out;
     }
 
     @Override
-    public Map<String, Object> personAlbums(Long id, int page, int size)
+    public Map<String, Object> personAlbums(Long id, int page, int size, String rating)
     {
         requirePerson(id);
         int safePage = page < 1 ? 1 : page;
@@ -840,12 +887,34 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         Map<String, Object> out = new LinkedHashMap<>();
         List<Integer> guestHidden = guestHiddenRootIds();
         List<String> guestRatings = guestHiddenRatings();
+        String filter = browseRating(rating);
         out.put("rows", mediaPersonMapper.selectPersonAlbumPage(id, (safePage - 1) * safeSize, safeSize,
-                guestHidden, guestRatings));
-        out.put("total", mediaPersonMapper.countPersonAlbums(id, guestHidden, guestRatings));
+                guestHidden, guestRatings, filter));
+        out.put("total", mediaPersonMapper.countPersonAlbums(id, guestHidden, guestRatings, filter));
         out.put("page", safePage);
         out.put("size", safeSize);
         return out;
+    }
+
+    /**
+     * 浏览筛选用的分级值（P6.99）
+     *
+     * <p>{@code null / 空白 / all / 非法值} 一律返回 {@code null} = 不筛：这是**浏览**筛选，
+     * 不是权限（权限那条路是 {@link #guestHiddenRatings()}），脏值落到「不筛」比落到「只看大众级」
+     * 更不容易让人以为内容丢了。</p>
+     */
+    private static String browseRating(String rating)
+    {
+        if (rating == null)
+        {
+            return null;
+        }
+        String clean = rating.trim().toLowerCase(java.util.Locale.ROOT);
+        if (clean.isEmpty() || "all".equals(clean) || !MediaRating.isValid(clean))
+        {
+            return null;
+        }
+        return clean;
     }
 
     /**
@@ -1047,6 +1116,15 @@ public class MediaPersonServiceImpl implements IMediaPersonService
         putIfNotEmpty(node, "nationality", person.getNationality());
         putIfNotEmpty(node, "twitter", person.getTwitter());
         putIfNotEmpty(node, "instagram", person.getInstagram());
+        // P6.101：四个视图各自的封面设置（没有设置过的视图不出现）
+        if (mediaPersonCoverService != null && person.getId() != null)
+        {
+            Map<String, Object> views = mediaPersonCoverService.effectiveMap(person.getId());
+            if (views != null && !views.isEmpty())
+            {
+                node.put("views", views);
+            }
+        }
         return node;
     }
 

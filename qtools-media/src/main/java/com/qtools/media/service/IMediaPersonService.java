@@ -196,9 +196,14 @@ public interface IMediaPersonService
      */
     Map<String, Object> personDetail(Long id);
 
-    /** 站端某人物名下视频分页 {@code {rows,total,page,size}} */
-    Map<String, Object> personVideos(Long id, int page, int size);
+    /**
+     * 站端某人物名下视频分页 {@code {rows,total,page,size}}
+     *
+     * @param rating 浏览用的分级筛选（{@code general/guidance/restricted}），
+     *               {@code null / all} = 不筛；与访客权限（服务端强制）无关，见 {@code MediaPersonServiceImpl#browseRating}
+     */
+    Map<String, Object> personVideos(Long id, int page, int size, String rating);
 
-    /** 站端某人物名下相册分页 {@code {rows,total,page,size}} */
-    Map<String, Object> personAlbums(Long id, int page, int size);
+    /** 站端某人物名下相册分页 {@code {rows,total,page,size}}；{@code rating} 口径同 {@link #personVideos} */
+    Map<String, Object> personAlbums(Long id, int page, int size, String rating);
 }

@@ -84,6 +84,21 @@ public interface IMediaIndexService
     Map<String, Object> selectVideoMeta(String id);
 
     /**
+     * 当前站端访问者可见的内容分级清单（P6.99）：{@code [{value,label}]}，按展示顺序
+     *
+     * <p>为什么单独一条：人物详情页要渲染分级筛选条，需要知道「这个访客能看到哪几档」，
+     * 而唯一的数据源原本是 {@code /media/index} 的 {@code ratings[]} —— 那是一整包索引
+     * （线上 2.7MB）。深链直接进人物页时为了画一条筛选条去拉整包索引，代价与收益完全不成比例。</p>
+     *
+     * <p>口径与索引 {@code ratings[]} 的<b>可见性</b>部分一致（{@code stationHiddenRatings()}），
+     * 但**不带 count**：计数是「每一页自己数的东西」，索引那份是视频 + 相册合计，
+     * 放在只看视频或只看相册的页面里都会误导（见 {@code RatingFilterBar} 的注释）。</p>
+     *
+     * @return 可见分级，可能为空（三档都不可见时前端不渲染筛选条，一律按「不筛」处理）
+     */
+    java.util.List<java.util.Map<String, Object>> stationRatingOptions();
+
+    /**
      * 丢弃索引快照缓存
      *
      * <p>管理端改了 hidden / 人物归属或跑完扫描后调用：索引本身按 {@code hidden = 0} 过滤，

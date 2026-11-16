@@ -62,6 +62,7 @@ import static com.qtools.media.support.MediaBodyParser.longsValue;
 import static com.qtools.media.support.MediaBodyParser.metaPatch;
 import static com.qtools.media.support.MediaBodyParser.optionalDecimalValue;
 import static com.qtools.media.support.MediaBodyParser.personPatch;
+import com.qtools.media.service.IMediaPersonCoverService;
 import static com.qtools.media.support.MediaBodyParser.rolesValue;
 import static com.qtools.media.support.MediaBodyParser.parseObject;
 import static com.qtools.media.support.MediaBodyParser.stringValue;
@@ -113,6 +114,10 @@ public class MediaAdminController extends BaseController
     /** 人物 / 演员体系（P3-A）：字典 CRUD + 视频/相册人物绑定 */
     @Autowired
     private IMediaPersonService mediaPersonService;
+
+    /** 四个视图各自的封面默认值（P6.101，scope=default） */
+    @Autowired
+    private IMediaPersonCoverService mediaPersonCoverService;
 
     /** 人物卡背景预渲染（P5.90 / 预热 P5.92）：管理与排障用的手动预热入口 */
     @Autowired
@@ -1420,6 +1425,42 @@ public class MediaAdminController extends BaseController
             @RequestBody(required = false) String rawBody)
     {
         return mediaPersonService.updatePerson(id, personPatch(parseObject(rawBody, true)));
+    }
+
+    /**
+     * 设人物「某个视图」的默认封面：{@code PUT /api/media/admin/persons/{id}/view/{view}}
+     *
+     * <p>body {@code {kind, ref?, scale?, dx?, dy?}}，{@code kind} 取 {@code auto / photo / frame}。
+     * 四个视图（poster / hero / masonry / compact）各配一套，写的是 {@code scope=default} 这一层，
+     * 站端用户自己的调整（{@code scope=user}）优先于它；没设过的视图回落到自动头像三档。</p>
+     *
+     * <p>为什么放在管理端：用户口径是「默认值由管理端在人物编辑弹窗里配，并显示预览」——
+     * 默认值对**所有访客**生效，所以它不能走站端的编辑策略闸门，而是走 {@code media:admin:edit} 权限。</p>
+     *
+     * @return {@code {views: {poster: {kind, ref, scale, dx, dy, source}, …}}}（该人物的全部视图设置）
+     */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-人物默认封面", businessType = BusinessType.UPDATE)
+    @PutMapping("/persons/{id}/view/{view}")
+    public Map<String, Object> updatePersonViewCover(@PathVariable("id") Long id,
+            @PathVariable("view") String view, @RequestBody(required = false) String rawBody)
+    {
+        Map<String, Object> body = parseObject(rawBody, true);
+        Map<String, Object> views = mediaPersonCoverService.save(id, view, IMediaPersonCoverService.SCOPE_DEFAULT,
+                stringValue(body.get("kind")), stringValue(body.get("ref")),
+                optionalDecimalValue(body.get("scale"), "scale"), optionalDecimalValue(body.get("dx"), "dx"),
+                optionalDecimalValue(body.get("dy"), "dy"));
+        return Map.of("views", views);
+    }
+
+    /** 清除某视图的默认封面：{@code DELETE /api/media/admin/persons/{id}/view/{view}} → 回到自动头像三档 */
+    @PreAuthorize("@ss.hasPermi('media:admin:edit')")
+    @Log(title = "媒体库-人物默认封面", businessType = BusinessType.DELETE)
+    @DeleteMapping("/persons/{id}/view/{view}")
+    public Map<String, Object> clearPersonViewCover(@PathVariable("id") Long id, @PathVariable("view") String view)
+    {
+        Map<String, Object> views = mediaPersonCoverService.clear(id, view, IMediaPersonCoverService.SCOPE_DEFAULT);
+        return Map.of("views", views);
     }
 
     /**

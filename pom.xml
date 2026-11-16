@@ -31,6 +31,7 @@
         <jwt.version>0.9.1</jwt.version>
         <jaxb-api.version>2.3.1</jaxb-api.version>
         <springdoc.version>2.9.0</springdoc.version>
+        <hutool.version>5.8.48</hutool.version>
     </properties>
 
     <!-- 依赖声明 -->
@@ -135,6 +136,13 @@
                 <version>${kaptcha.version}</version>
             </dependency>
 
+            <!-- 工具类（只引 hutool-core：纯 JDK 工具，避开 hutool-all 里的 javax.servlet 遗留模块） -->
+            <dependency>
+                <groupId>cn.hutool</groupId>
+                <artifactId>hutool-core</artifactId>
+                <version>${hutool.version}</version>
+            </dependency>
+
             <!-- 定时任务-->
             <dependency>
                 <groupId>com.qtools</groupId>
@@ -191,6 +199,13 @@
                 <version>${qtools.version}</version>
             </dependency>
 
+            <!-- 短链服务（P6.264） -->
+            <dependency>
+                <groupId>com.qtools</groupId>
+                <artifactId>qtools-short</artifactId>
+                <version>${qtools.version}</version>
+            </dependency>
+
         </dependencies>
     </dependencyManagement>
 
@@ -204,6 +219,7 @@
         <module>qtools-tool</module>
         <module>qtools-media</module>
         <module>qtools-app</module>
+        <module>qtools-short</module>
     </modules>
     <packaging>pom</packaging>
 

@@ -21,6 +21,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import com.qtools.media.config.MediaProperties;
+import com.qtools.media.support.MediaImageDecode;
 import com.qtools.media.domain.MediaPerson;
 import com.qtools.media.exception.MediaException;
 import com.qtools.media.mapper.MediaPersonMapper;
@@ -728,7 +729,10 @@ public class MediaPersonCardBgServiceImpl implements IMediaPersonCardBgService
             try
             {
                 // P6.08：原图可能有 6000px，按 2400 上限源采样后再裁，避免整张进内存
-                BufferedImage image = MediaAvatarCrop.readForCrop(path, 2400);
+                // P6.99：源图是 WebP 时 ImageIO 解不出来（JRE 没有 WebP 解码器），回退到本机 ffmpeg ——
+                //        否则这些人物的卡片背景会整层 404，前端只剩纯色底
+                String ffmpeg = mediaProperties == null ? null : mediaProperties.getFfmpeg();
+                BufferedImage image = MediaImageDecode.read(path, ffmpeg);
                 if (image == null)
                 {
                     throw MediaException.notFound("头像缩略图不可解码: " + path);

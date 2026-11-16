@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.qtools</groupId>
+        <artifactId>qtools</artifactId>
+        <version>3.9.2</version>
+    </parent>
+
+    <artifactId>qtools-short</artifactId>
+
+    <description>
+        短链服务模块
+    </description>
+
+    <dependencies>
+
+        <!-- 通用工具（已传递提供 spring-web、validation、mybatis、jackson、redis 等依赖） -->
+        <dependency>
+            <groupId>com.qtools</groupId>
+            <artifactId>qtools-common</artifactId>
+        </dependency>
+        <!-- Lombok：编译期注解处理器，运行期不需要 → provided（不进部署包）。
+             谁用谁声明：本模块是唯一使用 lombok 的模块，不要再从 common 借道。 -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- surefire 3.x 才认 JUnit 5；Maven 自带的老版本会「0 tests run」地静默通过 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

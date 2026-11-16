@@ -1,0 +1,20 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1600, height: 1000 } });
+const p = await ctx.newPage();
+await p.route('**/api/tool/web/capabilities', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ owner: true, loggedIn: true, canSaveToMedia: true }) }));
+await p.goto('http://localhost/tool/mrds/post/3305', { waitUntil: 'networkidle', timeout: 60000 });
+await p.waitForTimeout(3000);
+await p.locator('.md-btn', { hasText: '下载' }).first().click();
+await p.waitForTimeout(1000);
+const st = await p.evaluate(() => ({ dialog: !!document.querySelector('.el-dialog'), outerBtns: [...document.querySelectorAll('.md-save-addbtn, .md-save-padd')].map((e) => e.textContent.trim()) }));
+console.log('dialog:', JSON.stringify(st));
+// 人物下拉输入一个库里没有的名字
+await p.locator('.md-save-pname').first().click();
+await p.waitForTimeout(300);
+await p.locator('.md-save-pname input').first().fill('路人甲');
+await p.waitForTimeout(1200);
+const opts = await p.evaluate(() => [...document.querySelectorAll('.el-select-dropdown__item')].map((e) => e.textContent.trim()).slice(0, 6));
+console.log('person options:', JSON.stringify(opts));
+await p.screenshot({ path: 'E:/111/project/QTools/doc/shots/save-dropdown.png' });
+await b.close();

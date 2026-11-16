@@ -1,0 +1,14 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1600, height: 1000 } });
+const p = await ctx.newPage();
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'domcontentloaded', timeout: 60000 });
+await p.waitForTimeout(5000);
+const collapsed = await p.evaluate(() => { const s = document.querySelector('.mr-featured-strip'); const r = s.getBoundingClientRect(); return { h: Math.round(r.height), wrap: getComputedStyle(s).flexWrap, cards: s.querySelectorAll('.mr-fcard').length }; });
+console.log('折叠态:', JSON.stringify(collapsed));
+await p.locator('.mr-featured-toggle').click();
+await p.waitForTimeout(800);
+const expanded = await p.evaluate(() => { const s = document.querySelector('.mr-featured-strip'); const r = s.getBoundingClientRect(); return { h: Math.round(r.height), wrap: getComputedStyle(s).flexWrap, cards: s.querySelectorAll('.mr-fcard').length, pinnedAd: document.body.innerText.includes('获取最新地址') }; });
+console.log('展开态:', JSON.stringify(expanded));
+await p.screenshot({ path: 'E:/111/project/QTools/doc/shots/featured-expanded.png' });
+await b.close();

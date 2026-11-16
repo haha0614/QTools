@@ -1,0 +1,22 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 360, height: 800 } });
+const p = await ctx.newPage();
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'domcontentloaded', timeout: 60000 });
+await p.waitForTimeout(5000);
+const st = await p.evaluate(() => ({ viewsOutside: !!document.querySelector('.mr-bar > .mr-views'), viewsInsidePanel: !!document.querySelector('.mr-more-filters .mr-views') }));
+console.log('views:', JSON.stringify(st));
+await p.locator('.mr-view', { hasText: '列表' }).click();
+await p.waitForTimeout(2000);
+const row = await p.evaluate(() => {
+  const r = document.querySelector('.mr-row');
+  if (!r) return { none: true };
+  const cover = r.querySelector('.mr-row-cover');
+  const meta = r.querySelector('.mr-meta');
+  const title = r.querySelector('.mr-title');
+  const cr = cover.getBoundingClientRect(); const mr = meta.getBoundingClientRect(); const tr = title.getBoundingClientRect();
+  return { coverRight: Math.round(cr.right), titleLeft: Math.round(tr.left), metaTop: Math.round(mr.top), titleTop: Math.round(tr.top), metaH: Math.round(mr.height), rowH: Math.round(r.getBoundingClientRect().height) };
+});
+console.log('row:', JSON.stringify(row));
+await p.screenshot({ path: 'E:/111/project/QTools/doc/shots/m-list2.png' });
+await b.close();

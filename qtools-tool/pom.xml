@@ -23,6 +23,14 @@
             <artifactId>qtools-common</artifactId>
         </dependency>
 
-    </dependencies>
+        <!-- 内容聚合「保存到媒体站」需要复用媒体站的扫描入库执行器（P6.116）：
+         不复制它的扫描逻辑，也不走 HTTP 自身的 admin 鉴权，直接在同一进程里调用服务 -->
+    <dependency>
+      <groupId>com.qtools</groupId>
+      <artifactId>qtools-media</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+</dependencies>
 
 </project>

@@ -20,10 +20,14 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
  * controller 里只写业务路径（如 {@code @RequestMapping("/media")}），
  * 新增 controller 自动带前缀。</p>
  *
- * <p>作用范围仅限三个自研模块的根包；RuoYi 原生 controller
+ * <p>作用范围仅限自研模块（tool / media / app / shortlink）的根包；RuoYi 原生 controller
  * （{@code /system/**}、{@code /monitor/**}、{@code /common/**}、{@code /login} 等）不受影响。
  * 注意：若某个 controller 又手写 {@code "/api/..."}，最终会叠加成 {@code /api/api/...}，
  * 因此本配置与 controller 的前缀写法互斥——要么全交给这里，要么全手写。</p>
+ *
+ * <p>匹配规则是<b>类全名前缀</b>（Spring {@code HandlerTypePredicate} 的
+ * {@code controllerType.getName().startsWith(basePackage)}，没有包边界校验），所以写
+ * {@code "com.qtools.shortlink"} 就覆盖该模块下所有 controller（含子包）。</p>
  *
  * @author qtools
  */
@@ -34,7 +38,8 @@ public class ApiPrefixConfig implements WebMvcConfigurer
     private static final String API_PREFIX = "/api";
 
     /** 自研业务模块的根包：这些包下的 controller 自动获得 /api 前缀 */
-    private static final String[] API_MODULE_PACKAGES = { "com.qtools.tool", "com.qtools.media", "com.qtools.app" };
+    private static final String[] API_MODULE_PACKAGES = { "com.qtools.tool", "com.qtools.media", "com.qtools.app",
+            "com.qtools.shortlink" };
 
     @Override
     public void configurePathMatch(PathMatchConfigurer configurer)

@@ -146,21 +146,25 @@ public interface MediaPersonMapper
      * <p>{@code hiddenRootIds}（P5.78）：未登录访客请求时传入 {@code guest_visible = 0} 的根 id，
      * 这些根下的视频连「条目数」都不出现（分页 total 用同一个条件算，不会出现
      * 「说 5 条但只列出 3 条」的错位）。null / 空 = 不过滤（登录用户与改动前逐字相同）。</p>
+     *
+     * <p>{@code rating}（P6.99）：站端分级筛选（{@code general / guidance / restricted}），
+     * 与 {@code hiddenRatings} 是两件事 —— 后者是「访客看不见」，前者是「用户只想看这一档」。
+     * 同一个 {@code rating} 必须同时进分页与计数，否则「查看全部 N 个」的 N 与列表长度对不上。</p>
      */
     List<Map<String, Object>> selectPersonVideoPage(@Param("personId") Long personId, @Param("offset") int offset,
             @Param("size") int size, @Param("hiddenRootIds") List<Integer> hiddenRootIds,
-            @Param("hiddenRatings") List<String> hiddenRatings);
+            @Param("hiddenRatings") List<String> hiddenRatings, @Param("rating") String rating);
 
     long countPersonVideos(@Param("personId") Long personId, @Param("hiddenRootIds") List<Integer> hiddenRootIds,
-            @Param("hiddenRatings") List<String> hiddenRatings);
+            @Param("hiddenRatings") List<String> hiddenRatings, @Param("rating") String rating);
 
-    /** 某人物名下的相册分页（media_album_person ∪ media_album.person_id）；hiddenRootIds 口径同上（按图片反推） */
+    /** 某人物名下的相册分页（media_album_person ∪ media_album.person_id）；hiddenRootIds / rating 口径同上 */
     List<Map<String, Object>> selectPersonAlbumPage(@Param("personId") Long personId, @Param("offset") int offset,
             @Param("size") int size, @Param("hiddenRootIds") List<Integer> hiddenRootIds,
-            @Param("hiddenRatings") List<String> hiddenRatings);
+            @Param("hiddenRatings") List<String> hiddenRatings, @Param("rating") String rating);
 
     long countPersonAlbums(@Param("personId") Long personId, @Param("hiddenRootIds") List<Integer> hiddenRootIds,
-            @Param("hiddenRatings") List<String> hiddenRatings);
+            @Param("hiddenRatings") List<String> hiddenRatings, @Param("rating") String rating);
 
     /**
      * 未登录访客的人物可见口径（P5.99）：一次算出每个人物的可见视频数 / 相册数 / 照片数 + 可见首册封面 + 可见首视频

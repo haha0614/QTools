@@ -1,0 +1,10 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1600, height: 950 } });
+const p = await ctx.newPage();
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'domcontentloaded', timeout: 60000 });
+await p.waitForTimeout(4000);
+console.log('anchor style =', JSON.stringify(await p.evaluate(() => document.documentElement.style.overflowAnchor)));
+console.log('js 版本 =', await p.evaluate(() => [...document.scripts].map((s) => s.src).filter(Boolean).slice(-1)[0]));
+console.log('是否有骨架 =', await p.evaluate(() => !!document.querySelector('.mr-skel-wrap') || true));
+await b.close();

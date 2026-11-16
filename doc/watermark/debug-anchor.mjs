@@ -1,0 +1,16 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1600, height: 1000 } });
+const p = await ctx.newPage();
+const reqs = [];
+p.on('request', (r) => { const u = r.url(); if (u.indexOf('/tool/web/posts') >= 0 || u.indexOf('/locate') >= 0) reqs.push(u.replace('http://localhost/api','')); });
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'networkidle', timeout: 60000 });
+await p.waitForTimeout(2500);
+await p.evaluate(() => window.localStorage.setItem('ms.mrds.scrollAnchor', JSON.stringify({ id: '579', top: -184, at: Date.now() })));
+reqs.length = 0;
+await p.reload({ waitUntil: 'networkidle' });
+await p.waitForTimeout(5000);
+console.log('requests during reload:', JSON.stringify(reqs, null, 1));
+const st = await p.evaluate(() => { const el = document.querySelector('[data-post-id="579"]'); return { cards: document.querySelectorAll('[data-post-id]').length, has579: !!el, top: el ? Math.round(el.getBoundingClientRect().top) : null, scrollY: Math.round(window.scrollY) }; });
+console.log('state:', JSON.stringify(st));
+await b.close();

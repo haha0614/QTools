@@ -347,6 +347,28 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         snapshots.clear();
     }
 
+    /**
+     * 当前站端访问者可见的分级清单（P6.99）：{@code [{value,label}]}
+     *
+     * <p>与索引 {@code ratings[]} 共用同一个可见性判定（{@code stationHiddenRatings()}），
+     * 但不带 count —— 计数是各页自己对「本页全集」数出来的，索引那份是视频 + 相册合计。</p>
+     */
+    @Override
+    public List<Map<String, Object>> stationRatingOptions()
+    {
+        Set<String> hidden = mediaGuestAccessService.stationHiddenRatings();
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> option : MediaRating.options())
+        {
+            Object value = option.get("value");
+            if (value != null && !hidden.contains(String.valueOf(value)))
+            {
+                out.add(option);
+            }
+        }
+        return out;
+    }
+
     // ------------------------------------------------------------------ 可见性 / 缓存键
 
     /** 快照缓存键：{@code m<includeMissing>g<guest>}（两维四组合） */
@@ -595,22 +617,22 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             List<MediaAlbum> own = albumsByPerson.getOrDefault(person.getId(), List.of());
             List<String> albumIds = new ArrayList<>(own.size());
             long photos = 0;
-            // P6.27：人物的「张数 / 分档」必须按**可见的图**算，不能再用相册的全量张数和相册默认档——
-            // 否则一本「册=限制、里面有 171 张大众」的册会把人物记成 1166 张 + restricted，
-            // 访客按档位过滤时整个人物就消失了（念念就是这样没的）。
-            Map<String, Integer> photoRatings = new LinkedHashMap<>();
+            // P6.99：人物的「分档」必须与**点进去看得到的东西**同一根轴。
+            // 人物页两个区块是按「相册自己的 content_rating / 视频自己的 content_rating」筛的
+            // （selectPersonAlbumPage / selectPersonVideoPage），所以这里也按相册级、视频级统计：
+            //   · 按图片级统计（P6.27 的做法）会把「册=指导级、里面有 171 张大众图」的人物算进大众级，
+            //     于是大众级筛选下他出现在墙上、点进去却是 0 本相册（用户报的就是这个）；
+            //   · 相册张数跟着它自己的档走，卡片上的「Z 张照片」才等于该档下能看到的张数。
+            Map<String, Map<String, Integer>> albumBuckets = new LinkedHashMap<>();
             for (MediaAlbum album : own)
             {
                 albumIds.add(album.getId());
-                List<Map<String, Object>> visible = photosByAlbum.getOrDefault(album.getId(), List.of());
-                photos += visible.size();
-                String albumRating = album.getContentRating();
-                for (Map<String, Object> photoNode : visible)
-                {
-                    String ownRating = stringOf(photoNode.get("contentRating"));
-                    String effective = ownRating != null && !ownRating.isEmpty() ? ownRating : albumRating;
-                    bumpRating(photoRatings, effective);
-                }
+                int visiblePhotos = photosByAlbum.getOrDefault(album.getId(), List.of()).size();
+                photos += visiblePhotos;
+                Map<String, Integer> bucket = albumBuckets.computeIfAbsent(
+                        MediaRating.normalize(album.getContentRating()), k -> new LinkedHashMap<>());
+                bucket.merge("albums", Integer.valueOf(1), Integer::sum);
+                bucket.merge("photos", Integer.valueOf(visiblePhotos), Integer::sum);
             }
             int ownVideos = visibleVideosByPerson.getOrDefault(person.getName(), Integer.valueOf(0))
                     .intValue();
@@ -628,7 +650,7 @@ public class MediaIndexServiceImpl implements IMediaIndexService
             node.put("videos", ownVideos);
             // P6.09：该人物在每个分级下有多少**可见**作品（相册 + 视频合计）—— 人物页分级筛选的判定数据。
             // 只输出 > 0 的档位（与 ratings[]「只含有条目的分级」同一约定），档位顺序 = MediaRating 展示顺序。
-            node.put("byRating", personRatingCounts(photoRatings, videoRatingsByPerson.get(person.getName())));
+            node.put("byRating", personRatingBuckets(albumBuckets, videoRatingsByPerson.get(person.getName())));
             node.put("photos", photos);
             node.put("albums", albumIds);
             // P6.61：与相册卡同一套封面（索引已算好内容寻址路径），拿不到才回退 cover_path
@@ -751,37 +773,70 @@ public class MediaIndexServiceImpl implements IMediaIndexService
      * @param videoCounts   该人物名下可见视频的分级分布（可为 null）
      * @return 有序分级计数；没有任何可见作品时是空 map（前端据此隐藏该人物）
      */
-    private static Map<String, Integer> personRatingCounts(Map<String, Integer> photoCounts,
+    /**
+     * 人物节点的「每个分级下有什么」（P6.99）
+     *
+     * <p>输出 {@code {general: {videos:0, albums:2, photos:58}, …}}，只含有作品的档位。
+     * 为什么不是一个整数：人物墙在分级筛选下要显示「2 部视频 · 3 本相册 · 120 张照片」，
+     * 这三个数必须与人物页点进去看到的分页 total 完全一致，否则就是用户报的
+     * 「卡片说有作品、点进去没有」。整数只能回答「有没有」，回答不了「有多少」。</p>
+     *
+     * @param albumBuckets 分级 → {@code {albums, photos}}（相册按**自己的** content_rating 分桶）
+     * @param videoCounts  分级 → 视频条数（可为 null）
+     * @return 有序分级节点；没有任何作品时是空 map（前端据此隐藏该人物）
+     */
+    private static Map<String, Map<String, Integer>> personRatingBuckets(Map<String, Map<String, Integer>> albumBuckets,
             Map<String, Integer> videoCounts)
     {
-        Map<String, Integer> merged = new LinkedHashMap<>();
-        if (photoCounts != null)
+        Map<String, Map<String, Integer>> merged = new LinkedHashMap<>();
+        if (albumBuckets != null)
         {
-            for (Map.Entry<String, Integer> entry : photoCounts.entrySet())
+            for (Map.Entry<String, Map<String, Integer>> entry : albumBuckets.entrySet())
             {
                 String value = MediaRating.normalize(entry.getKey());
-                Integer prev = merged.get(value);
-                merged.put(value, Integer.valueOf((prev == null ? 0 : prev.intValue())
-                        + (entry.getValue() == null ? 0 : entry.getValue().intValue())));
+                Map<String, Integer> bucket = merged.computeIfAbsent(value, k -> new LinkedHashMap<>());
+                Map<String, Integer> source = entry.getValue();
+                if (source != null)
+                {
+                    for (String key : new String[] { "albums", "photos" })
+                    {
+                        Integer n = source.get(key);
+                        if (n != null)
+                        {
+                            bucket.merge(key, n, Integer::sum);
+                        }
+                    }
+                }
             }
         }
         if (videoCounts != null)
         {
             for (Map.Entry<String, Integer> entry : videoCounts.entrySet())
             {
-                Integer prev = merged.get(entry.getKey());
-                merged.put(entry.getKey(), Integer.valueOf((prev == null ? 0 : prev.intValue())
-                        + (entry.getValue() == null ? 0 : entry.getValue().intValue())));
+                String value = MediaRating.normalize(entry.getKey());
+                Integer n = entry.getValue();
+                if (n != null && n.intValue() > 0)
+                {
+                    merged.computeIfAbsent(value, k -> new LinkedHashMap<>()).merge("videos", n, Integer::sum);
+                }
             }
         }
-        Map<String, Integer> out = new LinkedHashMap<>();
+        Map<String, Map<String, Integer>> out = new LinkedHashMap<>();
         for (String value : MediaRating.values())
         {
-            Integer n = merged.get(value);
-            if (n != null && n.intValue() > 0)
+            Map<String, Integer> bucket = merged.get(value);
+            if (bucket == null)
             {
-                out.put(value, n);
+                continue;
             }
+            int albums = bucket.getOrDefault("albums", Integer.valueOf(0)).intValue();
+            int videos = bucket.getOrDefault("videos", Integer.valueOf(0)).intValue();
+            if (albums + videos <= 0)
+            {
+                // 只有图、没有整册的档位（相册被整册隐藏）不算作品：与人物页「区块里没有东西」一致
+                continue;
+            }
+            out.put(value, bucket);
         }
         return out;
     }

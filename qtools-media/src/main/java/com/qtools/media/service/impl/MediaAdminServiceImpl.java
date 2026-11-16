@@ -970,8 +970,14 @@ public class MediaAdminServiceImpl implements IMediaAdminService
             if (video != null)
             {
                 originalRel = video.getRelPath();
-                // 内容寻址 + 回退都在 resolveThumbVideo 里做，这里只负责拼固定格式的 URL
-                thumbUrl = "/api/media/thumb/v/" + video.getId();
+                // 内容寻址 + 回退都在 resolveThumbVideo 里做，这里只负责拼固定格式的 URL。
+                // 缩略图响应带 immutable 长缓存（max-age=1 年），换了封面同一个 URL 浏览器不会重取，
+                // 所以把"封面来源"拼进查询串：封面一变 URL 就变，缓存自然失效。
+                String ver = video.getPosterPath() != null && !video.getPosterPath().isEmpty()
+                        ? video.getPosterPath()
+                        : (video.getPosterFile() == null ? "" : video.getPosterFile());
+                thumbUrl = "/api/media/thumb/v/" + video.getId()
+                        + (ver.isEmpty() ? "" : "?v=" + Integer.toHexString(ver.hashCode()));
             }
         }
         else if (KIND_ALBUM.equals(entry.kind()))

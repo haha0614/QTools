@@ -1,0 +1,14 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1905, height: 1000 } });
+const p = await ctx.newPage();
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'networkidle', timeout: 60000 });
+await p.waitForTimeout(3500);
+const prog = await p.evaluate(() => (document.querySelector('.mr-date-progress') || {}).textContent?.trim());
+console.log('progress:', prog);
+await p.locator('.mr-datepicker input').nth(0).click();
+await p.waitForTimeout(1200);
+const cells = await p.evaluate(() => { const tds = [...document.querySelectorAll('.el-date-table td')].filter((td) => !td.classList.contains('disabled')); const dis = [...document.querySelectorAll('.el-date-table td.disabled')]; return { selectable: tds.length, disabled: dis.length, sample: tds.slice(0, 6).map((td) => td.textContent.trim()) }; });
+console.log('calendar:', JSON.stringify(cells));
+await p.screenshot({ path: 'E:/111/project/QTools/doc/shots/mrds-date-disabled.png' });
+await b.close();

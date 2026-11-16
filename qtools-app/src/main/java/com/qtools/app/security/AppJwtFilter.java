@@ -10,6 +10,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.filter.OncePerRequestFilter;
+import com.qtools.common.security.AppRequestAttributes;
 
 /**
  * 用户端 token 过滤器（只处理 {@code /api/app/**}）
@@ -27,11 +28,11 @@ public class AppJwtFilter extends OncePerRequestFilter
 {
     private static final Logger log = LoggerFactory.getLogger(AppJwtFilter.class);
 
-    /** request attribute：当前用户 id（Long） */
-    public static final String ATTR_USER_ID = "appUserId";
+    /** request attribute：当前用户 id（Long）；字面量真源在 {@link AppRequestAttributes}，注解解析器读同一常量 */
+    public static final String ATTR_USER_ID = AppRequestAttributes.USER_ID;
 
     /** request attribute：当前会话 jti（String），登出时用它撤销 */
-    public static final String ATTR_TOKEN_ID = "appTokenId";
+    public static final String ATTR_TOKEN_ID = AppRequestAttributes.TOKEN_ID;
 
     /** 免登录白名单：注册、登录、发送验证码 */
     private static final Set<String> WHITELIST = Set.of(

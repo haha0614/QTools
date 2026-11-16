@@ -1,0 +1,11 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+const p = await ctx.newPage();
+p.on('pageerror', (e) => console.log('PAGEERR', String(e.message).slice(0, 100)));
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'domcontentloaded', timeout: 60000 });
+await p.waitForTimeout(6000);
+const info = await p.evaluate(() => ({ url: location.pathname, txt: document.body.innerText.slice(0, 120).replace(/\n/g, ' | '), rail: !!document.querySelector('.qt-rail'), cards: document.querySelectorAll('.mr-card').length, w: window.innerWidth, docW: document.documentElement.scrollWidth }));
+console.log('page:', JSON.stringify(info));
+await p.screenshot({ path: 'E:/111/project/QTools/doc/shots/mobile-list.png' });
+await b.close();

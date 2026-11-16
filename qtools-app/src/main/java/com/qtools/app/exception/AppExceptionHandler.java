@@ -11,6 +11,7 @@ import org.springframework.core.annotation.Order;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import com.qtools.common.exception.AppUnauthorizedException;
 
 /**
  * 用户端接口统一错误体：{@code {"error":"..."}} + 真实 HTTP 状态码
@@ -52,6 +53,19 @@ public class AppExceptionHandler
     {
         log.warn("用户端管理接口权限不足 {} {} -> {}", request.getMethod(), request.getRequestURI(), e.getMessage());
         writeError(request, response, 403, "forbidden");
+    }
+
+    /**
+     * 用户端未登录（{@code @CurrentAppUser} 解析不到账号，P6.4x）
+     *
+     * <p>必须显式声明：本 advice 优先级最高且带 {@code @ExceptionHandler(Exception.class)}，
+     * 不单独接住它会落到那条分支变成 500，而它其实是「没登录」（401）。</p>
+     */
+    @ExceptionHandler(AppUnauthorizedException.class)
+    public void handleAppUnauthorized(AppUnauthorizedException e, HttpServletRequest request, HttpServletResponse response)
+            throws IOException
+    {
+        writeError(request, response, 401, e.getMessage());
     }
 
     @ExceptionHandler(Exception.class)

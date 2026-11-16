@@ -109,7 +109,7 @@ public class SecurityConfig
                     // SPA 单端口托管（M4-A）：管理端接口与框架接口保持过滤器级鉴权
                     // /api/app/admin/** = 用户端账号审核的后台接口（P5.79）：必须显式声明 authenticated，
                     // 否则会被下面 GET /** 的 permitAll 吞掉（GET 列表接口就成了匿名可读）
-                    .requestMatchers("/api/app/admin/**", "/api/media/admin/**", "/system/**", "/monitor/**",
+                    .requestMatchers("/api/app/admin/**", "/api/media/admin/**", "/api/short/shortlink/**", "/system/**", "/monitor/**",
                                      "/common/**", "/quartz/**", "/tool/gen/**", "/test/**").authenticated()
                     // 其余 GET 交给前端路由与静态资源；未命中的路径由 MVC 返回 JSON 404，而不是被吞成 HTML
                     .requestMatchers(HttpMethod.GET, "/**").permitAll()

@@ -1,0 +1,18 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1500, height: 1000 } });
+const p = await ctx.newPage();
+const imgFail = [];
+p.on('response', (r) => { if ((r.headers()['content-type'] || '').startsWith('image/') && r.status() >= 400) imgFail.push(r.status() + ' ' + r.url()); });
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'networkidle', timeout: 60000 });
+await p.waitForTimeout(2500);
+await p.screenshot({ path: 'E:/111/project/QTools/doc/shots/mrds-list.png' });
+const broken = await p.evaluate(() => [...document.querySelectorAll('img')].filter((i) => i.complete && i.naturalWidth === 0).map((i) => i.src.slice(-60)));
+const okCount = await p.evaluate(() => [...document.querySelectorAll('img')].filter((i) => i.naturalWidth > 0).length);
+console.log('list: ok imgs', okCount, 'broken', JSON.stringify(broken.slice(0, 5)), 'httpFail', JSON.stringify(imgFail.slice(0, 5)));
+await p.goto('http://localhost/tool/mrds/post/201821', { waitUntil: 'networkidle', timeout: 60000 });
+await p.waitForTimeout(3000);
+await p.screenshot({ path: 'E:/111/project/QTools/doc/shots/mrds-detail.png' });
+const d = await p.evaluate(() => { const imgs = [...document.querySelectorAll('img')]; return { total: imgs.length, ok: imgs.filter((i) => i.naturalWidth > 0).length, broken: imgs.filter((i) => i.complete && i.naturalWidth === 0).map((i) => i.src.slice(-50)).slice(0, 5), sample: imgs.slice(0, 3).map((i) => i.src.slice(-40) + ' ' + i.naturalWidth + 'x' + i.naturalHeight) }; });
+console.log('detail:', JSON.stringify(d));
+await b.close();

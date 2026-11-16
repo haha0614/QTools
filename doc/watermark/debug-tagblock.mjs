@@ -1,0 +1,20 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1400, height: 900 } });
+const p = await ctx.newPage();
+p.on('response', async (r) => { if (r.url().indexOf('tag-blocks') >= 0) console.log('HTTP', r.status(), r.request().method(), r.url().slice(-60)); });
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'networkidle', timeout: 60000 });
+await p.waitForTimeout(2500);
+await p.locator('.mr-chip-more').click();
+await p.waitForTimeout(800);
+await p.locator('.mr-drawer-block').first().click();
+await p.waitForTimeout(2000);
+const res = await p.evaluate(async () => {
+  const owner = window.localStorage.getItem('ms.owner');
+  const r = await fetch('/api/tool/web/tag-blocks', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'X-Ms-Owner': owner }, body: 'tag=' + encodeURIComponent('吃瓜') + '&on=1' });
+  return { status: r.status, body: (await r.text()).slice(0, 200), owner };
+});
+console.log('direct call:', JSON.stringify(res));
+const list = await p.evaluate(async () => { const owner = window.localStorage.getItem('ms.owner'); const r = await fetch('/api/tool/web/tag-blocks', { headers: { 'X-Ms-Owner': owner } }); return await r.text(); });
+console.log('blocklist now:', list);
+await b.close();

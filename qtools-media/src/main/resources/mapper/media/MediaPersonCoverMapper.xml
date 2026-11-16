@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.qtools.media.mapper.MediaPersonCoverMapper">
+
+    <!-- 人物卡封面（P6.101）：表由 doc/media_person_view.sql 建立（幂等） -->
+    <resultMap id="MediaPersonCoverResult" type="com.qtools.media.domain.MediaPersonCover">
+        <result property="personId"   column="person_id" />
+        <result property="view"       column="view" />
+        <result property="scope"      column="scope" />
+        <result property="sourceKind" column="source_kind" />
+        <result property="sourceRef"  column="source_ref" />
+        <result property="bgScale"    column="bg_scale" />
+        <result property="bgDx"       column="bg_dx" />
+        <result property="bgDy"       column="bg_dy" />
+    </resultMap>
+
+    <sql id="coverColumns">
+        person_id, view, scope, source_kind, source_ref, bg_scale, bg_dx, bg_dy
+    </sql>
+
+    <select id="selectByPersonIds" resultMap="MediaPersonCoverResult">
+        select <include refid="coverColumns" />
+        from media_person_view
+        where person_id in
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+        order by person_id asc, view asc, scope asc
+    </select>
+
+    <select id="selectOne" resultMap="MediaPersonCoverResult">
+        select <include refid="coverColumns" />
+        from media_person_view
+        where person_id = #{personId} and view = #{view} and scope = #{scope}
+        limit 1
+    </select>
+
+    <insert id="upsert" parameterType="com.qtools.media.domain.MediaPersonCover">
+        insert into media_person_view (person_id, view, scope, source_kind, source_ref, bg_scale, bg_dx, bg_dy)
+        values (#{personId}, #{view}, #{scope}, #{sourceKind}, #{sourceRef}, #{bgScale}, #{bgDx}, #{bgDy})
+        on duplicate key update
+            source_kind = values(source_kind),
+            source_ref  = values(source_ref),
+            bg_scale    = values(bg_scale),
+            bg_dx       = values(bg_dx),
+            bg_dy       = values(bg_dy)
+    </insert>
+
+    <delete id="deleteOne">
+        delete from media_person_view
+        where person_id = #{personId} and view = #{view} and scope = #{scope}
+    </delete>
+
+    <delete id="deleteByPerson">
+        delete from media_person_view where person_id = #{personId}
+    </delete>
+</mapper>

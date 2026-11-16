@@ -1,0 +1,12 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1600, height: 1000 } });
+const p = await ctx.newPage();
+const reqs = [];
+p.on('request', (r) => { const u = r.url(); if (u.includes('/hls/')) reqs.push(u.replace('http://localhost/api/tool/web', '')); });
+await p.goto('http://localhost/tool/mrds/post/134595', { waitUntil: 'domcontentloaded', timeout: 60000 });
+await p.waitForTimeout(7000);
+const st = await p.evaluate(() => [...document.querySelectorAll('.md-video')].map((v) => ({ src: (v.getAttribute('src') || '').slice(-40), cur: (v.currentSrc || '').slice(-40), dur: Math.round(v.duration || 0) })));
+console.log('播放器:', JSON.stringify(st));
+console.log('播放列表请求:', JSON.stringify(reqs.slice(0, 6)));
+await b.close();

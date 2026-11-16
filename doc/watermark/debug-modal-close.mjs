@@ -1,0 +1,17 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1600, height: 950 } });
+const p = await ctx.newPage();
+p.on('console', (m) => { if (m.type() === 'error') console.log('ERR:', m.text().slice(0, 140)); });
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'domcontentloaded', timeout: 60000 });
+await p.waitForTimeout(4500);
+await p.evaluate(() => { document.querySelector('[data-post-id]').click(); });
+await p.waitForTimeout(1500);
+const btn = p.locator('.mr-sheet-head button', { hasText: '展开整页' });
+console.log('按钮数量:', await btn.count());
+const [tab] = await Promise.all([ctx.waitForEvent('page'), btn.first().click()]);
+await tab.waitForLoadState('domcontentloaded');
+console.log('原标签 URL:', p.url());
+const st = await p.evaluate(() => ({ mask: !!document.querySelector('.mr-mask'), sheet: !!document.querySelector('.mr-sheet') }));
+console.log('点击后原标签状态:', JSON.stringify(st));
+await b.close();

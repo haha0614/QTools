@@ -1,0 +1,11 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1600, height: 900 } });
+const p = await ctx.newPage();
+await p.goto('http://localhost/tool/mrds?focus=148950', { waitUntil: 'domcontentloaded', timeout: 60000 });
+await p.waitForTimeout(5000);
+await p.evaluate(() => document.querySelector('[data-post-id="148950"]').click());
+await p.waitForTimeout(6000);
+const st = await p.evaluate(() => ({ videos: document.querySelectorAll('.md-video').length, batch: (document.querySelector('.md-actions') || {}).textContent?.replace(/\s+/g,' ').trim() }));
+console.log('帖子视频数:', JSON.stringify(st));
+await b.close();

@@ -1,0 +1,13 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1905, height: 929 } });
+const p = await ctx.newPage();
+const calls = [];
+p.on('request', (r) => { if (r.url().indexOf('/tool/web/refresh') >= 0) calls.push(r.method() + ' ' + r.url()); });
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'networkidle', timeout: 60000 });
+await p.waitForTimeout(4000);
+const first = await p.evaluate(() => { const c = document.querySelector('.mr-card'); return c ? (c.innerText || '').split('\n').filter(Boolean).slice(0, 3) : null; });
+console.log('first card:', JSON.stringify(first));
+console.log('refresh calls:', JSON.stringify(calls));
+await p.screenshot({ path: 'E:/111/project/QTools/doc/shots/mrds-latest.png' });
+await b.close();

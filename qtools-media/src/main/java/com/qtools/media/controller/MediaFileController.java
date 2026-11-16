@@ -32,6 +32,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import com.qtools.common.annotation.Anonymous;
 import com.qtools.media.exception.MediaException;
+import com.qtools.media.config.MediaProperties;
 import com.qtools.media.service.IMediaFileService;
 import com.qtools.media.service.IMediaFrameService;
 import com.qtools.media.support.MediaAvatarCrop;
@@ -105,6 +106,10 @@ public class MediaFileController
 
     @Autowired
     private IMediaFrameService mediaFrameService;
+
+    /** 头像裁剪的 WebP 解码回退要用 ffmpeg（qtools.media.ffmpeg）；缺省不影响其它接口 */
+    @Autowired(required = false)
+    private MediaProperties mediaProperties;
 
     /**
      * 字节级 Range 流（等价 Node 版 /media）
@@ -508,7 +513,8 @@ public class MediaFileController
         {
             return imageResponse(src, isContentHash(src.getFileName().toString()), request);
         }
-        Path out = MediaAvatarCrop.render(src, crop, mediaFileService.thumbsRoot(), cacheKey);
+        String ffmpeg = mediaProperties == null ? null : mediaProperties.getFfmpeg();
+        Path out = MediaAvatarCrop.render(src, crop, mediaFileService.thumbsRoot(), cacheKey, ffmpeg);
         return imageResponse(out, false, request);
     }
 

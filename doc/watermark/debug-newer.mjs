@@ -1,0 +1,27 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1600, height: 950 } });
+const p = await ctx.newPage();
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'domcontentloaded', timeout: 60000 });
+await p.waitForTimeout(5000);
+const deep = await p.evaluate(async () => {
+  const r = await fetch('/api/tool/web/posts?page=12&size=24');
+  const j = await r.json();
+  const row = (j.rows || [])[0];
+  localStorage.setItem('ms.mrds.scrollAnchor', JSON.stringify({ id: row.id, title: row.title, page: 12, top: 120, at: Date.now() }));
+  return row.id;
+});
+await p.reload({ waitUntil: 'domcontentloaded' });
+await p.waitForTimeout(4500);
+await p.locator('.mr-resume button', { hasText: '回去' }).click();
+await p.waitForTimeout(2500);
+const s1 = await p.evaluate(() => ({ y: Math.round(window.scrollY), h: Math.round(document.documentElement.scrollHeight), cards: document.querySelectorAll('[data-post-id]').length, bodyPos: document.body.style.position || '' }));
+console.log('前插之前:', JSON.stringify(s1));
+await p.locator('.mr-newer button', { hasText: '加载更新的' }).click();
+await p.waitForTimeout(300);
+const s2 = await p.evaluate(() => ({ y: Math.round(window.scrollY), h: Math.round(document.documentElement.scrollHeight), cards: document.querySelectorAll('[data-post-id]').length }));
+console.log('前插之后(300ms):', JSON.stringify(s2));
+await p.waitForTimeout(2500);
+const s3 = await p.evaluate(() => ({ y: Math.round(window.scrollY), h: Math.round(document.documentElement.scrollHeight), cards: document.querySelectorAll('[data-post-id]').length }));
+console.log('稳定后:', JSON.stringify(s3));
+await b.close();

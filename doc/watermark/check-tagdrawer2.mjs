@@ -1,0 +1,16 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1905, height: 1000 } });
+const p = await ctx.newPage();
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'networkidle', timeout: 60000 });
+await p.waitForTimeout(3200);
+await p.locator('.mr-chip-more').click();
+await p.waitForTimeout(900);
+const d0 = await p.evaluate(() => ({ hint: (document.querySelector('.mr-drawer-hint') || {}).textContent?.trim(), firstTag: (document.querySelector('.mr-drawer-pick') || {}).textContent?.trim() }));
+console.log('before:', JSON.stringify(d0));
+await p.locator('.mr-drawer-block').first().click();
+await p.waitForTimeout(2500);
+const d1 = await p.evaluate(() => ({ hint: (document.querySelector('.mr-drawer-hint') || {}).textContent?.trim(), blockedSection: document.querySelectorAll('.mr-drawer-tag.blocked').length, cloud: [...document.querySelectorAll('.mr-tags .mr-chip')].slice(0, 3).map((c) => c.textContent.trim()) }));
+console.log('after block:', JSON.stringify(d1));
+await p.screenshot({ path: 'E:/111/project/QTools/QTools/doc/shots/mrds-tagdrawer2.png' }).catch(() => {});
+await b.close();

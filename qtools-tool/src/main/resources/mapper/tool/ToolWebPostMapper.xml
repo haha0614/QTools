@@ -1,0 +1,383 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.qtools.tool.mapper.ToolWebPostMapper">
+
+    <!-- 外部站点条目索引（P6.110）：表由 doc/tool_web_post.sql 建立（幂等） -->
+    <sql id="postWhere">
+        where source = #{source}
+        <if test="category != null and category != ''">
+            and category = #{category}
+        </if>
+        <if test="tag != null and tag != ''">
+            and find_in_set(#{tag}, tags) > 0
+        </if>
+        <!-- 多标签：包含任一选中标签即可（标签云多选的直觉语义） -->
+        <if test="tags != null and tags.size() > 0">
+            and (
+            <foreach collection="tags" item="t" separator=" or ">
+                find_in_set(#{t}, tags) > 0
+            </foreach>
+            )
+        </if>
+        <!-- 标签黑名单：含任一被屏蔽标签的条目直接排除（服务端过滤，计数也准） -->
+        <if test="blockTags != null and blockTags.size() > 0">
+            <!-- 必须 coalesce：tags 为空的行 find_in_set 返回 NULL，
+                 NOT (NULL > 0) 仍是 NULL，会把没有标签的条目整片排除掉 -->
+            and not (
+            <foreach collection="blockTags" item="bt" separator=" or ">
+                coalesce(find_in_set(#{bt}, tags), 0) > 0
+            </foreach>
+            )
+        </if>
+        <!-- 搜索三通道（参数由 Java 拆分好，SQL 侧只做静态拼接）：
+             1) qLike        —— 整串 LIKE，覆盖标题/标签（单关键词与老行为一致）
+             2) ftQuery      —— MySQL ngram 全文（长度 ≥2 的词，多词之间是 AND）
+             3) likeTokens   —— 单字词（ngram 索引不到单字），逐词 AND LIKE
+             单关键词时全文结果与标题/标签是「或」；多关键词时全部条件叠加（即 AND）。 -->
+        <if test="qLike != null and qLike != ''">
+            and (title like concat('%', #{qLike}, '%') or tags like concat('%', #{qLike}, '%'))
+        </if>
+        <if test="ftQuery != null and ftQuery != ''">
+            <choose>
+                <when test="ftOr != null and ftOr">
+                    and (match(title, content_text) against(#{ftQuery} in boolean mode)
+                         or title like concat('%', #{qLike}, '%')
+                         or tags like concat('%', #{qLike}, '%'))
+                </when>
+                <otherwise>
+                    and match(title, content_text) against(#{ftQuery} in boolean mode)
+                </otherwise>
+            </choose>
+        </if>
+        <if test="likeTokens != null and likeTokens.size() > 0">
+            <foreach collection="likeTokens" item="lt">
+                and (title like concat('%', #{lt}, '%') or coalesce(content_text, '') like concat('%', #{lt}, '%'))
+            </foreach>
+        </if>
+        <!-- 日期筛选走生成列 published_ts；归档页只给月日、没有年份的条目 published_ts 为 NULL，
+             一旦按日期筛选就自然被排除（这是正确行为：日期未知不该混进某一天） -->
+        <!-- featured：home=首页精选带 / pinned=分类置顶块 / any=所有推荐位 -->
+        <if test="featured != null and featured != ''">
+            <choose>
+                <when test="featured == 'home'">and featured_kind in ('home','both')</when>
+                <when test="featured == 'pinned'">and featured_kind in ('pinned','both')</when>
+                <otherwise>and featured = 1</otherwise>
+            </choose>
+        </if>
+        <if test="dateFrom != null and dateFrom != ''">
+            and published_ts &gt;= #{dateFrom}
+        </if>
+        <if test="dateTo != null and dateTo != ''">
+            and published_ts &lt;= #{dateTo}
+        </if>
+        <!-- 内容类型：video = 有视频，image = 纯图文（没有视频） -->
+        <if test="videoType != null and videoType != ''">
+            <choose>
+                <when test="videoType == 'video'">and has_video = 1 and video_count &gt; 0</when>
+                <when test="videoType == 'image'">and (has_video = 0 or video_count = 0 or video_count is null)</when>
+            </choose>
+        </if>
+        <!-- 视频数量：至少 N 段 -->
+        <if test="minVideos != null">
+            and ifnull(video_count, 0) &gt;= #{minVideos}
+        </if>
+    </sql>
+
+    <select id="selectPage" resultType="java.util.LinkedHashMap">
+        select id, source, source_id as sourceId, title, category, tags, cover,
+               published_at as publishedAt, url, has_video as hasVideo,
+               date_format(published_ts, '%Y-%m-%d') as publishedTs,
+               <!-- 详情是否已抓：前端据此决定要不要请求预取，卡片据此显示"待抓"角标 -->
+               case when content_text is not null and content_text &lt;&gt; '' then 1 else 0 end as hasDetail
+        from tool_web_post
+        <include refid="postWhere"/>
+        <!-- 两种排序：
+             1) 精选带（featured=home）按源站首页的编辑顺序 home_rank —— 按时间排会和主列表长得一样
+             2) 其它按源站发布时间：published_full 是详情页里的完整时间戳（含时分秒），
+                源站列表就是按它排的，而源站 id 与发布时间不同向（201991 比 202036 发布更晚），
+                所以不能拿 id 兜同一天的顺序；未抓详情的条目退化为「日期 + id」，抓完自动归位 -->
+        <choose>
+            <when test="featured == 'home'">
+                order by case when home_rank is null then 999999 else home_rank end asc,
+                         coalesce(published_full, cast(published_ts as datetime)) desc
+            </when>
+            <otherwise>
+                order by coalesce(published_full, cast(published_ts as datetime)) desc,
+                         cast(source_id as unsigned) desc, id asc
+            </otherwise>
+        </choose>
+        limit #{offset}, #{limit}
+    </select>
+
+    <select id="countPage" resultType="long">
+        select count(*) from tool_web_post
+        <include refid="postWhere"/>
+    </select>
+
+    <!-- 详情比列表多带正文块与计数：列表页不需要 content（一页 24 条会白传几百 KB） -->
+    <select id="selectOne" resultType="java.util.LinkedHashMap">
+        select id, source, source_id as sourceId, title, category, tags, cover,
+               published_at as publishedAt, url, has_video as hasVideo,
+               content, content_text as contentText, image_count as imageCount, video_count as videoCount,
+               video_url as videoUrl, video_urls as videoUrls,
+               video_file as videoFile, download_state as downloadState, download_percent as downloadPercent,
+               download_error as downloadError
+        from tool_web_post
+        where id = #{id}
+        limit 1
+    </select>
+
+    <!-- 播放地址是签名 HLS，只有播放代理会用到，单独取一列 -->
+    <!--
+      按日期跳转的定位锚点：那天（含）之前最新的一条真实帖子。
+      拿到 id 之后走既有的 countBefore 算页号——countBefore 与列表的 order by 是同一套规则，
+      比"直接按日期算偏移"可靠：published_full 是混合格式字符串，单独按日期排序会算错。
+    -->
+    <select id="selectIdByDate" resultType="java.lang.Long">
+        select id from tool_web_post t
+        where t.source = #{source}
+          and t.published_ts is not null
+          and t.published_ts &lt;= cast(#{dateTo} as date)
+        <if test="category != null and category != ''">and t.category = #{category}</if>
+        <if test="tag != null and tag != ''">and find_in_set(#{tag}, t.tags) &gt; 0</if>
+        <!-- 锚点必须是"列表里真能出现的那条"：被屏蔽标签的条目不算，
+             否则它可能根本不在算出来的那一页上，前端对齐就落空 -->
+        <if test="blockTags != null and blockTags.size() > 0">
+            and not (
+            <foreach collection="blockTags" item="bt" separator=" or ">
+                coalesce(find_in_set(#{bt}, t.tags), 0) &gt; 0
+            </foreach>
+            )
+        </if>
+        order by t.published_ts desc, cast(t.source_id as unsigned) desc
+        limit 1
+    </select>
+
+    <!-- 每天有多少条：给自定义月历的"每格显示数量"用 -->
+    <select id="selectDayCounts" resultType="java.util.LinkedHashMap">
+        select date_format(published_ts, '%Y-%m-%d') as day, count(*) as c
+        from tool_web_post
+        where source = #{source}
+          and published_ts is not null
+          and published_ts between #{from} and #{to}
+        <if test="category != null and category != ''">and category = #{category}</if>
+        <if test="tag != null and tag != ''">and find_in_set(#{tag}, tags) &gt; 0</if>
+        group by published_ts
+        order by published_ts
+    </select>
+
+    <!-- 按日期定位：某个日期之后有多少条（分页 = 数量 / 每页条数） -->
+    <!--
+      日期定位：有多少条排在"该日期"前面（用于算页号）。
+      必须和列表的排序键完全一致，否则算出来的页号会落到完全不相干的位置：
+        列表 = coalesce(published_full, published_ts, '1970-01-01') desc
+      早先这里只比 published_ts，没日期的行被漏掉，跳 2026-01-12 结果落到了 10 月的内容上。
+    -->
+    <select id="countAfterDate" resultType="java.lang.Long">
+        select count(*) from tool_web_post t
+        where t.source = #{source}
+          and coalesce(t.published_full, cast(t.published_ts as datetime), '1970-01-01') &gt; #{dateTo}
+        <if test="category != null and category != ''">and t.category = #{category}</if>
+        <if test="tag != null and tag != ''">and find_in_set(#{tag}, t.tags) &gt; 0</if>
+    </select>
+
+    <select id="selectVideoUrl" resultType="java.lang.String">
+        select case
+                 when #{index} &gt; 0 and ifnull(json_length(video_urls), 0) &gt; #{index}
+                   then json_unquote(json_extract(video_urls, concat('$[', #{index}, ']')))
+                 when #{index} &gt; 0 then null
+                 <!-- 单列 video_url 可能为空（只有多段数组时没回填），此时退回数组第 0 条，
+                      否则播放器拿不到地址会直接 manifestLoadError -->
+                 <!-- 空串或脏数据（历史 bug 写成过 ","）都退回数组第一条，读的时候就自愈 -->
+                 when video_url is null or video_url = '' or video_url not like 'http%'
+                   then json_unquote(json_extract(video_urls, '$[0]'))
+                 else video_url
+               end
+        from tool_web_post where id = #{id} limit 1
+    </select>
+
+    <update id="updateVideoUrls">
+        update tool_web_post
+        set video_url = #{videoUrl},
+            video_urls = #{videoUrls},
+            video_count = #{videoCount},
+            has_video = 1
+        where id = #{id}
+    </update>
+
+    <select id="selectSourceUrl" resultType="java.lang.String">
+        select url from tool_web_post where id = #{id} limit 1
+    </select>
+
+    <update id="updateVideoUrl">
+        update tool_web_post set video_url = #{videoUrl}, video_count = 1, has_video = 1 where id = #{id}
+    </update>
+
+    <select id="selectCategoryCounts" resultType="java.util.LinkedHashMap">
+        select category as name, count(*) as count
+        from tool_web_post
+        where source = #{source} and category is not null and category != ''
+        group by category
+        order by count(*) desc
+    </select>
+
+    <!-- 有内容的日期（按天计数）：前端据此把没有内容的日期置灰 -->
+    <select id="selectDateCounts" resultType="java.util.LinkedHashMap">
+        select date_format(published_ts, '%Y-%m-%d') as date, count(*) as count
+        from tool_web_post
+        where source = #{source} and published_ts between '1971-01-01' and '2100-01-01'
+        group by published_ts
+        order by published_ts desc
+    </select>
+
+    <!-- 已补进度：有真实日期的条数 / 总条数 -->
+    <!--
+      定位：某条在当前筛选+排序下排第几（0-based 偏移）。
+      排序键 = coalesce(published_full, 日期) desc, 源站 id desc；未定日期的按 '1970-01-01' 兜底，
+      与列表的 order by 保持一致，偏移量才能直接换算成页号。
+    -->
+    <select id="countBefore" resultType="long">
+        select count(*)
+        from tool_web_post t
+        join (select id tid,
+                     coalesce(published_full, cast(published_ts as datetime), '1970-01-01') k,
+                     cast(source_id as unsigned) sid
+              from tool_web_post where id = #{postId}) x
+        where t.source = #{source}
+        <if test="category != null and category != ''">
+            and t.category = #{category}
+        </if>
+        <if test="tag != null and tag != ''">
+            and find_in_set(#{tag}, t.tags) > 0
+        </if>
+        <if test="tags != null and tags.size() > 0">
+            and (
+            <foreach collection="tags" item="t2" separator=" or ">
+                find_in_set(#{t2}, t.tags) > 0
+            </foreach>
+            )
+        </if>
+        <if test="blockTags != null and blockTags.size() > 0">
+            and not (
+            <foreach collection="blockTags" item="bt" separator=" or ">
+                coalesce(find_in_set(#{bt}, t.tags), 0) > 0
+            </foreach>
+            )
+        </if>
+        <if test="dateFrom != null and dateFrom != ''">
+            and t.published_ts &gt;= #{dateFrom}
+        </if>
+        <if test="dateTo != null and dateTo != ''">
+            and t.published_ts &lt;= #{dateTo}
+        </if>
+        <if test="featured != null and featured != ''">
+            <choose>
+                <when test="featured == 'home'">and t.featured_kind in ('home','both')</when>
+                <when test="featured == 'pinned'">and t.featured_kind in ('pinned','both')</when>
+                <otherwise>and t.featured = 1</otherwise>
+            </choose>
+        </if>
+        and t.id &lt;&gt; x.tid
+        and (coalesce(t.published_full, cast(t.published_ts as datetime), '1970-01-01') &gt; x.k
+             or (coalesce(t.published_full, cast(t.published_ts as datetime), '1970-01-01') = x.k
+                 and cast(t.source_id as unsigned) &gt; x.sid))
+    </select>
+
+    <select id="countDated" resultType="long">
+        select count(*) from tool_web_post
+        where source = #{source} and published_ts between '1971-01-01' and '2100-01-01'
+    </select>
+
+    <select id="countAll" resultType="long">
+        select count(*) from tool_web_post where source = #{source}
+    </select>
+
+    <!-- 收藏 / 看过：owner_key 来自请求头 X-Ms-Owner（登录态由前端给 u:<id>） -->
+    <insert id="addUserItem">
+        insert ignore into tool_web_user_item (owner_key, post_id, kind)
+        values (#{ownerKey}, #{postId}, #{kind})
+    </insert>
+
+    <delete id="removeUserItem">
+        delete from tool_web_user_item where owner_key = #{ownerKey} and post_id = #{postId} and kind = #{kind}
+    </delete>
+
+    <select id="selectUserItemIds" resultType="java.lang.Long">
+        select post_id from tool_web_user_item
+        where owner_key = #{ownerKey} and kind = #{kind}
+        order by created_at desc
+        limit #{limit}
+    </select>
+
+    <!-- 我的收藏 / 浏览记录：直接按 user_item 连主表，前端拿到就是可渲染的行 -->
+    <select id="selectUserItems" resultType="java.util.LinkedHashMap">
+        select p.id, p.source, p.source_id as sourceId, p.title, p.category, p.tags, p.cover,
+               p.published_at as publishedAt, p.url, p.has_video as hasVideo,
+               case when p.content_text is not null and p.content_text &lt;&gt; '' then 1 else 0 end as hasDetail,
+               i.created_at as markedAt
+        from tool_web_user_item i
+        join tool_web_post p on p.id = i.post_id
+        where i.owner_key = #{ownerKey} and i.kind = #{kind}
+        order by i.created_at desc
+        limit #{offset}, #{limit}
+    </select>
+
+    <insert id="insertDownload">
+        insert into tool_web_download (post_id, mode, state, percent, params, kind)
+        values (#{postId}, #{mode}, #{state}, 0, #{params}, #{kind})
+    </insert>
+
+    <select id="selectLastInsertId" resultType="long">
+        select last_insert_id()
+    </select>
+
+    <update id="updateDownload">
+        update tool_web_download
+        set state = #{state},
+            percent = #{percent},
+            <if test="sizeBytes != null">size_bytes = #{sizeBytes},</if>
+            <if test="error != null">error = #{error},</if>
+            finished_at = if(#{state} in ('done','error','pending_import'), now(), finished_at)
+        where id = #{id}
+    </update>
+
+    <select id="selectDownload" resultType="java.util.LinkedHashMap">
+        select d.id, d.post_id as postId, d.mode, d.state, d.percent, d.size_bytes as sizeBytes,
+               d.params, d.error, d.created_at as createdAt, d.finished_at as finishedAt,
+               p.title, p.source_id as sourceId, p.video_file as videoFile
+        from tool_web_download d left join tool_web_post p on p.id = d.post_id
+        where d.id = #{id}
+    </select>
+
+    <select id="selectDownloads" resultType="java.util.LinkedHashMap">
+        select d.id, d.post_id as postId, d.mode, d.state, d.percent, d.size_bytes as sizeBytes,
+               d.params, d.error, d.created_at as createdAt, d.finished_at as finishedAt,
+               p.title, p.source_id as sourceId, p.video_file as videoFile, p.cover
+        from tool_web_download d left join tool_web_post p on p.id = d.post_id
+        order by d.id desc
+        limit #{limit}
+    </select>
+
+    <select id="selectBlockedTags" resultType="java.lang.String">
+        select tag from tool_web_tag_block where owner_key = #{ownerKey} order by created_at desc limit 200
+    </select>
+
+    <insert id="addBlockedTag">
+        insert ignore into tool_web_tag_block (owner_key, tag) values (#{ownerKey}, #{tag})
+    </insert>
+
+    <delete id="removeBlockedTag">
+        delete from tool_web_tag_block where owner_key = #{ownerKey} and tag = #{tag}
+    </delete>
+
+    <select id="countUserItems" resultType="long">
+        select count(*) from tool_web_user_item where owner_key = #{ownerKey} and kind = #{kind}
+    </select>
+
+    <select id="selectAllTags" resultType="java.lang.String">
+        select tags from tool_web_post
+        where source = #{source} and tags is not null and tags != ''
+        order by id desc
+        limit 5000
+    </select>
+</mapper>

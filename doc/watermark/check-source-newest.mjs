@@ -1,0 +1,10 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1300, height: 950 } });
+const p = await ctx.newPage();
+await p.goto('https://able.heermtat.cc/category/mrds/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+await p.waitForTimeout(2000);
+const ids = await p.evaluate(() => { const o = []; for (const a of document.querySelectorAll('a[href*="/archives/"]')) { const m = (a.getAttribute('href') || '').match(/\/archives\/(\d+)\/?/); if (m && !o.includes(m[1])) o.push(m[1]); } return o; });
+const nums = ids.map(Number).filter((n) => n > 200000).sort((a, b) => b - a);
+console.log('source top ids:', nums.slice(0, 6).join(','));
+await b.close();

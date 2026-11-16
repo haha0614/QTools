@@ -13,6 +13,7 @@ import com.qtools.common.constant.CacheConstants;
 import com.qtools.common.constant.Constants;
 import com.qtools.common.core.domain.model.LoginUser;
 import com.qtools.common.core.redis.RedisCache;
+import com.qtools.common.security.JwtPeek;
 import com.qtools.common.utils.ServletUtils;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.common.utils.http.UserAgentUtils;
@@ -66,6 +67,14 @@ public class TokenService
         String token = getToken(request);
         if (StringUtils.isNotEmpty(token))
         {
+            // 用户端 app token 与后台 token 共用 Authorization 头，但密钥 / issuer 不同。
+            // 拿 app token 去用后台密钥验签必然失败，于是每个用户端请求都会在这里刷一条 ERROR
+            // （功能无影响：返回 null 后按匿名继续，/api/app/** 的身份由 AppJwtFilter 裁决）。
+            // 这里只看未验签的 payload 声明来省掉这次注定失败的工作，不做任何授权判断。
+            if (JwtPeek.isAppToken(token))
+            {
+                return null;
+            }
             try
             {
                 Claims claims = parseToken(token);

@@ -15,12 +15,18 @@ import com.qtools.app.security.AppJwtFilter;
 import com.qtools.app.service.IAppAuthService;
 import com.qtools.app.service.IAppClaimService;
 import com.qtools.common.annotation.Anonymous;
+import com.qtools.common.annotation.CurrentAppUser;
+import com.qtools.common.security.AppSession;
 
 /**
  * 用户端账号接口（前缀 {@code /api/app/auth}）
  *
  * <p>类上 {@link Anonymous}：让 Spring Security 放行 {@code /api/app/**}——后台链不参与用户端身份判定，
  * 是否已登录由 {@link AppJwtFilter} 裁决（白名单只有 register / login / code）。</p>
+ *
+ * <p>需要登录态的接口一律用 {@link CurrentAppUser} 注入当前账号：解析器读 {@link AppJwtFilter} 已经写好
+ * 的 request attribute（{@code appUserId} / {@code appTokenId}），不查库、不重复验签；控制器里因此
+ * 不再出现 {@code AppJwtFilter.currentUserId(request)} 之类的手写解析。</p>
  *
  * <p>body 手工解析（而不是直接绑定 DTO），是为了非法 JSON 也回 {@code {"error":"..."}} + 400，
  * 而不是落到 framework 的 500 处理。</p>
@@ -55,32 +61,32 @@ public class AppAuthController
         return appAuthService.login(parseObject(rawBody), request);
     }
 
-    /** 登出：撤销当前 jti */
+    /** 登出：用注入了 jti 的会话撤销「当前这一个会话」，不影响该账号在其它设备上的登录 */
     @PostMapping("/logout")
-    public Map<String, Object> logout(HttpServletRequest request)
+    public Map<String, Object> logout(@CurrentAppUser AppSession session)
     {
-        return appAuthService.logout(currentUserId(request), AppJwtFilter.currentTokenId(request));
+        return appAuthService.logout(session.userId(), session.jti());
     }
 
     /** 当前用户 + 已绑定身份 */
     @GetMapping("/me")
-    public Map<String, Object> me(HttpServletRequest request)
+    public Map<String, Object> me(@CurrentAppUser Long userId)
     {
-        return appAuthService.me(currentUserId(request));
+        return appAuthService.me(userId);
     }
 
     /** 绑定邮箱（验证码通道未启用 → 501） */
     @PostMapping("/bind/email")
-    public Map<String, Object> bindEmail(@RequestBody(required = false) String rawBody, HttpServletRequest request)
+    public Map<String, Object> bindEmail(@RequestBody(required = false) String rawBody, @CurrentAppUser Long userId)
     {
-        return appAuthService.bind(currentUserId(request), AppUserIdentity.TYPE_EMAIL, parseObject(rawBody));
+        return appAuthService.bind(userId, AppUserIdentity.TYPE_EMAIL, parseObject(rawBody));
     }
 
     /** 绑定手机号（验证码通道未启用 → 501） */
     @PostMapping("/bind/phone")
-    public Map<String, Object> bindPhone(@RequestBody(required = false) String rawBody, HttpServletRequest request)
+    public Map<String, Object> bindPhone(@RequestBody(required = false) String rawBody, @CurrentAppUser Long userId)
     {
-        return appAuthService.bind(currentUserId(request), AppUserIdentity.TYPE_PHONE, parseObject(rawBody));
+        return appAuthService.bind(userId, AppUserIdentity.TYPE_PHONE, parseObject(rawBody));
     }
 
     /** 发送验证码（验证码通道未启用 → 501） */
@@ -92,7 +98,7 @@ public class AppAuthController
 
     /** 认领匿名设备：把 owner_key 的收藏 / 最近浏览归到当前账号 */
     @PostMapping("/claim")
-    public Map<String, Object> claim(@RequestBody(required = false) String rawBody, HttpServletRequest request)
+    public Map<String, Object> claim(@RequestBody(required = false) String rawBody, @CurrentAppUser Long userId)
     {
         Map<String, Object> body = parseObject(rawBody);
         Object ownerKey = body.get("ownerKey");
@@ -100,23 +106,7 @@ public class AppAuthController
         {
             throw AppException.badRequest("ownerKey 不能为空");
         }
-        return appClaimService.claim(currentUserId(request), String.valueOf(ownerKey).trim());
-    }
-
-    /**
-     * 当前用户 id
-     *
-     * <p>正常路径上 AppJwtFilter 已经拦住未登录请求，这里只是兜底（过滤器白名单外的
-     * {@code /api/app/**} 一定带 token），确保不会把 null 当 userId 用。</p>
-     */
-    private static Long currentUserId(HttpServletRequest request)
-    {
-        Long userId = AppJwtFilter.currentUserId(request);
-        if (userId == null)
-        {
-            throw AppException.unauthorized("未登录或登录已过期");
-        }
-        return userId;
+        return appClaimService.claim(userId, String.valueOf(ownerKey).trim());
     }
 
     /** 解析 body；缺 body 视为空对象（缺字段由业务层给 400） */

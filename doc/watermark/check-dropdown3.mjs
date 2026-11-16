@@ -1,0 +1,22 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1600, height: 1000 } });
+const p = await ctx.newPage();
+await p.route('**/api/tool/web/capabilities', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ owner: true, loggedIn: true, canSaveToMedia: true }) }));
+await p.goto('http://localhost/tool/mrds/post/3305', { waitUntil: 'networkidle', timeout: 60000 });
+await p.waitForTimeout(3000);
+await p.locator('.md-btn', { hasText: '下载' }).first().click();
+await p.waitForTimeout(900);
+const names = await p.evaluate(() => [...document.querySelectorAll('.el-dialog .el-select')].map((e) => (e.getAttribute('placeholder') || e.querySelector('input')?.placeholder || '')));
+console.log('selects:', JSON.stringify(names));
+// 工作室：第 3 个 select（索引 2）
+const studio = p.locator('.el-dialog .el-select').nth(2);
+await studio.click();
+await p.waitForTimeout(250);
+await studio.locator('input').fill('测试工作室XYZ');
+await p.waitForTimeout(1200);
+const sVis = await p.evaluate(() => { const d = [...document.querySelectorAll('.el-select-dropdown')].filter((x) => x.offsetParent !== null); return d.map((x) => [...x.querySelectorAll('.el-select-dropdown__item')].map((e) => e.textContent.trim())); });
+console.log('studio dropdown:', JSON.stringify(sVis));
+await p.keyboard.press('Escape');
+await p.waitForTimeout(200);
+await b.close();

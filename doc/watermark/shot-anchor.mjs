@@ -1,0 +1,13 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1600, height: 1000 } });
+const p = await ctx.newPage();
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'networkidle', timeout: 60000 });
+await p.waitForTimeout(2500);
+await p.evaluate(() => window.localStorage.setItem('ms.mrds.scrollAnchor', JSON.stringify({ id: '579', top: -184, at: Date.now() - 3 * 86400000 })));
+await p.reload({ waitUntil: 'networkidle' });
+await p.waitForTimeout(4500);
+const st = await p.evaluate(() => ({ banner: (document.querySelector('.mr-newer-text') || {}).textContent?.trim(), hasTarget: !!document.querySelector('[data-post-id="579"]'), cards: document.querySelectorAll('[data-post-id]').length }));
+console.log('restore state:', JSON.stringify(st));
+await p.screenshot({ path: 'E:/111/project/QTools/doc/shots/mrds-anchor2.png' });
+await b.close();

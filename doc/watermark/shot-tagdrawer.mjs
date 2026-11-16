@@ -1,0 +1,12 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: false, args: ['--mute-audio','--window-position=-32000,-32000'] });
+const ctx = await b.newContext({ viewport: { width: 1905, height: 1000 } });
+const p = await ctx.newPage();
+await p.goto('http://localhost/tool/mrds', { waitUntil: 'networkidle', timeout: 60000 });
+await p.waitForTimeout(3000);
+await p.locator('.mr-chip-more').click();
+await p.waitForTimeout(1000);
+await p.locator('.mr-drawer-block').first().click();
+await p.waitForTimeout(2200);
+await p.screenshot({ path: 'E:/111/project/QTools/doc/shots/mrds-tagdrawer2.png' });
+await b.close();

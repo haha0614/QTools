@@ -163,6 +163,19 @@ public final class MediaAvatarCrop
      */
     public static Path render(Path src, String crop, Path thumbsRoot, String cacheKey)
     {
+        return render(src, crop, thumbsRoot, cacheKey, null);
+    }
+
+    /**
+     * 同上，但允许指定 ffmpeg 作为<b>解码回退</b>（P6.99）
+     *
+     * <p>原图是 WebP 时 ImageIO 解不出来，以前会「退回原文件字节」，而那些字节被更外层当作
+     * JPEG 发出去 —— 浏览器的结果就是头像加载失败（首字占位）。带上 ffmpeg 后这类源图能正常裁出来。</p>
+     *
+     * @param ffmpeg ffmpeg 可执行文件路径（null / 空 = 只用 ImageIO）
+     */
+    public static Path render(Path src, String crop, Path thumbsRoot, String cacheKey, String ffmpeg)
+    {
         if (crop == null || crop.isEmpty())
         {
             return src;
@@ -180,7 +193,7 @@ public final class MediaAvatarCrop
                 return out;
             }
             Files.createDirectories(dir);
-            BufferedImage image = readForCrop(src, MAX_SOURCE_DIM);
+            BufferedImage image = MediaImageDecode.read(src, ffmpeg);
             if (image == null)
             {
                 throw new IOException("源图不是可解码的图片: " + src);

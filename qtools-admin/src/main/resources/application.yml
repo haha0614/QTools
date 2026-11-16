@@ -227,7 +227,9 @@ qtools:
     adminDist: '${qtools.home:E:/111/project/QTools}/QTools-M/dist'
     # 管理端 SPA 挂载路径（可配，且不得占用 API 前缀）
     adminPath: /admin-ui
-
+  # 短链接配置
+  short:
+    domain: "http://localhost:8080" #上线改为域名
 # 开发环境配置
 server:
   # 服务器的HTTP端口，默认为8080

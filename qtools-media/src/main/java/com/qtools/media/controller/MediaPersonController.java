@@ -70,21 +70,28 @@ public class MediaPersonController
         return mediaPersonService.personDetail(id);
     }
 
-    /** 人物名下视频分页：{@code {rows:[{id,title,folder,rel,size,dur,w,h,poster,role}],total,page,size}} */
+    /**
+     * 人物名下视频分页：{@code {rows:[{id,title,folder,rel,size,dur,w,h,poster,role}],total,page,size}}
+     *
+     * <p>{@code rating}（P6.99）：站端分级筛选，{@code general/guidance/restricted}；缺省或 {@code all} = 不筛。
+     * 分页与 total 同一个条件，所以「查看全部 N 个视频」的 N 恒等于不折叠时的列表长度。</p>
+     */
     @GetMapping("/person/{id}/videos")
     public Map<String, Object> personVideos(@PathVariable("id") Long id,
             @RequestParam(value = "page", required = false, defaultValue = "1") int page,
-            @RequestParam(value = "size", required = false, defaultValue = "20") int size)
+            @RequestParam(value = "size", required = false, defaultValue = "20") int size,
+            @RequestParam(value = "rating", required = false) String rating)
     {
-        return mediaPersonService.personVideos(id, page, size);
+        return mediaPersonService.personVideos(id, page, size, rating);
     }
 
-    /** 人物名下相册分页：{@code {rows:[{id,title,dir,count,cover,note}],total,page,size}} */
+    /** 人物名下相册分页：{@code {rows:[{id,title,dir,count,cover,note}],total,page,size}}；{@code rating} 口径同上 */
     @GetMapping("/person/{id}/albums")
     public Map<String, Object> personAlbums(@PathVariable("id") Long id,
             @RequestParam(value = "page", required = false, defaultValue = "1") int page,
-            @RequestParam(value = "size", required = false, defaultValue = "20") int size)
+            @RequestParam(value = "size", required = false, defaultValue = "20") int size,
+            @RequestParam(value = "rating", required = false) String rating)
     {
-        return mediaPersonService.personAlbums(id, page, size);
+        return mediaPersonService.personAlbums(id, page, size, rating);
     }
 }
