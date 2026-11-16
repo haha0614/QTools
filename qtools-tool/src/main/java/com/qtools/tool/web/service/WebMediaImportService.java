@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import com.qtools.media.domain.dto.MediaScanIngestRequest;
@@ -35,12 +36,31 @@ public class WebMediaImportService
 {
     private static final Logger log = LoggerFactory.getLogger(WebMediaImportService.class);
 
-    /** 媒体库根（media_root.id=1 → E:/111/视频）下的归档目录 */
-    private static final String LIB_ROOT = "E:/111/视频";
+    /** 服务端运行根，启动脚本以 -Dqtools.home 传入（缺省为便携布局） */
+    private static final String HOME = System.getProperty("qtools.home", "E:/111/project/QTools");
 
     private static final String LIB_FOLDER = "每日大赛";
 
-    private static final String WEB_ROOT = "E:/111/project/QTools/data/media/web";
+    /** 抓取素材落盘目录（下载 / 重签产物） */
+    private static final String WEB_ROOT = HOME + "/data/media/web";
+
+    /** 媒体库主根：取 qtools.media.rootPath，未配置时回退便携布局 */
+    @Value("${qtools.media.rootPath:E:/111/视频}")
+    private String libRoot;
+
+    /** 缩略图产物根：取 qtools.media.thumbsPath，未配置时回退便携布局 */
+    @Value("${qtools.media.thumbsPath:}")
+    private String thumbsPathCfg;
+
+    /** 缩略图子目录（p=图片 / v=视频封面），配置优先 */
+    private Path thumbsDir(String kind)
+    {
+        if (thumbsPathCfg != null && !thumbsPathCfg.trim().isEmpty())
+        {
+            return Paths.get(thumbsPathCfg, kind);
+        }
+        return Paths.get(libRoot, "..", "project/QTools/data/media/thumbs/" + kind).normalize();
+    }
 
     /** 下载 sidecar（ffmpeg 拉 HLS 的活儿交给它） */
     private static final String SIDECAR = "http://127.0.0.1:8765";
@@ -222,7 +242,7 @@ public class WebMediaImportService
                 return out;
             }
             // 视频放 <库根>/每日大赛/<标题>.mp4；图片放 <库根>/每日大赛/<标题>/ 下
-            Path targetDir = Paths.get(LIB_ROOT, LIB_FOLDER);
+            Path targetDir = Paths.get(libRoot, LIB_FOLDER);
             Files.createDirectories(targetDir);
             boolean wantVideo = !"images".equals(kind);
             boolean wantImages = "images".equals(kind);
@@ -518,8 +538,8 @@ public class WebMediaImportService
             String seq = String.valueOf(first.get(0).get("seq"));
             try
             {
-                Path src = Paths.get(LIB_ROOT, rel);
-                Path thumbRoot = Paths.get(LIB_ROOT, "..", "project/QTools/data/media/thumbs/p").normalize();
+                Path src = Paths.get(libRoot, rel);
+                Path thumbRoot = thumbsDir("p");
                 if (Files.exists(src))
                 {
                     // 老命名（管理端封面走这个）：thumbs/p/<albumId>/<seq4>.jpg
@@ -696,7 +716,7 @@ public class WebMediaImportService
             // 从库目录里的视频名反推：同名 -封面.jpg 若不存在，就用标题去 tool_web_post 找源站 id
             String baseName = videoRel.endsWith(".mp4") ? videoRel.substring(0, videoRel.length() - 4) : videoRel;
             String coverRel = LIB_FOLDER + "/" + baseName + "-封面.jpg";
-            Path coverInLib = Paths.get(LIB_ROOT, coverRel);
+            Path coverInLib = Paths.get(libRoot, coverRel);
             Path sourceCover = null;
             if (!Files.exists(coverInLib))
             {
@@ -726,7 +746,7 @@ public class WebMediaImportService
                     coverRel, hash == null ? null : "thumbs/v/" + hash + ".jpg", videoId);
             if (hash != null)
             {
-                Path thumbDir = Paths.get(LIB_ROOT, "..", "project/QTools/data/media/thumbs/v").normalize();
+                Path thumbDir = thumbsDir("v");
                 Files.createDirectories(thumbDir);
                 Files.copy(sourceCover, thumbDir.resolve(hash + ".jpg"), StandardCopyOption.REPLACE_EXISTING);
             }

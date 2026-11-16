@@ -48,7 +48,10 @@ public class WebDownloadController
 {
     private static final Logger log = LoggerFactory.getLogger(WebDownloadController.class);
 
-    private static final String WEBROOT = "E:/111/project/QTools/data/media/web";
+    /** 服务端运行根，启动脚本以 -Dqtools.home 传入（缺省为便携布局） */
+    private static final String HOME = System.getProperty("qtools.home", "E:/111/project/QTools");
+
+    private static final String WEBROOT = HOME + "/data/media/web";
 
     /** 下载 sidecar（ffmpeg 拉 HLS 的活儿都交给它） */
     private static final String SIDECAR = "http://127.0.0.1:8765";
