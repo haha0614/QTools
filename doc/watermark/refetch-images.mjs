@@ -4,8 +4,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 const C = ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'].find((p) => { try { return fs.existsSync(p); } catch { return false; } });
-const MYSQL = 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
-const WEBROOT = 'E:/111/project/QTools/data/media/web';
+const MYSQL = process.env.QTOOLS_MYSQL || 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
+const WEBROOT = process.env.QTOOLS_WEBROOT || 'E:/111/project/QTools/data/media/web';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36';
 const LIMIT = Number(process.env.LIMIT || 40);
 const DRY = process.env.DRY === '1';
@@ -56,7 +56,7 @@ async function dedupeVideoUrls(list) {
 const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','-N','-B','-e', sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
 // 站点样板行（推荐位标题、投稿说明等）：由 clean-noise.mjs 按文档频率自动发现并写盘，
 // 抽取阶段直接丢掉，新抓的帖子就不会再把它们当正文存进来。
-const NOISE_FILE = 'E:/111/project/QTools/QTools/doc/watermark/noise-lines.json';
+const NOISE_FILE = process.env.QTOOLS_NOISE || 'E:/111/project/QTools/QTools/doc/watermark/noise-lines.json';
 const NOISE_LINES = (() => {
   try {
     return new Set(JSON.parse(fs.readFileSync(NOISE_FILE, 'utf8')));

@@ -228,7 +228,7 @@ if (BG_ENABLED) {
 // 串行队列：一条 330MB 左右，同时下多个只会互相抢带宽。
 const FFMPEG = process.env.FFMPEG || 'E:/111/project/QTools/data/media/runtime/ffmpeg.exe';
 const FFPROBE = process.env.FFPROBE || 'E:/111/project/QTools/data/media/runtime/ffprobe.exe';
-const WEBROOT = 'E:/111/project/QTools/data/media/web';
+const WEBROOT = process.env.QTOOLS_WEBROOT || 'E:/111/project/QTools/data/media/web';
 let dlQueue = [];
 let dlWorking = false;
 

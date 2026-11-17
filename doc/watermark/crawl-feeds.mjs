@@ -4,8 +4,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 const exe = ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'].find((p) => { try { return fs.existsSync(p); } catch { return false; } });
-const MYSQL = 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
-const WEBROOT = 'E:/111/project/QTools/data/media/web';
+const MYSQL = process.env.QTOOLS_MYSQL || 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
+const WEBROOT = process.env.QTOOLS_WEBROOT || 'E:/111/project/QTools/data/media/web';
 const BASE = process.env.BASE || 'https://able.heermtat.cc';
 const PAGES = Number(process.env.PAGES || 3);
 const DRY = process.env.DRY === '1';

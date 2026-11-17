@@ -480,6 +480,16 @@ public class WebPlayController
             pb.directory(script.getParentFile());
             pb.redirectErrorStream(true);
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(new File(home, "data/logs/resign-sidecar.log")));
+            // 侧车再派生的 worker（refresh-latest / crawl-feeds / refetch-images）继承这份环境，
+            // 免得各脚本里的便携路径把产物写到别的机器/别的盘上
+            var env = pb.environment();
+            env.put("QTOOLS_HOME", new File(home).getAbsolutePath());
+            env.put("QTOOLS_WEBROOT", new File(home, "data/media/web").getAbsolutePath());
+            env.put("QTOOLS_MYSQL", new File(home, "tools/mysql/bin/mysql.exe").getAbsolutePath());
+            env.put("FFMPEG", new File(home, "data/media/runtime/ffmpeg.exe").getAbsolutePath());
+            env.put("FFPROBE", new File(home, "data/media/runtime/ffprobe.exe").getAbsolutePath());
+            env.put("QTOOLS_LOG", new File(home, "data/logs/refresh-latest.log").getAbsolutePath());
+            env.put("QTOOLS_NOISE", new File(home, "QTools/doc/watermark/noise-lines.json").getAbsolutePath());
             pb.start();
             for (int i = 0; i < 10 && !probeSidecar(); i++)
             {

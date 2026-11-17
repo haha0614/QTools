@@ -6,7 +6,7 @@ import fs from 'node:fs';
 // 完整轮次（21 个分类 + 详情 6 条）交给 refresh-latest.mjs，每 20 分钟一次。
 const NODE = process.execPath;
 const DIR = new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
-const LOG = 'E:/111/project/QTools/data/logs/refresh-latest.log';
+const LOG = process.env.QTOOLS_LOG || 'E:/111/project/QTools/data/logs/refresh-latest.log';
 
 const log = (msg) => {
   const line = new Date().toISOString() + ' [quick] ' + msg;
