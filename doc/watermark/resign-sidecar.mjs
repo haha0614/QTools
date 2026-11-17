@@ -189,7 +189,7 @@ async function pumpDetail() {
 // 目的：源站归档页不给年份，只有详情页有真实发布时间；后台按"未抓/未补时间"的条目慢速补齐。
 // 速率沿用 DETAIL_MIN_GAP_MS（默认 5 秒/条 ≈ 1.7 万条/天）；用户点开或翻页时 P0/P1 永远插到前面。
 const BG_ENABLED = process.env.BG_BACKFILL !== '0';
-const BG_BATCH = Number(process.env.BG_BATCH || 3);
+const BG_BATCH = Number(process.env.BG_BATCH || 5);
 const BG_INTERVAL_MS = Number(process.env.BG_INTERVAL_MS || 20000);
 const BG_QUEUE_LIMIT = Number(process.env.BG_QUEUE_LIMIT || 6);
 const bgTried = new Set();
@@ -204,7 +204,9 @@ function queryIds(sql) {
 }
 
 async function bgTick() {
-  if (refreshing) return;                     // 整轮刷新优先，别抢
+  // 原来这里有一句 if (refreshing) return：refresh 每 20 分钟一轮、每轮跑 12~25 分钟，
+  // 于是后台队列几乎永远进不来（实测 11.5 小时只完成 6 条）。排队本身不耗资源，
+  // 真正的串行在 pumpDetail 里，所以这里不再拦。
   if (detailQueue.filter((q) => q.priority === 'bg').length >= BG_QUEUE_LIMIT) return;
   const ids = await queryIds(
     // tags is null：详情抓过但标签没抽过的老数据也要补一遍（标签是筛选/黑名单的依据）

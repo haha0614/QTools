@@ -81,7 +81,9 @@ const WHERE = FORCE_TOP
     ? " where content_text is null or content_text=''"
     : (process.env.ONLY_NEW_VIDEO === '1' ? " where video_url is null or video_url=''" : ''))));
 // 补详情要"补最新的"：source_id 是源站自增 id，越大越新；source_rank 记的是抓取顺序，不适合
-const ORDER = FORCE_TOP || process.env.ONLY_NO_DETAIL === '1' ? '' : ' order by id';
+// ONLY_NO_DETAIL 原来不带 ORDER，MySQL 每轮都可能返回同一批行（补不动的就永远卡在那）；
+// 加 order by id 让批次随补完推进。
+const ORDER = FORCE_TOP ? '' : ' order by id';
 const rows = db('select id, source_id, url, video_url from tool_web_post' + WHERE + ORDER + ' limit ' + LIMIT)
   .trim().split(/\r?\n/).filter(Boolean).map((l) => { const [id, sid, url, video] = l.split('\t'); return { id, sid, url, video: video || '' }; });
 console.log('rows', rows.length, DRY ? '(dry)' : '');

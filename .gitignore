@@ -64,3 +64,6 @@ doc/media-import/node_modules/
 
 # 私密配置（两种命名都排除：旧 application-secret.yml / 新 secret.yml）
 secret.yml
+
+# 运行时生成物（clean-noise.mjs 每轮重写），不该入库
+doc/watermark/noise-lines.json
