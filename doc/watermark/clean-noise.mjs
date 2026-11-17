@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-const MYSQL = 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
+const MYSQL = process.env.QTOOLS_MYSQL || 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
+const NOISE_FILE = process.env.QTOOLS_NOISE || 'E:/111/project/QTools/QTools/doc/watermark/noise-lines.json';
 const DRY = process.env.DRY !== '0';
 // df=5 的那几条是同一系列帖子的「关键词：…」行，属于正文内容，不能当样板；
 // 真正的站点样板 df 是 26 / 560 这个量级，所以门槛取 10。
@@ -32,7 +33,7 @@ for (const r of rows) {
 // 只靠文档频率会让个别残留（比如某条正文中间夹着的推荐位标题）永远清不掉。
 let known = [];
 try {
-  known = JSON.parse(fs.readFileSync('E:/111/project/QTools/QTools/doc/watermark/noise-lines.json', 'utf8')) || [];
+  known = JSON.parse(fs.readFileSync(NOISE_FILE, 'utf8')) || [];
 } catch (e) {
   known = [];
 }
@@ -48,7 +49,7 @@ for (const [t, n] of boiler.slice(0, 12)) console.log('  df=' + n, t.slice(0, 50
 
 // 把本次识别出的样板行写盘：爬虫在抽取阶段就能直接丢掉，不必等事后清理
 try {
-  fs.writeFileSync('E:/111/project/QTools/QTools/doc/watermark/noise-lines.json', JSON.stringify(boiler.map(([t]) => t), null, 1));
+  fs.writeFileSync(NOISE_FILE, JSON.stringify(boiler.map(([t]) => t), null, 1));
 } catch (e) {
   console.log('写噪音清单失败', String(e.message).slice(0, 80));
 }
