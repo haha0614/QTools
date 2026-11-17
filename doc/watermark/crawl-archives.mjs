@@ -64,7 +64,7 @@ for (let page = FROM; page <= TO; page++) {
       db('insert into tool_web_post (source, source_id, title, published_at, url, source_rank) values '
         + values.slice(i, i + 200).join(',')
         // 只补"没有年份"的行：详情抓来的真日期（含「年」）绝不能被归档页的月日覆盖
-        + " on duplicate key update published_at = if(published_at like '%年%', published_at, values(published_at)), date_inferred = 0;');
+        + " on duplicate key update published_at = if(published_at like '%年%', published_at, values(published_at)), date_inferred = 0;");
     }
   }
   inserted += fresh;
