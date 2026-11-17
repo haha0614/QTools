@@ -344,8 +344,11 @@ public class WebPlayController
             String body = "{\"url\":\"" + sourceUrl.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}";
             // 重签是真浏览器去开源站页面，忙的时候（sidecar 正在跑自动刷新）可能很久；
             // 但播放器等不起：给 12 秒上限，超时就返回失败让前端提示，而不是让请求挂着
+            // 实测 sidecar 单次重签 8.8~12.8 秒（真浏览器开源站页面），旧的 12 秒上限
+            // 会掐掉一半以上的重签，导致日志里 ok=false、地址永远不回写、播放一直 502。
+            long resignTimeoutSec = Long.getLong("qtools.resign.timeoutSec", 30L);
             HttpRequest req = HttpRequest.newBuilder(URI.create(SIDECAR + "/resign"))
-                    .timeout(Duration.ofSeconds(12))
+                    .timeout(Duration.ofSeconds(resignTimeoutSec))
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
@@ -362,7 +365,10 @@ public class WebPlayController
             int arr = json.indexOf("\"urls\":[");
             if (arr >= 0)
             {
-                int p = arr + 9;
+                // "urls":[ 共 8 个字符，+8 才落在第一个元素的左引号上；
+                // 曾写成 +9 会跳过引号，导致解析出来的是 "]}" 这种垃圾并回写进库
+                // （HANDOFF 里"脏数据源头未定位"就是这里）。
+                int p = arr + 8;
                 while (p < json.length())
                 {
                     int q1 = json.indexOf('"', p);
