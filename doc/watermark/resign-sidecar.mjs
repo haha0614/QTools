@@ -39,20 +39,74 @@ function pickM3u8(src) {
  * 重签：返回页面上的全部视频地址（一条帖子可能有多段视频）。
  * 只返回第一条会让"第 2 段视频过期"时被错播成第 1 段，所以这里给出完整数组。
  */
+// 方案2：短 TTL 缓存。同一个帖子在"恢复播放"之前会被前端重试打好几次，
+// 每次都排队开一遍浏览器；签名有效期约 1 小时，90 秒内复用完全安全。
+const resignCache = new Map();
+const RESIGN_CACHE_MS = Number(process.env.RESIGN_CACHE_MS || 90000);
+
+// 同一个 URL 的并发请求合并成一次真实重签（single-flight）：
+// 前端重试会连发好几次，若每次都排队开浏览器，队列会越排越长（实测第 2 次 30 秒）。
+const resignInflight = new Map();
+
 async function resign(url) {
-  const b = await getBrowser();
+  const hit = resignCache.get(url);
+  if (hit && Date.now() - hit.at < RESIGN_CACHE_MS) return hit.urls;
+  const running = resignInflight.get(url);
+  if (running) return running;
+  const task = (async () => {
+    const urls = await resignFresh(url);
+    if (urls && urls.length) resignCache.set(url, { urls, at: Date.now() });
+    if (resignCache.size > 500) {
+      for (const [k, v] of resignCache) if (Date.now() - v.at > RESIGN_CACHE_MS) resignCache.delete(k);
+    }
+    return urls;
+  })();
+  resignInflight.set(url, task);
+  try {
+    return await task;
+  } finally {
+    resignInflight.delete(url);
+  }
+}
+
+// 复用同一个 context：每次 newContext 都要重新建一次隔离环境（几百毫秒，
+// 且会让 Cloudflare 更警惕）。同时在路由层拦掉图片/字体/样式/媒体 ——
+// 我们只需要播放器配置那段 JSON，这些资源一个都不用下载。
+let resignCtx = null;
+async function getResignContext(b) {
+  if (resignCtx) return resignCtx;
   const ctx = await b.newContext({ viewport: { width: 1200, height: 800 } });
   try {
-    const p = await ctx.newPage();
-    const resp = await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    // 原始 HTML 和渲染后的 DOM 都要看：有些播放器配置是 JS 注入的，
-    // 只取其中一个会漏掉"第二段视频"（实测只拿到 1 条，导致两段都播第一段）
-    const raw = (await resp.text()) || '';
-    const dom = await p.content();
-    const urls = pickAllM3u8(raw + '\n' + dom);
+    await ctx.route('**/*', (route) => {
+      const t = route.request().resourceType();
+      if (t === 'image' || t === 'font' || t === 'stylesheet' || t === 'media') {
+        return route.abort().catch(() => {});
+      }
+      return route.continue().catch(() => {});
+    });
+  } catch (e) { /* 老版本 playwright 不支持 route 时忽略 */ }
+  resignCtx = ctx;
+  return ctx;
+}
+
+async function resignFresh(url) {
+  const b = await getBrowser();
+  const ctx = await getResignContext(b);
+  const p = await ctx.newPage();
+  try {
+    const resp = await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const raw = (resp && (await resp.text())) || '';
+    // 快路径：原始 HTML 里就有播放器配置时，不再序列化整页 DOM
+    // （p.content() 在这类页面上要 1~3 秒，是"慢"的主要来源之一）
+    let urls = pickAllM3u8(raw);
+    if (!urls.length) {
+      // 有些播放器配置是 JS 注入的，只取 HTML 会漏段（历史上只拿到 1 条导致两段都播第 1 段）
+      const dom = await p.content();
+      urls = pickAllM3u8(raw + '\n' + dom);
+    }
     return urls;
   } finally {
-    await ctx.close().catch(() => {});
+    await p.close().catch(() => {});
   }
 }
 
@@ -203,7 +257,11 @@ function queryIds(sql) {
   });
 }
 
+// 有待处理的重签（= 用户正在等播放）时，后台补详情让路，避免和用户抢源站
+let pendingResigns = 0;
+
 async function bgTick() {
+  if (pendingResigns > 0) return;
   // 原来这里有一句 if (refreshing) return：refresh 每 20 分钟一轮、每轮跑 12~25 分钟，
   // 于是后台队列几乎永远进不来（实测 11.5 小时只完成 6 条）。排队本身不耗资源，
   // 真正的串行在 pumpDetail 里，所以这里不再拦。
@@ -402,18 +460,23 @@ const server = http.createServer((req, res) => {
     try { payload = JSON.parse(body || '{}'); } catch (e) { return send(400, { error: 'bad json' }); }
     if (!payload.url) return send(400, { error: 'missing url' });
     // 串行化：一个浏览器实例同时开太多标签会互相拖慢/被风控
+    pendingResigns += 1;
     queue = queue.then(async () => {
       const t0 = Date.now();
       try {
+        const cacheBefore = resignCache.has(payload.url) && (Date.now() - resignCache.get(payload.url).at) < RESIGN_CACHE_MS;
         const fresh = await resign(payload.url);
         const list = Array.isArray(fresh) ? fresh : (fresh ? [fresh] : []);
-        console.log(new Date().toISOString(), 'resign', payload.url.slice(-24), '->', list.length ? list.length + ' 条' : 'empty', (Date.now() - t0) + 'ms');
+        const cached = cacheBefore;
+        console.log(new Date().toISOString(), 'resign', payload.url.slice(-24), '->', list.length ? list.length + ' 条' : 'empty', (Date.now() - t0) + 'ms', cached ? '(cache)' : '');
         if (!list.length) return send(502, { error: 'no m3u8 found' });
         // 同时给 url（兼容旧调用）和 urls（多视频按 index 取）
         send(200, { url: list[0], urls: list });
       } catch (e) {
         console.log(new Date().toISOString(), 'resign failed', String(e.message).slice(0, 120));
         send(502, { error: String(e.message).slice(0, 200) });
+      } finally {
+        pendingResigns = Math.max(0, pendingResigns - 1);
       }
     });
   });
