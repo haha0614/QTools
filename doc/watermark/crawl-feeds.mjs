@@ -6,12 +6,14 @@ import { execFileSync } from 'node:child_process';
 const exe = ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'].find((p) => { try { return fs.existsSync(p); } catch { return false; } });
 const MYSQL = process.env.QTOOLS_MYSQL || 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
 const WEBROOT = process.env.QTOOLS_WEBROOT || 'E:/111/project/QTools/data/media/web';
-const BASE = process.env.BASE || 'https://able.heermtat.cc';
+// 源站域名会轮换（见 gitlab.com/mrds/mrds 的 README，或跑 sync-source-host.mjs 同步库里地址）
+const BASE = process.env.BASE || 'https://able.nwfuhxhj.cc';
 const PAGES = Number(process.env.PAGES || 3);
 const DRY = process.env.DRY === '1';
 const ONLY = process.env.ONLY || '';
 
-const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','-N','-B','-e', sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
+const DB_PWD = process.env.MYSQL_PWD || process.env.QTOOLS_MYSQL_PWD || 'dqq1107.';
+const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-p' + DB_PWD,'-N','-B','-e', sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
 const esc = (s) => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "''");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

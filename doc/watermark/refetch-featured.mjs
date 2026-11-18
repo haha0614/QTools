@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 const exe = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const MYSQL = 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
-const BASE = process.env.BASE || 'https://able.heermtat.cc';
+const BASE = process.env.BASE || 'https://able.nwfuhxhj.cc';
 // 归档条目的 published_at 只有「月 日」，生成列 published_ts 在严格模式下会报 1411，
 // 所以统一放宽 sql_mode（这些行本来就该是 NULL 日期）。
 const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','--default-character-set=utf8mb4','-N','-B','-e', "set session sql_mode=''; " + sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });

@@ -68,7 +68,7 @@ for (const line of rows) {
   const [id, sid, pageUrl0, raw] = line.split('\t');
   if (raw && raw.indexOf('http') >= 0) continue;
   idx += 1;
-  const pageUrl = pageUrl0 || ('https://able.heermtat.cc/archives/' + sid + '/');
+  const pageUrl = pageUrl0 || ((process.env.BASE || 'https://able.nwfuhxhj.cc') + '/archives/' + sid + '/');
   const list = await resignOne(pageUrl);
   if (!list.length) {
     fail += 1;

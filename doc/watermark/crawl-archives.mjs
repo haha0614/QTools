@@ -4,15 +4,17 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 const exe = ['C:/Program Files/Google/Chrome/Application/chrome.exe'].find((p) => { try { return fs.existsSync(p); } catch { return false; } });
-const MYSQL = 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
-const WEBROOT = 'E:/111/project/QTools/data/media/web';
-const BASE = process.env.BASE || 'https://able.heermtat.cc';
+const MYSQL = process.env.QTOOLS_MYSQL || process.env.MYSQL || 'D:/project/QTools-All/tools/mysql/bin/mysql.exe';
+const WEBROOT = process.env.QTOOLS_WEBROOT || 'D:/project/QTools-All/data/media/web';
+// 源站域名会轮换（见 gitlab.com/mrds/mrds 的 README，或跑 sync-source-host.mjs）
+const BASE = process.env.BASE || 'https://able.nwfuhxhj.cc';
+const DB_PWD = process.env.MYSQL_PWD || process.env.QTOOLS_MYSQL_PWD || 'dqq1107.';
 const FROM = Number(process.env.FROM || 1);
 const TO = Number(process.env.TO || 5);
 const WITH_COVER = process.env.WITH_COVER !== '0';
 const DRY = process.env.DRY === '1';
 // 归档条目只有「月 日」，生成列 published_ts 在严格模式下会报 1411，统一放宽 sql_mode
-const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','--default-character-set=utf8mb4','-N','-B','-e', "set session sql_mode=''; " + sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
+const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-p' + DB_PWD,'--default-character-set=utf8mb4','-N','-B','-e', "set session sql_mode=''; " + sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
 const esc = (s) => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "''");
 
 const b = await chromium.launch({ executablePath: exe, headless: process.env.HEADLESS === '1', args: ['--mute-audio','--window-position=-32000,-32000','--window-size=1300,950'] });

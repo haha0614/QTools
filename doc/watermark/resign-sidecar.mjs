@@ -128,16 +128,29 @@ function pickAllM3u8(html) {
 const REFRESH_MINUTES = Number(process.env.REFRESH_MINUTES || 20);
 let refreshing = false;
 
+/** 库里的主域名：换域名后这里会跟着变，子进程继承 BASE 就不用手改脚本 */
+let cachedBase = '';
+async function sourceBase() {
+  if (cachedBase) return cachedBase;
+  try {
+    const h = await sqlOne("select substring_index(substring_index(url,'//',-1),'/',1) from tool_web_post group by 1 order by count(*) desc limit 1;");
+    if (h) cachedBase = 'https://' + String(h).trim();
+  } catch (e) { /* 查不到就用脚本里的默认值 */ }
+  return cachedBase;
+}
+
 async function runRefresh(quick) {
   if (refreshing) return;
   refreshing = true;
   const script = quick ? './refresh-quick.mjs' : './refresh-latest.mjs';
+  // 从库里主域名推基址，换域名后子进程自动跟上（脚本里的默认值只是兜底）
+  const base = await sourceBase();
   try {
     // 异步：同步版本会把整个 sidecar 卡住几分钟（重签/预取全部无响应）
     const out = await new Promise((resolve, reject) => {
       execFile(process.execPath, [new URL(script, import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')], {
         cwd: new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
-        env: { ...process.env, HEADLESS: '1' },
+        env: { ...process.env, HEADLESS: '1', ...(base ? { BASE: base } : {}) },
         encoding: 'utf8',
         maxBuffer: 1 << 26,
         timeout: 15 * 60 * 1000,

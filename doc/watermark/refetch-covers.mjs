@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 const C = ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'].find((p) => { try { return fs.existsSync(p); } catch { return false; } });
 const MYSQL = 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
 const WEBROOT = 'E:/111/project/QTools/data/media/web';
-const BASE = 'https://able.heermtat.cc/';
+const BASE = (process.env.BASE || 'https://able.nwfuhxhj.cc').replace(/\/$/, '') + '/';
 const DRY = process.env.DRY === '1';
 
 const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','-N','-B','-e', sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
