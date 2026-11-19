@@ -21,6 +21,7 @@ public interface ToolWebPostMapper
             @Param("dateFrom") String dateFrom, @Param("dateTo") String dateTo,
             @Param("featured") String featured,
             @Param("videoType") String videoType, @Param("minVideos") Integer minVideos,
+            @Param("orientation") String orientation,
             @Param("offset") int offset, @Param("limit") int limit);
 
     long countPage(@Param("source") String source, @Param("qLike") String qLike,
@@ -30,7 +31,11 @@ public interface ToolWebPostMapper
             @Param("tags") java.util.List<String> tags, @Param("blockTags") java.util.List<String> blockTags,
             @Param("dateFrom") String dateFrom, @Param("dateTo") String dateTo,
             @Param("featured") String featured,
-            @Param("videoType") String videoType, @Param("minVideos") Integer minVideos);
+            @Param("videoType") String videoType, @Param("minVideos") Integer minVideos,
+            @Param("orientation") String orientation);
+
+    /** 方向分布：{@code [{o:'l',c:2453},{o:'p',c:2403}]}（只统计已判定方向的） */
+    java.util.List<Map<String, Object>> selectOrientationCounts(@Param("source") String source);
 
     /** 找"该日期（含）之前最新的一条"，用于按日期跳转时直接定位到那条真实帖子 */
     Long selectIdByDate(@Param("source") String source, @Param("dateTo") String dateTo,

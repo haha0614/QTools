@@ -62,7 +62,8 @@ public class WebPostController
             @RequestParam(value = "dateTo", required = false) String dateTo,
             @RequestParam(value = "featured", required = false) String featured,
             @RequestParam(value = "videoType", required = false) String videoType,
-            @RequestParam(value = "minVideos", required = false) Integer minVideos)
+            @RequestParam(value = "minVideos", required = false) Integer minVideos,
+            @RequestParam(value = "orientation", required = false) String orientation)
     {
         int safePage = page < 1 ? 1 : page;
         int safeSize = size < 1 ? 24 : Math.min(size, SIZE_MAX);
@@ -127,16 +128,18 @@ public class WebPostController
         String cleanFeatured = blankToNull(featured);
         Map<String, Object> out = new LinkedHashMap<>();
         String cleanVideoType = blankToNull(videoType);
+        String cleanOrientation = blankToNull(orientation);
         List<Map<String, Object>> rows = toolWebPostMapper.selectPage(source, qLike, ftQuery, ftOr, likeTokens,
                 cleanCat, cleanTag, cleanTags, blockTags, cleanFrom, cleanTo, cleanFeatured,
-                cleanVideoType, minVideos, (safePage - 1) * safeSize, safeSize);
+                cleanVideoType, minVideos, cleanOrientation, (safePage - 1) * safeSize, safeSize);
         for (Map<String, Object> row : rows)
         {
             row.put("tags", splitTags(row.get("tags")));
         }
         out.put("rows", rows);
         out.put("total", toolWebPostMapper.countPage(source, qLike, ftQuery, ftOr, likeTokens, cleanCat, cleanTag,
-                cleanTags, blockTags, cleanFrom, cleanTo, cleanFeatured, cleanVideoType, minVideos));
+                cleanTags, blockTags, cleanFrom, cleanTo, cleanFeatured, cleanVideoType, minVideos,
+                cleanOrientation));
         out.put("page", safePage);
         out.put("size", safeSize);
         return out;
@@ -240,6 +243,8 @@ public class WebPostController
         out.put("tags", tags);
         // 日期选择器用：可用日期清单（没有内容的日期置灰）+ 已补进度
         out.put("dates", toolWebPostMapper.selectDateCounts(source));
+        // 方向筛选的计数（只有已判定的才计入，前端在选项上显示）
+        out.put("orientations", toolWebPostMapper.selectOrientationCounts(source));
         out.put("blockedTags", blockedTags);
         out.put("dated", toolWebPostMapper.countDated(source));
         out.put("total", toolWebPostMapper.countAll(source));
@@ -280,7 +285,8 @@ public class WebPostController
         if (!day.matches("\\d{4}-\\d{2}-\\d{2}"))
         {
             return Map.of("page", 1, "before", 0, "total", toolWebPostMapper.countPage(source, null, null, null,
-                    List.of(), blankToNull(category), blankToNull(tag), List.of(), List.of(), null, null, null, null, null));
+                    List.of(), blankToNull(category), blankToNull(tag), List.of(), List.of(), null, null, null, null, null,
+                    null));
         }
         // 先找到"那天（含）之前最新的一条"，再用 countBefore 算页号：
         // countBefore 和列表用同一套排序规则，跨格式的 published_full 也不会算偏。

@@ -9,6 +9,25 @@ const WEBROOT = process.env.QTOOLS_WEBROOT || 'E:/111/project/QTools/data/media/
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36';
 const LIMIT = Number(process.env.LIMIT || 40);
 const DRY = process.env.DRY === '1';
+
+/** 从 JPEG 缓冲区读宽高（只扫 SOF 段，不引第三方库） */
+function jpegDims(buf) {
+  if (!buf || !buf.length) return null;
+  let i = 2;
+  while (i + 9 < buf.length) {
+    if (buf[i] !== 0xFF) { i += 1; continue; }
+    const m = buf[i + 1];
+    if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC) {
+      const h = buf.readUInt16BE(i + 5);
+      const w = buf.readUInt16BE(i + 7);
+      return w > 0 && h > 0 ? [w, h] : null;
+    }
+    const len = buf.readUInt16BE(i + 2);
+    if (len < 2) return null;
+    i += 2 + len;
+  }
+  return null;
+}
 /**
  * 后台补详情只抓文字/标签/封面，跳过图集下载。
  *
@@ -275,8 +294,17 @@ for (const row of rows) {
       // 只写正文与计数，绝不碰 cover（封面由 refetch-covers 负责）
       // 跳过图片的后台补齐：图片张数按页面实际张数记录，
       // 详情页据此判断"这条应该有图但本地没有"，用户点开时再补抓
+      // 方向：优先用视频比例（video_ratios 由 ffprobe 写），没有就退到图集第一张的尺寸
+      const firstRatio = (videoUrls.length ? String(meta.videoRatio || '') : '');
+      const dim = firstRatio && /^\d+\/\d+$/.test(firstRatio)
+        ? firstRatio.split('/').map(Number)
+        : (/^data:image\//.test((picked[0] && picked[0].src) || '') ? jpegDims(Buffer.from(String(picked[0].src).slice(String(picked[0].src).indexOf(',') + 1), 'base64')) : null);
+      const orientationSql = dim && dim[0] > 0 && dim[1] > 0
+        ? ", orientation=case when orientation is null then '" + (dim[0] >= dim[1] ? 'l' : 'p') + "' else orientation end"
+        : '';
       const imgCountForWrite = SKIP_IMAGES ? picked.length : local.length;
       db("update tool_web_post set content='" + json + "', image_count=" + imgCountForWrite
+        + orientationSql
         + ", content_text='" + textJoin.replace(/\\/g, '\\\\').replace(/'/g, "''") + "'"
         + (meta.category ? ", category='" + meta.category.replace(/'/g, "''") + "'" : '')
         + (meta.dateText ? ", published_at='" + meta.dateText.replace(/'/g, "''") + "'" : '')

@@ -81,6 +81,10 @@
         <if test="minVideos != null">
             and ifnull(video_count, 0) &gt;= #{minVideos}
         </if>
+        <!-- 方向：只筛已判定的（orientation 由 ffprobe 比例或图集第一张推出），未知的留在"全部" -->
+        <if test="orientation != null and orientation != ''">
+            and orientation = #{orientation}
+        </if>
     </sql>
 
     <select id="selectPage" resultType="java.util.LinkedHashMap">
@@ -281,6 +285,12 @@
         and (coalesce(t.published_full, cast(t.published_ts as datetime), '1970-01-01') &gt; x.k
              or (coalesce(t.published_full, cast(t.published_ts as datetime), '1970-01-01') = x.k
                  and cast(t.source_id as unsigned) &gt; x.sid))
+    </select>
+
+    <select id="selectOrientationCounts" resultType="java.util.LinkedHashMap">
+        select orientation as o, count(*) as c from tool_web_post
+        where source = #{source} and orientation is not null
+        group by orientation
     </select>
 
     <select id="countDated" resultType="long">

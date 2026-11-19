@@ -378,6 +378,12 @@ async function probeAndSaveRatios(id, urls) {
     for (const u of urls.slice(0, 20)) ratios.push(await probeRatio(u));
     if (!ratios.some((r) => r)) return;
     await sqlOne("update tool_web_post set video_ratios='" + JSON.stringify(ratios).replace(/'/g, "''") + "' where id=" + pid + ';');
+    // 顺手把方向也定下来（列表页「横屏/竖屏」筛选用）；已有值不覆盖，避免抖
+    const first = ratios.find((r) => /^\d+\/\d+$/.test(r));
+    if (first) {
+      const [w, h] = first.split('/').map(Number);
+      await sqlOne("update tool_web_post set orientation='" + (w >= h ? 'l' : 'p') + "' where id=" + pid + ' and orientation is null;');
+    }
     console.log(new Date().toISOString(), 'ratios', pid, ratios.join(' '));
   } catch (e) {
     console.log(new Date().toISOString(), 'ratios fail', pid, String((e && e.message) || e).slice(0, 90));
