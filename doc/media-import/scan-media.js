@@ -2778,6 +2778,19 @@ function main() {
     }
   }
   log('== 下一步：node build-thumbs.js --root=' + root + ' --thumbs=<缩略图根>');
+  // P6.90：扫完顺手用 ffprobe 校正 browser_ok。
+  // 本脚本的 browser_ok 是按扩展名猜的（.mp4/.webm -> 1）且不跑 ffprobe，
+  // HEVC / MPEG-4 Part 2 的 mp4 会被标成"能播"，前端那条"该片为 HEVC/异常编码"提示就永远不出现。
+  // 想跳过：设 MS_NO_PROBE=1（例如只关心相册、不想多花这 20 秒）。
+  if (!process.env.MS_NO_PROBE) {
+    log('== 校正 browser_ok（ffprobe 逐条探测，可用 MS_NO_PROBE=1 跳过）');
+    const rp = spawnSync(process.execPath, [
+      path.join(__dirname, 'probe-codec.js'),
+      '--mysql=' + mysqlExe,
+      '--root=' + root
+    ], { stdio: 'inherit' })
+    if (rp.status !== 0) warn('browser_ok 校正失败（不影响本次扫描结果）：退出码 ' + rp.status)
+  }
   return 0;
 }
 

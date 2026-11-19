@@ -85,12 +85,34 @@ function decide(info) {
   return 1
 }
 
-const rowsSql = "SET SESSION sql_mode='';\nSELECT id, rel_path, IFNULL(vcodec,''), IFNULL(browser_ok,-1) FROM media_video ORDER BY id;"
+// 媒体根映射：一个库里可能有多个根（主库 E:/111/视频、剪辑视频 E:/视频…），
+// 只按默认根拼路径会有一大批文件"找不到"（实测 251 条里 64 条踩这个坑）
+const roots = runMysql("SELECT id, path FROM media_root WHERE kind='root';")
+  .trim().split(/\r?\n/).filter(Boolean).map((line) => {
+    const [id, dir] = line.split('\t')
+    return { id: Number(id), dir: dir }
+  })
+const rootById = new Map(roots.map((r) => [r.id, r.dir]))
+const allRoots = roots.map((r) => r.dir).filter(Boolean)
+
+const rowsSql = "SET SESSION sql_mode='';\nSELECT id, rel_path, IFNULL(vcodec,''), IFNULL(browser_ok,-1), IFNULL(root_id,0) FROM media_video ORDER BY id;"
 const rows = runMysql(rowsSql).trim().split(/\r?\n/).filter(Boolean).map((line) => {
-  const [id, rel, vcodec, ok] = line.split('\t')
+  const [id, rel, vcodec, ok, rootId] = line.split('\t')
   // media_video.id 是 hash 字符串（不是自增数字），别 Number()
-  return { id: id, rel, vcodec: vcodec || '', ok: Number(ok) }
+  return { id: id, rel, vcodec: vcodec || '', ok: Number(ok), rootId: Number(rootId) || 0 }
 })
+
+/** 按 root_id 解析绝对路径；解析不到再依次试其它根（历史行 root_id 可能是 NULL/0） */
+function resolveAbs(row) {
+  if (path.isAbsolute(row.rel)) return row.rel
+  const own = rootById.get(row.rootId)
+  const cands = (own ? [own] : []).concat(allRoots, [ROOT]).filter(Boolean)
+  for (const base of cands) {
+    const abs = path.join(base, row.rel)
+    if (fs.existsSync(abs)) return abs
+  }
+  return path.join(own || ROOT, row.rel)
+}
 
 const list = LIMIT > 0 ? rows.slice(0, LIMIT) : rows
 console.log('待探测 ' + list.length + ' 条（共 ' + rows.length + '）')
@@ -98,7 +120,7 @@ console.log('待探测 ' + list.length + ' 条（共 ' + rows.length + '）')
 const updates = []
 const stat = { changed: 0, missing: 0, probed: 0 }
 for (const row of list) {
-  const abs = path.isAbsolute(row.rel) ? row.rel : path.join(ROOT, row.rel)
+  const abs = resolveAbs(row)
   if (!fs.existsSync(abs)) { stat.missing += 1; continue }
   const info = probe(abs)
   if (!info) { stat.missing += 1; continue }
