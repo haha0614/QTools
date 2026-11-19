@@ -6,6 +6,8 @@
  * 域名一换，重签（真浏览器打开文章页）就全部超时 → 播放全 502。
  *
  * 逻辑（先验证、后迁移）：
+ *   0) 主机名不再写死 able.*：源站现在用「任意单词 + 随机串 + TLD」（如 adapt.kzzkhxdjj.cc、
+ *      able.kzzkhxdjj.cc），所以候选靠正则广收集、再用文章页实测通过才算数；
  *   1) 用库里当前主域名取一条 url 做健康检查，能 200 就直接结束（绝大多数情况）；
  *   2) 不通才从入口站链路里尽力发现新主机；
  *   3) 找到且与库不同 → 备份后整体替换；找不到就报错退出，等人介入。
@@ -17,8 +19,15 @@ import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 const MYSQL = process.env.MYSQL || 'D:/project/QTools-All/tools/mysql/bin/mysql.exe';
+// 旧的 able.* 规则保留：优先验证它，能过就少发请求
 const HOST_RE = /able\.[a-z0-9]+\.(?:cc|com|net|top|vip|xyz)/i;
-const ENTRIES = (process.env.MRDS_ENTRY || 'https://mrdst3.com,https://mrdsv8.com,https://mrdst2.com').split(',');
+// 广收集：<单词>.<随机串>.<tld>，例如 adapt.kzzkhxdjj.cc / block.kzzkhxdjj.cc
+const CAND_RE = /\b([a-z][a-z0-9-]{1,20}\.(?:[a-z0-9]{5,24})\.(?:cc|com|net|top|vip|xyz))\b/gi;
+const UA = { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/157 Safari/537.36' };
+// 入口顺序：中转枢纽站优先（它稳定地列出当前文章主机家族），再退回几个短域名入口。
+// 实测 mrdst*.com 只会跳到别的枢纽，且每次给的主机家族不同，靠它单打独斗经常发现不到。
+const ENTRIES = (process.env.MRDS_ENTRY
+  || 'https://www.gkaacdcul.cc,https://mrdst3.com,https://mrdsv8.com,https://mrdst2.com').split(',');
 const DRY = process.argv.includes('--dry');
 
 function sql(query) {
@@ -36,7 +45,78 @@ async function head(url) {
   }
 }
 
-async function discoverHost() {
+/** 从入口站链路里广收集候选主机（最多 3 跳） */
+async function collectCandidates() {
+  const found = new Set();
+  for (const entry of ENTRIES) {
+    let urls = [entry.trim()];
+    const seen = new Set();
+    for (let hop = 0; hop < 3 && urls.length; hop += 1) {
+      const nextUrls = [];
+      for (const u of urls) {
+        if (!u || seen.has(u)) continue;
+        seen.add(u);
+        let text = '';
+        let finalUrl = u;
+        try {
+          const res = await fetch(u, { redirect: 'follow', headers: UA, signal: AbortSignal.timeout(20000) });
+          text = await res.text();
+          finalUrl = res.url || u;
+        } catch (e) {
+          continue;
+        }
+        for (const m of text.matchAll(CAND_RE)) found.add(m[1].toLowerCase());
+        for (const m of text.matchAll(/https?:\/\/[a-z0-9.-]+\.(?:cc|com|net|top|vip|xyz)\b/gi)) nextUrls.push(m[0]);
+        if (finalUrl) nextUrls.push(finalUrl);
+      }
+      urls = [...new Set(nextUrls)].slice(0, 6);
+    }
+  }
+  // 同一随机段的 able.* 也补进来：文章主机历史上一直是 able.<随机串>.<tld>，
+  // 而入口页里出现的可能是 adapt./block./api. 等同段兄弟域名
+  for (const h of [...found]) {
+    const parts = h.split('.');
+    if (parts.length === 3) {
+      const able = 'able.' + parts[1] + '.' + parts[2];
+      found.add(able);
+    }
+  }
+  return [...found];
+}
+
+/** 文章页实测：200 且正文够长才算可用 */
+async function verifyHost(host, sourceId) {
+  try {
+    const res = await fetch('https://' + host + '/archives/' + sourceId + '/',
+      { redirect: 'follow', headers: UA, signal: AbortSignal.timeout(15000) });
+    if (res.status !== 200) return false;
+    const text = await res.text();
+    // 光有 200 不够：广告跳转页/中转页也返回 200，但它们没有文章结构。
+    // xqbj-breadcrumb-container 是文章页独有容器（refetch-images.mjs 也用它定位正文）。
+    return text.includes('xqbj-breadcrumb-container') && text.length > 20000;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function discoverHost(sourceId, currentHost) {
+  const candidates = (await collectCandidates()).filter((h) => h !== (currentHost || '').toLowerCase());
+  console.log('[host] 候选主机:', candidates.length, '个', candidates.slice(0, 8).join(', '));
+  // 先试 able.*（历史上最常见的形态），再逐个实测
+  const ordered = [
+    ...candidates.filter((h) => /^able\./.test(h)),
+    ...candidates.filter((h) => !/^able\./.test(h)),
+  ];
+  for (let i = 0; i < ordered.length; i += 6) {
+    const batch = ordered.slice(i, i + 6);
+    const results = await Promise.all(batch.map(async (h) => ((await verifyHost(h, sourceId)) ? h : null)));
+    const hit = results.find(Boolean);
+    if (hit) return { host: hit, via: 'article-page-check' };
+  }
+  return null;
+}
+
+async function discoverHostLegacy() {
   for (const entry of ENTRIES) {
     let url = entry.trim();
     for (let hop = 0; hop < 4; hop += 1) {
@@ -57,9 +137,23 @@ async function discoverHost() {
   return null;
 }
 
+const FROM = (() => {
+  const i = process.argv.indexOf('--from');
+  return i > 0 ? String(process.argv[i + 1] || '').trim() : '';
+})();
+
+// 样本文章的 source_id：验证候选主机时直接打开它
+const sidRow = await sql("select source_id from qtools.tool_web_post where source_id is not null order by id desc limit 1;");
+const sampleSid = (sidRow || '').split('\t')[0];
+
 // 1) 当前主域名
 const row = await sql("select substring_index(substring_index(url,'//',-1),'/',1) as h, count(*) c from qtools.tool_web_post group by h order by c desc limit 1;");
-const [current, count] = (row || '').split('\t');
+let [current, count] = (row || '').split('\t');
+if (FROM) {
+  console.log('[host] --from 调试模式，用', FROM, '代替库里的主域名（不写库）');
+  current = FROM;
+  count = '(调试)';
+}
 if (!current) {
   console.log('[host] 库里没有可用的 url');
   process.exit(1);
@@ -76,7 +170,7 @@ if (status === 200) {
 }
 
 // 3) 发现新主机
-const found = await discoverHost();
+const found = await discoverHost(sampleSid, current);
 if (!found) {
   console.log('[host] 当前域名不可用，且未能从入口站发现新主机 → 需要人工确认（见 gitlab.com/mrds/mrds 的 README）');
   process.exit(2);
