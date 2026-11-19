@@ -341,7 +341,8 @@ public class WebPlayController
         }
         try
         {
-            String body = "{\"url\":\"" + sourceUrl.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}";
+            // 带 id：sidecar 重签成功后要按段跑 ffprobe，把宽高比写回 video_ratios
+            String body = "{\"id\":" + id + ",\"url\":\"" + sourceUrl.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}";
             // 重签是真浏览器去开源站页面，忙的时候（sidecar 正在跑自动刷新）可能很久；
             // 但播放器等不起：给 12 秒上限，超时就返回失败让前端提示，而不是让请求挂着
             // 实测 sidecar 单次重签 8.8~12.8 秒（真浏览器开源站页面），旧的 12 秒上限

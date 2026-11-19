@@ -328,6 +328,8 @@ async function bgTick() {
 }
 
 if (BG_ENABLED) {
+  setTimeout(ratioTick, 60 * 1000);
+  setInterval(ratioTick, 120 * 1000);
   setTimeout(bgTick, 5 * 1000);
   setInterval(bgTick, BG_INTERVAL_MS);
   console.log('background detail backfill on (batch ' + BG_BATCH + ' / ' + BG_INTERVAL_MS + 'ms)');
@@ -349,6 +351,38 @@ const sqlOne = (sql) => new Promise((resolve) => {
     (err, stdout) => resolve(err ? '' : String(stdout || '').trim()));
 });
 
+/** 探测单段流的宽高比，形如 '720/1280'；失败返回空串 */
+function probeRatio(url) {
+  return new Promise((resolve) => {
+    execFile(FFPROBE, ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height',
+      '-of', 'csv=p=0', url], { encoding: 'utf8', timeout: 25000, maxBuffer: 1 << 20 }, (err, stdout) => {
+      if (err) return resolve('');
+      const m = /^(\d+),(\d+)/.exec(String(stdout || '').trim());
+      if (!m) return resolve('');
+      const w = Number(m[1]); const h = Number(m[2]);
+      return resolve(w > 0 && h > 0 ? w + '/' + h : '');
+    });
+  });
+}
+
+/**
+ * 按段探测宽高比并写回 video_ratios（下标=段号，测不出存空串）。
+ * 目的是让前端首帧就按正确比例撑播放器：重签/缓冲期间不再先按 16:9 再跳。
+ * 一个都测不出来时不覆盖已有值，避免把好数据擦掉。
+ */
+async function probeAndSaveRatios(id, urls) {
+  const pid = Number(id);
+  if (!Number.isFinite(pid) || pid <= 0 || !Array.isArray(urls) || !urls.length) return;
+  try {
+    const ratios = [];
+    for (const u of urls.slice(0, 20)) ratios.push(await probeRatio(u));
+    if (!ratios.some((r) => r)) return;
+    await sqlOne("update tool_web_post set video_ratios='" + JSON.stringify(ratios).replace(/'/g, "''") + "' where id=" + pid + ';');
+    console.log(new Date().toISOString(), 'ratios', pid, ratios.join(' '));
+  } catch (e) {
+    console.log(new Date().toISOString(), 'ratios fail', pid, String((e && e.message) || e).slice(0, 90));
+  }
+}
 function enqueueDownload(id, index) {
   const n = Number(id);
   const i = Number(index || 0);
@@ -458,6 +492,29 @@ async function downloadOne(id, index) {
   }
 }
 
+/**
+ * 存量补比例：库里已有播放地址但还没 video_ratios 的帖子，直接对存的 m3u8 跑 ffprobe。
+ * 地址多半已过期（403）→ 测不出就跳过，等它下次重签时自然补上。
+ */
+let ratioTried = new Set();
+async function ratioTick() {
+  if (pendingResigns > 0) return;                       // 用户在等播放时让路
+  const rows = await queryIds(
+    "select id from tool_web_post where video_ratios is null and video_urls is not null and json_length(video_urls) > 0 "
+    + 'order by cast(source_id as unsigned) desc limit ' + (3 + ratioTried.size));
+  const pick = rows.filter((id) => !ratioTried.has(id)).slice(0, 3);
+  if (!pick.length) return;
+  for (const id of pick) ratioTried.add(id);
+  if (ratioTried.size > 5000) ratioTried = new Set();
+  for (const id of pick) {
+    const raw = await sqlOne('select ifnull(video_urls,\'\') from tool_web_post where id=' + id + ';');
+    let urls = [];
+    try { urls = JSON.parse(raw) || []; } catch (e) { urls = []; }
+    if (!Array.isArray(urls) || !urls.length) continue;
+    await probeAndSaveRatios(id, urls);
+  }
+}
+
 const server = http.createServer((req, res) => {
   const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
   if (req.method === 'POST' && req.url.startsWith('/download')) {
@@ -522,6 +579,8 @@ const server = http.createServer((req, res) => {
         if (!list.length) return send(502, { error: 'no m3u8 found' });
         // 同时给 url（兼容旧调用）和 urls（多视频按 index 取）
         send(200, { url: list[0], urls: list });
+        // 顺序探测宽高比并入库（后台跑，不占重签响应时间）
+        if (payload.id) setImmediate(() => { probeAndSaveRatios(payload.id, list); });
       } catch (e) {
         console.log(new Date().toISOString(), 'resign failed', String(e.message).slice(0, 120));
         send(502, { error: String(e.message).slice(0, 200) });
