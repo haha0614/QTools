@@ -118,6 +118,7 @@ const list = LIMIT > 0 ? rows.slice(0, LIMIT) : rows
 console.log('待探测 ' + list.length + ' 条（共 ' + rows.length + '）')
 
 const updates = []
+const missingRows = []
 const stat = { changed: 0, missing: 0, probed: 0 }
 for (const row of list) {
   const abs = resolveAbs(row)
