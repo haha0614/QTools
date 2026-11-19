@@ -139,9 +139,46 @@ async function sourceBase() {
   return cachedBase;
 }
 
+/**
+ * 每轮刷新前先确认源站主机还活着。
+ *
+ * 源站域名轮换后，库里 url 全指向死域名 → 重签超时 → 播放全 502。
+ * sync-source-host.mjs 自己做健康检查（活着就什么都不做），只有真换域名才备份 + 迁移；
+ * 迁移完成就清掉 cachedBase，后面的 sourceBase() 会重新读库里的新主机。
+ */
+async function syncSourceHost() {
+  try {
+    const out = await new Promise((resolve, reject) => {
+      execFile(process.execPath, [new URL('./sync-source-host.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')], {
+        cwd: new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
+        env: {
+          ...process.env,
+          MYSQL: process.env.MYSQL || process.env.QTOOLS_MYSQL || 'E:/111/project/QTools/tools/mysql/bin/mysql.exe',
+          MYSQL_PWD: process.env.MYSQL_PWD || 'dqq1107.',
+        },
+        encoding: 'utf8',
+        maxBuffer: 1 << 24,
+        timeout: 5 * 60 * 1000,
+      }, (err, stdout) => (err ? reject(err) : resolve(stdout || '')));
+    });
+    const last = out.trim().split('\n').filter(Boolean).pop() || '';
+    console.log(new Date().toISOString(), 'host sync', last.slice(0, 150));
+    if (/迁移完成/.test(last)) {
+      cachedBase = '';
+      console.log(new Date().toISOString(), 'host sync 已换域名，本轮刷新使用新主机');
+    }
+  } catch (e) {
+    // 退出码 2 = 发现不到新主机（需人工）；不是致命错误，刷新照常进行
+    const raw = String((e && e.stdout) || (e && e.message) || e).trim();
+    const last = raw.split('\n').filter(Boolean).pop() || '';
+    console.log(new Date().toISOString(), 'host sync skip', last.slice(0, 150));
+  }
+}
+
 async function runRefresh(quick) {
   if (refreshing) return;
   refreshing = true;
+  await syncSourceHost();
   const script = quick ? './refresh-quick.mjs' : './refresh-latest.mjs';
   // 从库里主域名推基址，换域名后子进程自动跟上（脚本里的默认值只是兜底）
   const base = await sourceBase();
