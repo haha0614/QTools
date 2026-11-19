@@ -142,6 +142,12 @@ public class WebPostController
         return out;
     }
 
+    /** 资源根目录（-Dqtools.home），与抓取 sidecar 的 WEBROOT 保持一致 */
+    private String home()
+    {
+        return System.getProperty("qtools.home", "E:/111/project/QTools");
+    }
+
     /** 详情：{@code GET /api/tool/web/post/{id}}（id = 本站主键，不是源站 id） */
     @GetMapping("/post/{id}")
     public Map<String, Object> post(@PathVariable("id") Long id)
@@ -181,6 +187,17 @@ public class WebPostController
             }
         }
         row.put("videos", videos);
+        // 播放器尺寸兜底：库里没有 ffprobe 比例时，用图集第一张的比例
+        Object sourceId = row.get("sourceId");
+        if (sourceId != null && row.get("imageRatio") == null)
+        {
+            String ratio = com.qtools.tool.web.support.WebImageRatio.of(
+                    java.nio.file.Paths.get(home(), "data", "media", "web", String.valueOf(sourceId), "p1.jpg"));
+            if (ratio != null)
+            {
+                row.put("imageRatio", ratio);
+            }
+        }
         return row;
     }
 
