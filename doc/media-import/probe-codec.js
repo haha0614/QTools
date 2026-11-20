@@ -30,9 +30,11 @@ function arg(name, def) {
 }
 const flag = (name) => process.argv.includes('--' + name)
 
-const MYSQL = arg('mysql', 'E:/111/project/QTools/tools/mysql/bin/mysql.exe')
-const FFPROBE = arg('ffprobe', 'E:/111/project/QTools/data/media/runtime/ffprobe.exe')
-const ROOT = arg('root', 'E:/111/视频')
+// 默认路径按脚本位置推（本机路径写死是红线，见 AGENTS.md）
+const HOME = path.resolve(__dirname, '../../..')
+const MYSQL = arg('mysql', process.env.MS_MYSQL || path.join(HOME, 'tools/mysql/bin/mysql.exe'))
+const FFPROBE = arg('ffprobe', process.env.MS_FFPROBE || path.join(HOME, 'data/media/runtime/ffprobe.exe'))
+const ROOT = arg('root', process.env.MS_ROOT || path.join(HOME, 'data/media'))
 const LIMIT = Number(arg('limit', '0')) || 0
 const DRY = flag('dry-run')
 
