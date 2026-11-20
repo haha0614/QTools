@@ -35,7 +35,7 @@ public final class MediaScanArgs
         {
             return;
         }
-        for (String arg : extra.trim().split("\\s+"))
+        for (String arg : tokenize(extra))
         {
             if (arg.isEmpty() || forbidden.contains(arg) || managed.contains(arg))
             {
@@ -47,6 +47,49 @@ public final class MediaScanArgs
             }
             command.add(arg);
         }
+    }
+
+    /**
+     * 按空白切分参数串，但支持用双引号把带空格的值裹起来。
+     *
+     * <p>部署路径里有空格时（例如 {@code D:/Audio and Video/yellow}），
+     * 直接 {@code split("\\s+")} 会把它切成 {@code --root=D:/Audio} + {@code and} + {@code Video/yellow}，
+     * 子进程收到一个不存在的根目录后立刻退出（实测「补内容哈希」任务就是这样失败的）。
+     * 配置里写成 {@code --root="D:/Audio and Video/yellow"} 即可，引号在这里被剥掉。</p>
+     */
+    public static List<String> tokenize(String extra)
+    {
+        List<String> out = new java.util.ArrayList<>();
+        if (StringUtils.isEmpty(extra))
+        {
+            return out;
+        }
+        StringBuilder sb = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < extra.length(); i++)
+        {
+            char c = extra.charAt(i);
+            if (c == '"')
+            {
+                quoted = !quoted;
+                continue;
+            }
+            if (!quoted && Character.isWhitespace(c))
+            {
+                if (sb.length() > 0)
+                {
+                    out.add(sb.toString());
+                    sb.setLength(0);
+                }
+                continue;
+            }
+            sb.append(c);
+        }
+        if (sb.length() > 0)
+        {
+            out.add(sb.toString());
+        }
+        return out;
     }
 
     /** arg 是否以 prefixes 里任一项开头 */
