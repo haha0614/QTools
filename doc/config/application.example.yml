@@ -1,0 +1,76 @@
+# ============================================================
+# 本机运行时配置模板
+# ------------------------------------------------------------
+# 用法：复制到 <仓库根>/config/application.yml 后按本机改。
+#   - config/ 在 .gitignore 里（机器相关，不入库），本模板入库
+#   - Spring 按 key 逐条覆盖 jar 内 application.yml，只需写要改的键
+#   - 启动脚本同时传 --spring.config.additional-location=file:<根>/config/
+#
+# 换机器时**必须改**的（其余可沿用默认）：
+#   1) media.rootPath / media.trashPath  —— 媒体库在哪
+#   2) media.scanArgs / media.thumbArgs 里的 --root=  —— 与上面保持一致
+#      ⚠ 路径含空格时必须用双引号裹住，例如 --root="D:/Audio and Video/yellow"
+#        （后端按引号切分；不加引号会被切成三段，报「--root 不是已存在的目录」）
+#   3) tools/ 目录若不在仓库根下，改 nodePath / mysqlClient / ffmpeg
+#   4) qtools.home 指向仓库根（宿主机绝对路径）
+#
+# 校验：node scripts/doctor.mjs 的 config 项会检查键是否齐全、路径是否存在、
+#       有没有残留旧机器路径（E:/111）或旧源站域名
+# ============================================================
+qtools:
+  home: D:/project/QTools-All
+  profile: 'D:/project/QTools-All/uploadPath'
+  media:
+    # ---- 媒体库（唯一必须按机器改的一组）----
+    rootPath: 'D:/Audio and Video/yellow'
+    trashPath: 'D:/Audio and Video/yellow/_媒体站/trash'
+    # ---- 随仓库走的工具（仓库在别处时一并改）----
+    thumbsPath: 'D:/project/QTools-All/data/media/thumbs'
+    ffmpeg: 'D:/project/QTools-All/data/media/runtime/ffmpeg.exe'
+    mysqlClient: 'D:/project/QTools-All/tools/mysql/bin/mysql.exe'
+    nodePath: 'D:/project/QTools-All/tools/node/node.exe'
+    # ---- 扫描 / 缩略图：参数串里的 --root= 必须与 rootPath 一致且加引号 ----
+    scanScript: 'D:/project/QTools-All/QTools/doc/media-import/scan-media.js'
+    scanOutPath: 'D:/project/QTools-All/uploadPath/media-scan'
+    scanArgs: '--root="D:/Audio and Video/yellow" --port=3307 --album-mode=prefix --assign-by=rule --secret=D:/project/QTools-All/QTools/qtools-admin/src/main/resources/secret.yml'
+    thumbScript: 'D:/project/QTools-All/QTools/doc/media-import/build-thumbs.js'
+    thumbArgs: '--root="D:/Audio and Video/yellow" --thumbs="D:/project/QTools-All/data/media/thumbs" --port=3307 --secret=D:/project/QTools-All/QTools/qtools-admin/src/main/resources/secret.yml'
+    tagNormalizeScript: 'D:/project/QTools-All/QTools/doc/media-import/normalize-tags.js'
+    tagNormalizeArgs: '--port=3307 --secret=D:/project/QTools-All/QTools/qtools-admin/src/main/resources/secret.yml'
+    # 自带封面：同目录「视频名-封面.jpg」不入相册，只当视频海报来源
+    scan:
+      coverSuffixes:
+        - '-封面'
+        - '-cover'
+        - '_cover'
+        - '_封面'
+    # ---- 本地模型（Ollama，127.0.0.1:11434）；关掉 enabled 时前端回退模板 ----
+    llm:
+      enabled: true
+      provider: ollama
+      baseUrl: 'http://127.0.0.1:11434/api/generate'
+      model: 'qwen2.5:3b'
+      apiKey: ''
+      timeoutMs: 60000
+      subtitle:
+        headChars: 1200
+        tailChars: 200
+      vision:
+        enabled: true
+        model: 'qwen2.5vl:3b'
+        frames: 5
+        width: 512
+        timeoutMs: 60000
+      transcribe:
+        enabled: true
+        whisperPath: ''
+        model: 'ggml-small.bin'
+        timeoutMs: 120000
+        language: auto
+        fallbackLanguage: ja
+        threads: 8
+        headSeconds: 300
+        tailSeconds: 60
+  web:
+    userDist: 'D:/project/QTools-All/QTools-C/dist'
+    adminDist: 'D:/project/QTools-All/QTools-M/dist'
