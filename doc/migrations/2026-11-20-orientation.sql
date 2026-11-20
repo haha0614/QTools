@@ -4,7 +4,7 @@ use qtools;
 --         都按这一列分组；facets 是一个接口返回分类/标签/日期/方向/已入库计数的整包数据，
 --         这一列缺失会让整包失败 —— 表现是分类只剩「全部/视频/图文」、已入库永远是 0/0。
 -- 取值：'l' 横屏 / 'p' 竖屏 / NULL 未判定（NULL 的条目留在「全部」里）。
--- 回填：doc/watermark/backfill-orientation.mjs（优先用 video_ratios，其次图集第一张图的尺寸）。
+-- 回填：doc/media-import/backfill-orientation.mjs（优先用 video_ratios，其次图集第一张图的尺寸，sharp 读）。
 
 set @ddl := (
   select if(count(*) = 0,
