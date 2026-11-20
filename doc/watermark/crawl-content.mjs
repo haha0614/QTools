@@ -1,15 +1,14 @@
 
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { sql, execStdin } from '../lib/db.mjs';
 const C = ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'].find(p=>{try{return fs.existsSync(p)}catch{return false}});
-const MYSQL = 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const LIMIT = Number(process.env.LIMIT || 30);
 
 const listSql = 'select source_id, url from tool_web_post order by id desc limit ' + LIMIT;
-const rows = execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','-N','-B','-e', listSql, 'qtools'], { encoding: 'utf8' })
+const rows = sql(listSql)
   .trim().split(/\r?\n/).filter(Boolean).map(l => { const [sid, url] = l.split('\t'); return { sid, url }; });
 console.log('to crawl', rows.length);
 
@@ -109,8 +108,8 @@ for (const row of rows) {
     }, rawHtml);
     const contentJson = JSON.stringify(d.blocks).replace(/'/g, "''").replace(/\\/g, '\\\\');
     const text = esc(d.blocks.filter(x => x.type === 'text').map(x => x.text).join('\n')).slice(0, 60000);
-    const sql = "update tool_web_post set video_url='" + esc(d.videoUrl || '') + "', content='" + contentJson + "', content_text='" + text + "', image_count=" + d.imageCount + ", video_count=" + d.videoCount + (d.category ? ", category='" + esc(d.category) + "'" : '') + (d.firstImage ? ", cover='" + esc(d.firstImage) + "'" : '') + " where source_id='" + row.sid + "';\n";
-    execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','qtools'], { input: sql, encoding: 'utf8' });
+    const updSql = "update tool_web_post set video_url='" + esc(d.videoUrl || '') + "', content='" + contentJson + "', content_text='" + text + "', image_count=" + d.imageCount + ", video_count=" + d.videoCount + (d.category ? ", category='" + esc(d.category) + "'" : '') + (d.firstImage ? ", cover='" + esc(d.firstImage) + "'" : '') + " where source_id='" + row.sid + "';\n";
+    await execStdin(updSql);
     done++;
     console.log('  ok', row.sid, '| blocks', d.blocks.length, '| imgs', d.imageCount, '| video', d.videoCount, '| cat', d.category);
   } catch (e) { console.log('  fail', row.sid, String(e.message).slice(0, 80)); }

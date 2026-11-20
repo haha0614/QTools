@@ -1,11 +1,10 @@
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { rows, sql } from '../lib/db.mjs';
 
 const C = ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'].find((p) => { try { return fs.existsSync(p); } catch { return false; } });
-const MYSQL = process.env.QTOOLS_MYSQL || 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
-const WEBROOT = process.env.QTOOLS_WEBROOT || 'E:/111/project/QTools/data/media/web';
+const WEBROOT = process.env.QTOOLS_WEBROOT || path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '../../../data/media/web');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36';
 const LIMIT = Number(process.env.LIMIT || 40);
 const DRY = process.env.DRY === '1';
@@ -72,10 +71,9 @@ async function dedupeVideoUrls(list) {
   return out;
 }
 
-const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','-N','-B','-e', sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
 // 站点样板行（推荐位标题、投稿说明等）：由 clean-noise.mjs 按文档频率自动发现并写盘，
 // 抽取阶段直接丢掉，新抓的帖子就不会再把它们当正文存进来。
-const NOISE_FILE = process.env.QTOOLS_NOISE || 'E:/111/project/QTools/QTools/doc/watermark/noise-lines.json';
+const NOISE_FILE = process.env.QTOOLS_NOISE || path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), 'noise-lines.json');
 const NOISE_LINES = (() => {
   try {
     return new Set(JSON.parse(fs.readFileSync(NOISE_FILE, 'utf8')));
@@ -103,16 +101,16 @@ const WHERE = FORCE_TOP
 // ONLY_NO_DETAIL 原来不带 ORDER，MySQL 每轮都可能返回同一批行（补不动的就永远卡在那）；
 // 加 order by id 让批次随补完推进。
 const ORDER = FORCE_TOP ? '' : ' order by id';
-const rows = db('select id, source_id, url, video_url from tool_web_post' + WHERE + ORDER + ' limit ' + LIMIT)
-  .trim().split(/\r?\n/).filter(Boolean).map((l) => { const [id, sid, url, video] = l.split('\t'); return { id, sid, url, video: video || '' }; });
-console.log('rows', rows.length, DRY ? '(dry)' : '');
+const posts = rows('select id, source_id, url, video_url from tool_web_post' + WHERE + ORDER + ' limit ' + LIMIT)
+  .map(([id, sid, url, video]) => ({ id, sid, url, video: video || '' }));
+console.log('rows', posts.length, DRY ? '(dry)' : '');
 
 const b = await chromium.launch({ executablePath: C, headless: process.env.HEADLESS === '1', args: ['--mute-audio','--window-position=-32000,-32000','--window-size=1200,900','--disable-blink-features=AutomationControlled'] });
 const ctx = await b.newContext({ userAgent: UA, viewport: { width: 1280, height: 900 } });
 const p = await ctx.newPage();
 
 let okCount = 0, imgTotal = 0, noImg = [];
-for (const row of rows) {
+for (const row of posts) {
   try {
     let nav = false;
     let raw = '';
@@ -281,7 +279,7 @@ for (const row of rows) {
     videoUrls.push(...dedupedVideos);
     const videoUrl = videoUrls[0] || '';
 
-    const old = db("select replace(replace(content, '\\\\', '\\\\\\\\'), '''', '''''') from tool_web_post where id=" + row.id + ';').trim();
+    const old = sql("select replace(replace(content, '\\\\', '\\\\\\\\'), '''', '''''') from tool_web_post where id=" + row.id + ';').trim();
     let blocks = [];
     try { blocks = JSON.parse(old.replace(/''/g, "'")) || []; } catch (e) { blocks = []; }
     const oldTexts = blocks.filter((x) => x && x.type === 'text').map((x) => x.text);
@@ -303,7 +301,7 @@ for (const row of rows) {
         ? ", orientation=case when orientation is null then '" + (dim[0] >= dim[1] ? 'l' : 'p') + "' else orientation end"
         : '';
       const imgCountForWrite = SKIP_IMAGES ? picked.length : local.length;
-      db("update tool_web_post set content='" + json + "', image_count=" + imgCountForWrite
+      sql("update tool_web_post set content='" + json + "', image_count=" + imgCountForWrite
         + orientationSql
         + ", content_text='" + textJoin.replace(/\\/g, '\\\\').replace(/'/g, "''") + "'"
         + (meta.category ? ", category='" + meta.category.replace(/'/g, "''") + "'" : '')
@@ -324,5 +322,5 @@ for (const row of rows) {
   await sleep(120);
 }
 await b.close();
-console.log('done', okCount, '/', rows.length, '| images', imgTotal);
+console.log('done', okCount, '/', posts.length, '| images', imgTotal);
 if (noImg.length) console.log('no-image posts:', noImg.join(', '));

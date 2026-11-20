@@ -1,20 +1,17 @@
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { sql } from '../lib/db.mjs';
 
 const exe = ['C:/Program Files/Google/Chrome/Application/chrome.exe'].find((p) => { try { return fs.existsSync(p); } catch { return false; } });
-const MYSQL = process.env.QTOOLS_MYSQL || process.env.MYSQL || 'D:/project/QTools-All/tools/mysql/bin/mysql.exe';
 const WEBROOT = process.env.QTOOLS_WEBROOT || 'D:/project/QTools-All/data/media/web';
 // 源站域名会轮换（见 gitlab.com/mrds/mrds 的 README，或跑 sync-source-host.mjs）
 const BASE = process.env.BASE || 'https://able.nwfuhxhj.cc';
-const DB_PWD = process.env.MYSQL_PWD || process.env.QTOOLS_MYSQL_PWD || 'dqq1107.';
 const FROM = Number(process.env.FROM || 1);
 const TO = Number(process.env.TO || 5);
 const WITH_COVER = process.env.WITH_COVER !== '0';
 const DRY = process.env.DRY === '1';
-// 归档条目只有「月 日」，生成列 published_ts 在严格模式下会报 1411，统一放宽 sql_mode
-const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-p' + DB_PWD,'--default-character-set=utf8mb4','-N','-B','-e', "set session sql_mode=''; " + sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
+// 归档条目只有「月 日」，生成列 published_ts 在严格模式下会报 1411（sql_mode 已由 lib/db.mjs 统一放宽）
 const esc = (s) => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "''");
 
 const b = await chromium.launch({ executablePath: exe, headless: process.env.HEADLESS === '1', args: ['--mute-audio','--window-position=-32000,-32000','--window-size=1300,950'] });
@@ -22,7 +19,7 @@ const ctx = await b.newContext({ viewport: { width: 1300, height: 950 } });
 const p = await ctx.newPage();
 
 let total = 0, inserted = 0, covers = 0;
-let rank = Number(db('select coalesce(max(source_rank),0) from tool_web_post;').trim()) || 0;
+let rank = Number(sql('select coalesce(max(source_rank),0) from tool_web_post;').trim()) || 0;
 
 for (let page = FROM; page <= TO; page++) {
   const url = BASE + '/archives/page/' + page + '/';
@@ -63,7 +60,7 @@ for (let page = FROM; page <= TO; page++) {
   if (!DRY && values.length) {
     for (let i = 0; i < values.length; i += 200) {
       // on duplicate key update：重跑时把 published_at 改回源站原文（月-日），并清掉推算标记
-      db('insert into tool_web_post (source, source_id, title, published_at, url, source_rank) values '
+      sql('insert into tool_web_post (source, source_id, title, published_at, url, source_rank) values '
         + values.slice(i, i + 200).join(',')
         // 只补"没有年份"的行：详情抓来的真日期（含「年」）绝不能被归档页的月日覆盖
         + " on duplicate key update published_at = if(published_at like '%年%', published_at, values(published_at)), date_inferred = 0;");
@@ -74,4 +71,4 @@ for (let page = FROM; page <= TO; page++) {
 }
 await b.close();
 console.log('done | cards', total, '| inserted(ignore)', inserted, '| covers', covers);
-console.log(db('select count(*) from tool_web_post;'));
+console.log(sql('select count(*) from tool_web_post;'));

@@ -1,19 +1,16 @@
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { sql } from '../lib/db.mjs';
 
 const exe = ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'].find((p) => { try { return fs.existsSync(p); } catch { return false; } });
-const MYSQL = process.env.QTOOLS_MYSQL || 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
-const WEBROOT = process.env.QTOOLS_WEBROOT || 'E:/111/project/QTools/data/media/web';
+const WEBROOT = process.env.QTOOLS_WEBROOT || 'D:/project/QTools-All/data/media/web';
 // 源站域名会轮换（见 gitlab.com/mrds/mrds 的 README，或跑 sync-source-host.mjs 同步库里地址）
 const BASE = process.env.BASE || 'https://able.nwfuhxhj.cc';
 const PAGES = Number(process.env.PAGES || 3);
 const DRY = process.env.DRY === '1';
 const ONLY = process.env.ONLY || '';
 
-const DB_PWD = process.env.MYSQL_PWD || process.env.QTOOLS_MYSQL_PWD || 'dqq1107.';
-const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-p' + DB_PWD,'-N','-B','-e', sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
 const esc = (s) => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "''");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -119,17 +116,17 @@ for (const feed of list) {
       }
       if (!DRY) {
         const kind = c.featured ? (feed.name === '首页' ? 'home' : 'pinned') : null;
-        const sql = 'insert ignore into tool_web_post (source, source_id, title, category, cover, published_at, url, source_rank, featured, featured_kind)'
+        const insSql = 'insert ignore into tool_web_post (source, source_id, title, category, cover, published_at, url, source_rank, featured, featured_kind)'
           + " values ('mrds','" + esc(c.id) + "','" + esc(c.title) + "','" + esc(c.category) + "','" + esc(coverPath) + "','"
           + esc(c.date) + "','" + esc(BASE + '/archives/' + c.id + '/') + "'," + rank + ',' + (c.featured ? 1 : 0) + ','
           + (kind ? "'" + kind + "'" : 'null') + ');';
-        db(sql);
+        sql(insSql);
         // 已存在的行也要补标记（insert ignore 不会更新）
         if (c.featured) {
           const kind = feed.name === '首页' ? 'home' : 'pinned';
           // 首页精选要记住编辑排列位次，精选带按它排才和主列表区分开
           const homeRankSql = feed.name === '首页' ? ', home_rank=' + (homePos + 1) : '';
-          db("update tool_web_post set featured=1, featured_kind=case when featured_kind is null or featured_kind='' or featured_kind='" + kind + "' then '" + kind + "' else 'both' end" + homeRankSql + " where source_id='" + esc(c.id) + "';");
+          sql("update tool_web_post set featured=1, featured_kind=case when featured_kind is null or featured_kind='' or featured_kind='" + kind + "' then '" + kind + "' else 'both' end" + homeRankSql + " where source_id='" + esc(c.id) + "';");
         }
       }
       inserted += 1;
@@ -143,4 +140,4 @@ for (const feed of list) {
 }
 await b.close();
 console.log(DRY ? 'DRY ' : '', 'seen', seen.size, 'inserted', inserted, 'covers', covers);
-console.log(db('select count(*) from tool_web_post;'));
+console.log(sql('select count(*) from tool_web_post;'));

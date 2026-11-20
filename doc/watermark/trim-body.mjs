@@ -1,7 +1,5 @@
-import { execFileSync } from 'node:child_process';
-const MYSQL = 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
+import { sql } from '../lib/db.mjs';
 const DRY = process.env.DRY !== '0';
-const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','--default-character-set=utf8mb4','-N','-B','-e', "set session sql_mode=''; " + sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
 const esc = (s) => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "''");
 const unescape = (s) => s.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\\\/g, '\\');
 
@@ -29,14 +27,14 @@ function trimParagraphs(paras) {
   return out;
 }
 
-const raw = db("select id, replace(content_text, char(10), '<BR>'), content from tool_web_post where content_text is not null and content_text <> '';");
-const rows = raw.split('\n').filter(Boolean).map((line) => {
+const raw = sql("select id, replace(content_text, char(10), '<BR>'), content from tool_web_post where content_text is not null and content_text <> '';");
+const posts = raw.split('\n').filter(Boolean).map((line) => {
   const parts = line.split('\t');
   return { id: parts[0], text: unescape(parts[1] || ''), content: parts[2] || '' };
 });
 
 let changed = 0, dropped = 0;
-for (const r of rows) {
+for (const r of posts) {
   const paras = r.text.split('<BR>');
   const kept = trimParagraphs(paras);
   if (kept.length === paras.filter((p) => String(p).trim()).length) continue;
@@ -57,6 +55,6 @@ for (const r of rows) {
       keptBlocks.push(b);
     }
   }
-  db("update tool_web_post set content_text='" + esc(kept.join('\n')) + "', content='" + esc(JSON.stringify(keptBlocks)) + "' where id=" + r.id + ';');
+  sql("update tool_web_post set content_text='" + esc(kept.join('\n')) + "', content='" + esc(JSON.stringify(keptBlocks)) + "' where id=" + r.id + ';');
 }
 console.log((DRY ? 'DRY-RUN' : 'APPLIED') + ' | posts', changed, '| paragraphs dropped', dropped);

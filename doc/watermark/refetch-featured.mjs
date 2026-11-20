@@ -1,12 +1,10 @@
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { sql } from '../lib/db.mjs';
 const exe = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
-const MYSQL = 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
 const BASE = process.env.BASE || 'https://able.nwfuhxhj.cc';
 // 归档条目的 published_at 只有「月 日」，生成列 published_ts 在严格模式下会报 1411，
-// 所以统一放宽 sql_mode（这些行本来就该是 NULL 日期）。
-const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','--default-character-set=utf8mb4','-N','-B','-e', "set session sql_mode=''; " + sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
+// 所以统一放宽 sql_mode（这些行本来就该是 NULL 日期）—— 已由 lib/db.mjs 统一处理。
 
 // featured 原来把两类混在一个标记里：首页精选（编辑挑的 30 条）和分类页顶部置顶（每日大赛前 3 条）。
 // 这里按源站实时状态重新分类，前端才能分别渲染「精选横滑带」和「置顶块」。
@@ -72,7 +70,7 @@ const catRaw = await entries(BASE + '/category/mrds/');
 // 兜底判据（比标题匹配可靠）：广告位在库里没有封面图（cover 为空）。
 // 标题文本在页面上经常抓不到（广告整块是背景图、a 里没有文字），所以两条一起用。
 const noCover = new Set(
-  db("select source_id from tool_web_post where cover is null or cover='';")
+  sql("select source_id from tool_web_post where cover is null or cover='';")
     .split('\n').map((s) => s.trim()).filter(Boolean)
 );
 const notAd = (e) => isReal(e) && !noCover.has(e.id);
@@ -103,16 +101,16 @@ if (!home.length && !cat.length) {
   console.log('两个列表都没抓到，放弃本次写入（避免把精选带清空）');
   process.exit(0);
 }
-db('update tool_web_post set featured=0, featured_kind=null, home_rank=null;');
+sql('update tool_web_post set featured=0, featured_kind=null, home_rank=null;');
 const setKind = (list, kind) => {
   if (!list.length) return;
   const inList = list.map((x) => "'" + x + "'").join(',');
-  db("update tool_web_post set featured=1, featured_kind=case when featured_kind is null or featured_kind='' or featured_kind='" + kind + "' then '" + kind + "' else 'both' end where source_id in (" + inList + ');');
+  sql("update tool_web_post set featured=1, featured_kind=case when featured_kind is null or featured_kind='' or featured_kind='" + kind + "' then '" + kind + "' else 'both' end where source_id in (" + inList + ');');
 };
 setKind(home, 'home');
 setKind(pinned, 'pinned');
 // 首页精选要按「源站编辑的排列顺序」展示，不能按发布时间：否则精选带看起来和主列表一样
 home.forEach((sid, i) => {
-  db("update tool_web_post set home_rank=" + (i + 1) + " where source_id='" + sid + "';");
+  sql("update tool_web_post set home_rank=" + (i + 1) + " where source_id='" + sid + "';");
 });
-console.log(db('select featured_kind, count(*) from tool_web_post where featured=1 group by featured_kind;'));
+console.log(sql('select featured_kind, count(*) from tool_web_post where featured=1 group by featured_kind;'));

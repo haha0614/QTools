@@ -14,13 +14,8 @@
  *
  * 用法：node sync-source-host.mjs [--dry]
  */
-import { execFile } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
-import { promisify } from 'node:util';
+import { sqlAsync } from '../lib/db.mjs';
 
-const run = promisify(execFile);
-const MYSQL = process.env.MYSQL || 'D:/project/QTools-All/tools/mysql/bin/mysql.exe';
 // 旧的 able.* 规则保留：优先验证它，能过就少发请求
 const HOST_RE = /able\.[a-z0-9]+\.(?:cc|com|net|top|vip|xyz)/i;
 // 广收集：<单词>.<随机串>.<tld>，例如 adapt.kzzkhxdjj.cc / block.kzzkhxdjj.cc
@@ -32,22 +27,8 @@ const ENTRIES = (process.env.MRDS_ENTRY
   || 'https://www.gkaacdcul.cc,https://mrdst3.com,https://mrdsv8.com,https://mrdst2.com').split(',');
 const DRY = process.argv.includes('--dry');
 
-/** 密码：环境变量优先，其次读 secret.yml —— 定时任务里没有 env，必须能自己找到 */
-function dbPassword() {
-  if (process.env.MYSQL_PWD) return process.env.MYSQL_PWD;
-  const f = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '../../qtools-admin/src/main/resources/secret.yml');
-  try {
-    const m = fs.readFileSync(f, 'utf8').match(/password\s*:\s*["']?([^"'\r\n]+)/);
-    return m ? m[1].trim() : '';
-  } catch (e) { return ''; }
-}
-const PW = dbPassword();
-
-function sql(query) {
-  return run(MYSQL, ['-h127.0.0.1', '-P3307', '-uroot', '--protocol=TCP', '-N', '-B', '-e', query], {
-    env: { ...process.env, MYSQL_PWD: PW }, maxBuffer: 1 << 24, timeout: 120000,
-  }).then((r) => r.stdout.trim());
-}
+// 密码/客户端路径统一由 lib/db.mjs 解析（环境变量 → secret.yml），定时任务里没有 env 也能自己找到
+const sql = (query) => sqlAsync(query, { maxBuffer: 1 << 24, timeout: 120000 }).then((s) => s.trim());
 
 async function head(url) {
   try {

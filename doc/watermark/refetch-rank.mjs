@@ -1,9 +1,7 @@
 import { chromium } from 'playwright-core';
-import { execFileSync } from 'node:child_process';
+import { sql, execStdin } from '../lib/db.mjs';
 const C = ['C:/Program Files/Google/Chrome/Application/chrome.exe'].find((p) => { try { return require('node:fs').existsSync(p); } catch { return false; } });
-const MYSQL = 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
 const BASE = (process.env.BASE || 'https://able.nwfuhxhj.cc').replace(/\/$/, '') + '/';
-const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','-N','-B','-e', sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
 const fs = await import('node:fs');
 const exe = ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'].find((p) => { try { return fs.existsSync(p); } catch { return false; } });
 const b = await chromium.launch({ executablePath: exe, headless: false, args: ['--mute-audio','--window-position=-32000,-32000','--window-size=1300,950'] });
@@ -22,10 +20,10 @@ for (let page = 1; page <= 12; page++) {
   const fresh = ids.filter((sid) => !seen.has(sid));
   console.log(' page', page, 'ids', ids.length, 'new', fresh.length);
   if (!fresh.length) break;
-  const sql = fresh.map((sid) => { seen.add(sid); rank += 1; return "update tool_web_post set source_rank=" + rank + " where source_id='" + sid + "';"; }).join('\n');
-  db(sql);
+  const batch = fresh.map((sid) => { seen.add(sid); rank += 1; return "update tool_web_post set source_rank=" + rank + " where source_id='" + sid + "';"; }).join('\n');
+  await execStdin(batch);
   updated += fresh.length;
 }
 await b.close();
 console.log('ranked', updated);
-console.log(db('select source_rank, source_id, left(title,18) from tool_web_post order by source_rank asc limit 8;'));
+console.log(sql('select source_rank, source_id, left(title,18) from tool_web_post order by source_rank asc limit 8;'));

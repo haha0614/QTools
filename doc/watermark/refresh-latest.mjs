@@ -5,7 +5,7 @@ import fs from 'node:fs';
 // 由 resign-sidecar 定时调用；手动跑也一样：node refresh-latest.mjs
 const NODE = process.execPath;
 const DIR = new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
-const LOG = process.env.QTOOLS_LOG || 'E:/111/project/QTools/data/logs/refresh-latest.log';
+const LOG = process.env.QTOOLS_LOG || DIR + '../../../data/logs/refresh-latest.log';
 const DETAIL_N = Number(process.env.DETAIL_N || 30);
 
 const log = (msg) => {

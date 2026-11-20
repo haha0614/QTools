@@ -1,25 +1,24 @@
-import { execFileSync } from 'node:child_process';
+import { sql } from '../lib/db.mjs';
 import fs from 'node:fs';
-const MYSQL = process.env.QTOOLS_MYSQL || 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
-const NOISE_FILE = process.env.QTOOLS_NOISE || 'E:/111/project/QTools/QTools/doc/watermark/noise-lines.json';
+import path from 'node:path';
+const NOISE_FILE = process.env.QTOOLS_NOISE || path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), 'noise-lines.json');
 const DRY = process.env.DRY !== '0';
 // df=5 的那几条是同一系列帖子的「关键词：…」行，属于正文内容，不能当样板；
 // 真正的站点样板 df 是 26 / 560 这个量级，所以门槛取 10。
 const MIN_DF = Number(process.env.MIN_DF || 10);
-const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','--default-character-set=utf8mb4','-N','-B','-e', sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
 const esc = (s) => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "''");
 
 // 这一列里存的是''分隔的正文段落；站点在每个帖子末尾塞了同样的推荐位标题，
 // 用文档频率(出现在多少个不同帖子里)判定样板最稳，不依赖具体文案。
 // mysql -B 批处理模式会把值里的换行转义成字面量 \n，要还原回来
 const unescape = (s) => s.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\\\/g, '\\');
-const raw = db("select id, content_text from tool_web_post where content_text is not null and content_text <> '';");
-const rows = raw.split('\n').filter(Boolean).map((line) => {
+const raw = sql("select id, content_text from tool_web_post where content_text is not null and content_text <> '';");
+const posts = raw.split('\n').filter(Boolean).map((line) => {
   const k = line.indexOf('\t');
   return { id: line.slice(0, k), text: unescape(line.slice(k + 1)) };
 });
 const df = new Map();
-for (const r of rows) {
+for (const r of posts) {
   const seenIn = new Set();
   for (const p of r.text.split('\n')) {
     const t = p.trim();
@@ -44,7 +43,7 @@ for (const k of known) {
   if (!boiler.some(([t]) => t === k)) boiler.push([k, knownSet.has(k) ? 1 : 0]);
 }
 boiler.sort((a, b) => b[1] - a[1]);
-console.log('posts', rows.length, '| distinct lines', df.size, '| boilerplate(>=' + MIN_DF + ')', boiler.length);
+console.log('posts', posts.length, '| distinct lines', df.size, '| boilerplate(>=' + MIN_DF + ')', boiler.length);
 for (const [t, n] of boiler.slice(0, 12)) console.log('  df=' + n, t.slice(0, 50));
 
 // 把本次识别出的样板行写盘：爬虫在抽取阶段就能直接丢掉，不必等事后清理
@@ -56,7 +55,7 @@ try {
 
 let touched = 0, removed = 0, blocksRemoved = 0;
 const boilerSet = new Set(boiler.map(([t]) => t));
-for (const r of rows) {
+for (const r of posts) {
   const lines = r.text.split('\n');
   const kept = lines.filter((t) => !boilerSet.has(t.trim()));
   const removedHere = lines.length - kept.length;
@@ -64,7 +63,7 @@ for (const r of rows) {
   // 详情页渲染的是 content（blocks JSON），正文文本列只是搜索用；两处都要清
   let blocks = [];
   try {
-    const rawJson = db("select replace(replace(content, '\\\\', '\\\\\\\\'), '''', '''''') from tool_web_post where id=" + r.id + ';').trim();
+    const rawJson = sql("select replace(replace(content, '\\\\', '\\\\\\\\'), '''', '''''') from tool_web_post where id=" + r.id + ';').trim();
     blocks = JSON.parse(rawJson.replace(/''/g, "'")) || [];
   } catch (e) { blocks = []; }
   const keptBlocks = blocks.filter((b) => !(b && b.type === 'text' && boilerSet.has(String(b.text || '').trim())));
@@ -74,7 +73,7 @@ for (const r of rows) {
   touched += 1; removed += removedHere; blocksRemoved += blocksRemovedHere;
   if (!DRY) {
     const json = JSON.stringify(keptBlocks).replace(/\\/g, '\\\\').replace(/'/g, "''");
-    db("update tool_web_post set content_text='" + esc(kept.join('\n')) + "', content='" + json + "' where id=" + r.id + ';');
+    sql("update tool_web_post set content_text='" + esc(kept.join('\n')) + "', content='" + json + "' where id=" + r.id + ';');
   }
 }
 console.log(DRY ? 'DRY' : 'APPLIED', '| posts touched', touched, '| text lines removed', removed, '| blocks removed', blocksRemoved);

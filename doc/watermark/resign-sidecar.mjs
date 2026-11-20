@@ -1,7 +1,9 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { chromium } from 'playwright-core';
+import { sqlAsync } from '../lib/db.mjs';
 
 // 重签 sidecar：源站详情页对普通 HTTP 请求返回的是假页面（curl 拿不到 m3u8），
 // 只有真浏览器渲染后配置 JSON 才在。所以「签名过期」这件事后端自己解决不了，
@@ -153,8 +155,6 @@ async function syncSourceHost() {
         cwd: new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
         env: {
           ...process.env,
-          MYSQL: process.env.MYSQL || process.env.QTOOLS_MYSQL || 'E:/111/project/QTools/tools/mysql/bin/mysql.exe',
-          MYSQL_PWD: process.env.MYSQL_PWD || 'dqq1107.',
         },
         encoding: 'utf8',
         maxBuffer: 1 << 24,
@@ -298,13 +298,10 @@ const BG_INTERVAL_MS = Number(process.env.BG_INTERVAL_MS || 20000);
 const BG_QUEUE_LIMIT = Number(process.env.BG_QUEUE_LIMIT || 6);
 const bgTried = new Set();
 
-function queryIds(sql) {
-  return new Promise((resolve) => {
-    execFile(process.env.QTOOLS_MYSQL || 'E:/111/project/QTools/tools/mysql/bin/mysql.exe',
-      ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','-N','-B','-e', sql, 'qtools'],
-      { encoding: 'utf8', maxBuffer: 1 << 24 },
-      (err, stdout) => resolve(err ? [] : String(stdout || '').trim().split('\n').filter(Boolean).map((x) => Number(x.trim())).filter((n) => n > 0)));
-  });
+function queryIds(query) {
+  return sqlAsync(query, { maxBuffer: 1 << 24 })
+    .then((s) => String(s || '').trim().split('\n').filter(Boolean).map((x) => Number(x.trim())).filter((n) => n > 0))
+    .catch(() => []);
 }
 
 // 有待处理的重签（= 用户正在等播放）时，后台补详情让路，避免和用户抢源站
@@ -338,18 +335,14 @@ if (BG_ENABLED) {
 // ---- 视频入库（下载到本地）----
 // 源站是 AES-128 的 HLS；ffmpeg 直接拉 m3u8 再 -c copy 存 mp4，不转码、不吃 CPU。
 // 串行队列：一条 330MB 左右，同时下多个只会互相抢带宽。
-const FFMPEG = process.env.FFMPEG || 'E:/111/project/QTools/data/media/runtime/ffmpeg.exe';
-const FFPROBE = process.env.FFPROBE || 'E:/111/project/QTools/data/media/runtime/ffprobe.exe';
-const WEBROOT = process.env.QTOOLS_WEBROOT || 'E:/111/project/QTools/data/media/web';
+const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+const FFMPEG = process.env.FFMPEG || path.resolve(HERE, '../../../data/media/runtime/ffmpeg.exe');
+const FFPROBE = process.env.FFPROBE || path.resolve(HERE, '../../../data/media/runtime/ffprobe.exe');
+const WEBROOT = process.env.QTOOLS_WEBROOT || path.resolve(HERE, '../../../data/media/web');
 let dlQueue = [];
 let dlWorking = false;
 
-const sqlOne = (sql) => new Promise((resolve) => {
-  execFile(process.env.QTOOLS_MYSQL || 'E:/111/project/QTools/tools/mysql/bin/mysql.exe',
-    ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','--default-character-set=utf8mb4','-N','-B','-e', "set session sql_mode=''; " + sql, 'qtools'],
-    { encoding: 'utf8', maxBuffer: 1 << 24 },
-    (err, stdout) => resolve(err ? '' : String(stdout || '').trim()));
-});
+const sqlOne = (query) => sqlAsync(query, { maxBuffer: 1 << 24 }).then((s) => String(s || '').trim()).catch(() => '');
 
 /** 探测单段流的宽高比，形如 '720/1280'；失败返回空串 */
 function probeRatio(url) {

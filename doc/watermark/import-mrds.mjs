@@ -1,14 +1,14 @@
 
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+import { execStdin, sql } from '../lib/db.mjs';
 
 const C = ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'].find(p=>{try{return fs.existsSync(p)}catch{return false}});
 const BASE = process.env.BASE || 'https://able.akmevtunk.cc';
 const PAGES = Number(process.env.PAGES || 3);
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const MYSQL = 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
 
 const b = await chromium.launch({ executablePath: C, headless: false, args: ['--mute-audio','--window-position=-32000,-32000','--window-size=1000,800'] });
 const p = await (await b.newContext({ userAgent: UA, viewport: { width: 1280, height: 900 }, locale: 'zh-CN' })).newPage();
@@ -63,10 +63,10 @@ const esc = (s) => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/
 const values = rows.map(r => '(' +
   "'mrds', '" + esc(r.id) + "', '" + esc(r.title).slice(0, 900) + "', '" + esc(r.category) + "', '" +
   esc(r.tags.join(',')) + "', '" + esc(r.cover) + "', '" + esc(r.date) + "', '" + esc(BASE + '/archives/' + r.id + '/') + "', " + (r.hasVideo ? 1 : 0) + ')');
-const sql = 'insert into tool_web_post (source, source_id, title, category, tags, cover, published_at, url, has_video) values\n' +
+const stmt = 'insert into tool_web_post (source, source_id, title, category, tags, cover, published_at, url, has_video) values\n' +
   values.join(',\n') + '\non duplicate key update title=values(title), category=values(category), tags=values(tags), cover=values(cover), published_at=values(published_at), has_video=values(has_video);\n';
-fs.writeFileSync('E:/111/project/QTools/QTools/doc/web-mirror/.import.sql', sql);
-const out = execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','qtools'], { input: sql, encoding: 'utf8' });
+fs.writeFileSync(path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '../web-mirror/.import.sql'), stmt);
+const out = await execStdin(stmt);
 console.log('imported', rows.length, 'rows | mysql:', String(out).trim() || 'ok');
-const count = execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','-N','-B','-e','select count(*), count(distinct category) from tool_web_post where source="mrds"','qtools'], { encoding: 'utf8' });
+const count = sql('select count(*), count(distinct category) from tool_web_post where source="mrds"');
 console.log('db rows/categories:', String(count).trim());

@@ -12,10 +12,8 @@
  *
  * 依赖：抓取 sidecar 已在 127.0.0.1:8765 运行（`HEADLESS=1 node resign-sidecar.mjs`）
  */
-import { execFileSync } from 'node:child_process';
+import { sql } from '../lib/db.mjs';
 
-const MYSQL = process.env.QTOOLS_MYSQL || 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
-const MYSQL_ARGS = ['-h127.0.0.1', '-P3307', '-uroot', '-pdqq1107.', '--default-character-set=utf8mb4', '-N', '-B'];
 const SIDECAR = process.env.SIDECAR || 'http://127.0.0.1:8765';
 const DRY = process.argv.includes('--dry');
 const ONLY_ID = (() => {
@@ -23,8 +21,6 @@ const ONLY_ID = (() => {
   return i > 0 ? Number(process.argv[i + 1]) : null;
 })();
 
-const db = (sql) => execFileSync(MYSQL, [...MYSQL_ARGS, '-e', "set session sql_mode=''; " + sql, 'qtools'],
-  { encoding: 'utf8', maxBuffer: 1 << 28 });
 const esc = (s) => String(s).replace(/'/g, "''");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -46,12 +42,12 @@ async function resignOne(pageUrl) {
 }
 
 const where = ONLY_ID ? (' and id=' + ONLY_ID) : '';
-const rows = db('select id, ifnull(source_id,\'\'), ifnull(url,\'\'), ifnull(video_urls,\'\') '
+const lines = sql('select id, ifnull(source_id,\'\'), ifnull(url,\'\'), ifnull(video_urls,\'\') '
   + 'from tool_web_post where has_video=1' + where).split(/\r?\n/).filter(Boolean);
 
 let total = 0;
 let broken = 0;
-for (const line of rows) {
+for (const line of lines) {
   const [id, sid, pageUrl, raw] = line.split('\t');
   total += 1;
   const hasHttp = raw.indexOf('http') >= 0;
@@ -64,7 +60,7 @@ console.log('扫描:', total, '条，其中地址损坏:', broken, '条', DRY ? 
 let ok = 0;
 let fail = 0;
 let idx = 0;
-for (const line of rows) {
+for (const line of lines) {
   const [id, sid, pageUrl0, raw] = line.split('\t');
   if (raw && raw.indexOf('http') >= 0) continue;
   idx += 1;
@@ -76,7 +72,7 @@ for (const line of rows) {
     continue;
   }
   if (!DRY) {
-    db("update tool_web_post set video_url='" + esc(list[0]) + "', video_urls='" + esc(JSON.stringify(list))
+    sql("update tool_web_post set video_url='" + esc(list[0]) + "', video_urls='" + esc(JSON.stringify(list))
       + "', video_count=" + list.length + ", has_video=1 where id=" + id + ';');
   }
   ok += 1;
