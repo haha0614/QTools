@@ -15,6 +15,8 @@
  * 用法：node sync-source-host.mjs [--dry]
  */
 import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -30,9 +32,20 @@ const ENTRIES = (process.env.MRDS_ENTRY
   || 'https://www.gkaacdcul.cc,https://mrdst3.com,https://mrdsv8.com,https://mrdst2.com').split(',');
 const DRY = process.argv.includes('--dry');
 
+/** 密码：环境变量优先，其次读 secret.yml —— 定时任务里没有 env，必须能自己找到 */
+function dbPassword() {
+  if (process.env.MYSQL_PWD) return process.env.MYSQL_PWD;
+  const f = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '../../qtools-admin/src/main/resources/secret.yml');
+  try {
+    const m = fs.readFileSync(f, 'utf8').match(/password\s*:\s*["']?([^"'\r\n]+)/);
+    return m ? m[1].trim() : '';
+  } catch (e) { return ''; }
+}
+const PW = dbPassword();
+
 function sql(query) {
   return run(MYSQL, ['-h127.0.0.1', '-P3307', '-uroot', '--protocol=TCP', '-N', '-B', '-e', query], {
-    env: { ...process.env }, maxBuffer: 1 << 24, timeout: 120000,
+    env: { ...process.env, MYSQL_PWD: PW }, maxBuffer: 1 << 24, timeout: 120000,
   }).then((r) => r.stdout.trim());
 }
 
