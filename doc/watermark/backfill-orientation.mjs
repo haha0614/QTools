@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-const MYSQL = 'E:/111/project/QTools/tools/mysql/bin/mysql.exe';
-const ROOT = 'E:/111/project/QTools/data/media/web';
-const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-pdqq1107.','--default-character-set=utf8mb4','-N','-B','-e', "set session sql_mode=''; " + sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
+const MYSQL = process.env.QTOOLS_MYSQL || process.env.MYSQL || 'D:/project/QTools-All/tools/mysql/bin/mysql.exe';
+const ROOT = process.env.QTOOLS_WEBROOT || 'D:/project/QTools-All/data/media/web';
+const DB_PWD = process.env.MYSQL_PWD || process.env.QTOOLS_MYSQL_PWD || 'dqq1107.';
+const db = (sql) => execFileSync(MYSQL, ['-h127.0.0.1','-P3307','-uroot','-p' + DB_PWD,'--default-character-set=utf8mb4','-N','-B','-e', "set session sql_mode=''; " + sql, 'qtools'], { encoding: 'utf8', maxBuffer: 1 << 28 });
 
 function jpegSize(file) {
   const b = fs.readFileSync(file);

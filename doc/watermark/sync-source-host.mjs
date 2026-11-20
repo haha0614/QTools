@@ -148,40 +148,51 @@ const sampleSid = (sidRow || '').split('\t')[0];
 
 // 1) 当前主域名
 const row = await sql("select substring_index(substring_index(url,'//',-1),'/',1) as h, count(*) c from qtools.tool_web_post group by h order by c desc limit 1;");
-let [current, count] = (row || '').split('\t');
-if (FROM) {
-  console.log('[host] --from 调试模式，用', FROM, '代替库里的主域名（不写库）');
-  current = FROM;
-  count = '(调试)';
-}
+const [current, count] = (row || '').split('\t');
 if (!current) {
   console.log('[host] 库里没有可用的 url');
   process.exit(1);
 }
 console.log('[host] 库里主域名:', current, '共', count, '条');
 
-// 2) 健康检查
+// 2) 健康检查 —— 关键：跟随跳转后看"最终主机"，源站换域名就是靠 301 链暴露的
 const sample = await sql("select url from qtools.tool_web_post where url like '%" + current + "%' order by id desc limit 1;");
-const status = await head(sample);
-console.log('[host] 健康检查:', status, '←', sample);
-if (status === 200) {
-  console.log('[host] 当前域名可用，无需迁移');
+let finalHost = '';
+let status = 0;
+try {
+  const res = await fetch(sample, { redirect: 'follow', headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/157 Safari/537.36' } });
+  status = res.status;
+  finalHost = new URL(res.url).host.toLowerCase();
+} catch (e) {
+  console.log('[host] 请求失败:', String(e.message).slice(0, 100));
+}
+console.log('[host] 健康检查:', status, '  最终主机:', finalHost || '(取不到)', '  ←', sample);
+
+if (status === 200 && finalHost && finalHost === current.toLowerCase()) {
+  console.log('[host] 已是最新，无需迁移');
   process.exit(0);
 }
 
-// 3) 发现新主机
-const found = await discoverHost(sampleSid, current);
-if (!found) {
-  console.log('[host] 当前域名不可用，且未能从入口站发现新主机 → 需要人工确认（见 gitlab.com/mrds/mrds 的 README）');
-  process.exit(2);
+// 3) 换域名了：优先用 301 链的最终主机；取不到才去入口站尽力发现
+let target = finalHost && status === 200 ? finalHost : '';
+if (!target) {
+  const found = await discoverHost();
+  if (!found) {
+    console.log('[host] 当前域名不可用，且未能从入口站发现新主机 → 需要人工确认（见 gitlab.com/mrds/mrds 的 README）');
+    process.exit(2);
+  }
+  target = found.host;
+  console.log('[host] 入口站发现新主机:', target, '（来自', found.via + '）');
+} else {
+  console.log('[host] 由 301 链发现新主机:', target);
 }
-console.log('[host] 发现新主机:', found.host, '（来自', found.via + '）');
-if (found.host.toLowerCase() === current.toLowerCase()) {
-  console.log('[host] 与库里一致，但健康检查失败 → 属于站点故障，不是域名轮换');
+
+if (target.toLowerCase() === current.toLowerCase()) {
+  console.log('[host] 与库里一致但健康检查未通过 → 属于站点故障，不是域名轮换');
   process.exit(2);
 }
 
-const stmt = "update qtools.tool_web_post set url = replace(url, '" + current + "', '" + found.host + "') where url like '%" + current + "%';";
+const stmt = "update qtools.tool_web_post set url = replace(url, '" + current + "', '" + target + "') where url like '%" + current + "%';";
 if (DRY) {
   console.log('[host] --dry，将执行:', stmt);
   process.exit(0);
