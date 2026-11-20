@@ -244,9 +244,45 @@ public class WebPlayController
         }
         catch (Exception e)
         {
+            // 源站连不上（域名失效/DNS 污染/被墙）时重签也没用：重签要先打开同一个域名。
+            // 这里给出可识别的 503，前端据此立刻停止重试（原先要白等 9 次约 55 秒）。
+            if (unreachable(e))
+            {
+                log.warn("源站不可达 id={} err={}", id, e.toString());
+                HttpHeaders headers = new HttpHeaders();
+                headers.setContentType(MediaType.APPLICATION_JSON);
+                headers.set(HttpHeaders.CACHE_CONTROL, "no-store");
+                return new ResponseEntity<>("{\"code\":503,\"msg\":\"source_unreachable\"}".getBytes(StandardCharsets.UTF_8),
+                        headers, HttpStatus.SERVICE_UNAVAILABLE);
+            }
             log.warn("播放列表异常 id={} err={}", id, e.toString());
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(new byte[0]);
         }
+    }
+
+    /** 连接级失败（连不上/解析不出/握手失败），与"源站返回 4xx/5xx"区分开 */
+    private static boolean unreachable(Throwable e)
+    {
+        for (Throwable t = e; t != null && t != t.getCause(); t = t.getCause())
+        {
+            if (t instanceof java.net.ConnectException || t instanceof java.net.UnknownHostException
+                    || t instanceof java.net.NoRouteToHostException || t instanceof java.net.SocketTimeoutException
+                    || t instanceof java.net.http.HttpConnectTimeoutException)
+            {
+                return true;
+            }
+            if (t instanceof javax.net.ssl.SSLException)
+            {
+                return true;
+            }
+            String m = String.valueOf(t.getMessage()).toLowerCase();
+            if (m.contains("timed out") || m.contains("connect") && m.contains("refused")
+                    || m.contains("no route to host") || m.contains("unknown host") || m.contains("nodename nor servname"))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 分片 / 密钥转发：{@code GET /api/tool/web/hls/{id}/part?u=<源地址>} */
