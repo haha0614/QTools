@@ -15,10 +15,14 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import { rows, sql } from '../lib/db.mjs';
 
-const WEBROOT = process.env.QTOOLS_WEBROOT || 'D:/project/QTools-All/data/media/web';
+// 网页图片根：QTools/doc/media-import 往上三级 = QTools-All 根
+// （原来写死 D:/project/QTools-All/...，换机器就指不到 data/media/web）
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const WEBROOT = process.env.QTOOLS_WEBROOT || path.resolve(HERE, '../../../data/media/web');
 const DRY = process.argv.includes('--dry');
 
 // 1) 优先用 ffprobe 探到的第一段比例

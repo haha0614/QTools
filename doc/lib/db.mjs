@@ -25,8 +25,23 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+// 仓库根：QTools/doc/lib 往上三级就是 QTools-All 根，便携布局的 tools/ 在根下。
+// 原来默认值写死 D:/project/QTools-All/...，换台机器 pull 下来就指不到 mysql。
+const ROOT = path.resolve(HERE, '../../..');
 
-export const MYSQL = process.env.QTOOLS_MYSQL || process.env.MYSQL || 'D:/project/QTools-All/tools/mysql/bin/mysql.exe';
+function firstExisting(list) {
+  for (const p of list) {
+    try { if (fs.existsSync(p)) return p; } catch (e) { /* 忽略，落到下一个 */ }
+  }
+  return list[0];
+}
+
+export const MYSQL = process.env.QTOOLS_MYSQL || process.env.MYSQL || firstExisting([
+  path.join(ROOT, 'tools/mysql/bin/mysql.exe'),
+  path.join(ROOT, 'tools/mysql/bin/mysql'),
+  path.join(ROOT, 'QTools/tools/mysql/bin/mysql.exe'),
+  'D:/project/QTools-All/tools/mysql/bin/mysql.exe',
+]);
 export const DB = { host: '127.0.0.1', port: 3307, user: 'root', database: 'qtools' };
 
 const ARGS = ['-h' + DB.host, '-P' + DB.port, '-u' + DB.user, '--protocol=TCP', '--default-character-set=utf8mb4', '-N', '-B'];
