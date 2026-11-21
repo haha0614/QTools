@@ -88,7 +88,7 @@ const SID = process.env.SID || '';
 // FORCE_TOP = 不管有没有详情，按源站 id 倒序重抓前 N 条（用于回填 published_full）
 const ROWID = process.env.ROWID || '';
 const FORCE_TOP = Number(process.env.FORCE_TOP || 0);
-const WHERE = FORCE_TOP
+let WHERE = FORCE_TOP
   ? ' order by cast(source_id as unsigned) desc'
   : (ROWID
   ? ' where id=' + Number(ROWID)
@@ -100,6 +100,10 @@ const WHERE = FORCE_TOP
 // 补详情要"补最新的"：source_id 是源站自增 id，越大越新；source_rank 记的是抓取顺序，不适合
 // ONLY_NO_DETAIL 原来不带 ORDER，MySQL 每轮都可能返回同一批行（补不动的就永远卡在那）；
 // 加 order by id 让批次随补完推进。
+// IDS：只抓指定的这几行（后台「连续排空」用 —— 由 sidecar 自己按游标选行，
+// 保证每批都往前推进，抓不动的行（404 / 页面没正文）不会永远占着队头）。
+const IDS = String(process.env.IDS || '').split(',').map((x) => Number(x)).filter((n) => n > 0);
+if (IDS.length) WHERE = ' where id in (' + IDS.join(',') + ')';
 const ORDER = FORCE_TOP ? '' : ' order by id';
 const posts = rows('select id, source_id, url, video_url from tool_web_post' + WHERE + ORDER + ' limit ' + LIMIT)
   .map(([id, sid, url, video]) => ({ id, sid, url, video: video || '' }));
@@ -116,7 +120,8 @@ for (const row of posts) {
     let raw = '';
     for (let attempt = 1; attempt <= 3 && !nav; attempt++) {
       try {
-        const resp = await p.goto(row.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        // GOTO_TIMEOUT：后台排空用更短的超时 —— 源站偶发 DNS/证书失败，45 秒白等一条会拖垮整批
+        const resp = await p.goto(row.url, { waitUntil: 'domcontentloaded', timeout: Number(process.env.GOTO_TIMEOUT || 45000) });
         nav = true;
         try { raw = (await resp.text()) || ''; } catch (e) { raw = ''; }
       } catch (e) { if (attempt === 3) throw e; await p.waitForTimeout(1200); }

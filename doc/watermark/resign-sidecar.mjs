@@ -327,9 +327,135 @@ async function bgTick() {
 if (BG_ENABLED) {
   setTimeout(ratioTick, 60 * 1000);
   setInterval(ratioTick, 120 * 1000);
-  setTimeout(bgTick, 5 * 1000);
-  setInterval(bgTick, BG_INTERVAL_MS);
-  console.log('background detail backfill on (batch ' + BG_BATCH + ' / ' + BG_INTERVAL_MS + 'ms)');
+  if (process.env.DETAIL_DRAIN !== '0') {
+    // 排空（每批 40 条、一次 launch）比 bgTick（每 20 秒 5 条、每条一次 launch）快 4 倍，
+    // 两条路同时跑只会互相抢源站、也在队列上互相饿死，所以排空开启时 bgTick 让位。
+    console.log('background detail backfill: 由 detail drain 接管');
+  } else {
+    setTimeout(bgTick, 5 * 1000);
+    setInterval(bgTick, BG_INTERVAL_MS);
+    console.log('background detail backfill on (batch ' + BG_BATCH + ' / ' + BG_INTERVAL_MS + 'ms)');
+  }
+}
+
+// ---- 后台补详情「连续排空」（2026-11-21）----
+// 实测口径：bgTick 每 20 秒只排 5 条，且每条一次 execFile = 一个新进程 + 新浏览器（约 2 秒），
+// 加上 refresh 每 20 分钟一轮占掉 4~5 分钟，合起来只有 380 条/小时（待补 3.09 万 ≈ 3.4 天）。
+// 这里换成「一次 launch 跑一批 40 条」：批内复用同一个浏览器，单条 5~7 秒 → 约 2.9 秒（实测 3 条 8.8 秒）。
+// 不能靠并行提速：源站有 Cloudflare，多开会互相拖慢甚至被拦（见上方 pumpDetail 注释），
+// 所以排空也只是「一个浏览器、一个页面、串行」，只是不再每行重启一次。
+// 让路规则与 bgTick 一致：用户等重签 / refresh 在跑 / 前台队列没空 → 这一轮不排。
+// 选行用「按 id 递增的游标」而不是 limit+offset：page 抓失败或页面本来没正文的行 content_text
+// 永远是空，用不带游标的 limit 会永远卡在队头；游标保证每批都往前推进，走完一轮再从 0 开始。
+// 风控闸门（宁可慢也不要被拦）：连续整批一条都没成 → 退避，累计 3 次停 30 分钟；
+// 输出里出现 Cloudflare 挑战或 429/403 → 立刻停 2 小时并留日志。
+const DRAIN_ENABLED = process.env.DETAIL_DRAIN !== '0';
+const DRAIN_BATCH = Number(process.env.DETAIL_DRAIN_BATCH || 40);
+const DRAIN_GAP_MS = Number(process.env.DETAIL_DRAIN_GAP_MS || 10000);
+const DRAIN_BLOCK_STOP_MS = 2 * 60 * 60 * 1000;
+// refresh-latest.mjs 在源站面（归档/分类/详情/精选）跑完后写这个文件，排空据此判断能否开工
+const SOURCE_DONE_MARK = new URL('../../../data/refresh-source-done', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+let drainCursor = 0;      // 已排到哪个 id（重启归零，那一轮会重看一遍抓不动的行）
+let drainUntil = 0;
+let drainStrikes = 0;
+
+// 选行条件与 bgTick 一致（正文 / 真实发布时间 / 标签 任一缺失都要补）：
+// 排空接管后 bgTick 不再跑，所以这里必须覆盖它原来管的三种空洞。
+const pickDrainIds = (after) => queryIds(
+  "select id from tool_web_post where (published_full is null or content_text is null or content_text='' or tags is null) and id > " + Number(after)
+  + ' order by id limit ' + DRAIN_BATCH);
+
+async function drainOnce() {
+  if (Date.now() < drainUntil) return;
+  // 有一方在等源站就让路：用户重签 > 前台点开/翻页 > 定时 refresh 的「源站面」阶段。
+  // refresh 的源站面 = 归档 / 分类 / 详情 / 精选（refresh-latest 在 featured 之后写标记文件），
+  // 之后只剩 clean-noise / trim 这类纯库内维护，那段（实测 3~5 分钟）可以让排空同时跑。
+  if (working || detailQueue.length || pendingResigns > 0) return;
+  if (refreshing) {
+    let doneAt = 0;
+    try { doneAt = Number(fs.readFileSync(SOURCE_DONE_MARK, 'utf8').trim()) || 0; } catch (e) { doneAt = 0; }
+    if (Date.now() - doneAt > 15 * 60 * 1000) return;   // 标记是上一轮留下的 → 源站面还在跑
+  }
+  let ids = await pickDrainIds(drainCursor);
+  let wrapped = false;
+  if (!ids.length) {
+    if (drainCursor === 0) {
+      console.log(new Date().toISOString(), 'drain idle（正文已补全）');
+      drainUntil = Date.now() + 10 * 60 * 1000;
+      return;
+    }
+    // 一轮走完：回到开头，这一轮只为把新出现的空洞补上
+    drainCursor = 0;
+    wrapped = true;
+    ids = await pickDrainIds(0);
+    if (!ids.length) {
+      console.log(new Date().toISOString(), 'drain idle（正文已补全）');
+      drainUntil = Date.now() + 10 * 60 * 1000;
+      return;
+    }
+  }
+  const t0 = Date.now();
+  let out = '';
+  try {
+    out = await new Promise((resolve, reject) => {
+      execFile(process.execPath, [new URL('./refetch-images.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')], {
+        cwd: new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
+        env: {
+          ...process.env,
+          IDS: ids.join(','),
+          HEADLESS: '1',
+          GOTO_TIMEOUT: '25000',
+          // 这一档只要正文（图片由用户点开时补，和 bg 队列同口径）
+          SKIP_IMAGES: '1',
+        },
+        encoding: 'utf8',
+        maxBuffer: 1 << 26,
+        timeout: 12 * 60 * 1000,
+      }, (err, stdout) => (err ? reject(err) : resolve(stdout || '')));
+    });
+  } catch (e) {
+    drainStrikes += 1;
+    drainUntil = Date.now() + Math.min(30 * 60 * 1000, drainStrikes * 5 * 60 * 1000);
+    console.log(new Date().toISOString(), 'drain fail', String((e && e.message) || e).slice(0, 120), '| strikes', drainStrikes);
+    return;
+  }
+  const secs = Math.round((Date.now() - t0) / 1000);
+  drainCursor = ids[ids.length - 1];
+  if (/Just a moment|challenge-platform|cf-challenge/i.test(out)) {
+    drainUntil = Date.now() + DRAIN_BLOCK_STOP_MS;
+    console.log(new Date().toISOString(), 'drain 停 2 小时：输出里出现 Cloudflare 挑战');
+    return;
+  }
+  const done = /done (\d+) \/ (\d+)/.exec(out);
+  const ok = done ? Number(done[1]) : 0;
+  const total = done ? Number(done[2]) : 0;
+  if (!ok && total) {
+    drainStrikes += 1;
+    drainUntil = Date.now() + (drainStrikes >= 3 ? 30 * 60 * 1000 : drainStrikes * 5 * 60 * 1000);
+    console.log(new Date().toISOString(), 'drain 空跑 ok 0/' + total, '| cursor', drainCursor, '| strikes', drainStrikes);
+    return;
+  }
+  drainStrikes = 0;
+  console.log(new Date().toISOString(), 'drain ok ' + ok + '/' + total, '|', secs + 's', '| cursor', drainCursor, wrapped ? '| 新一轮' : '');
+}
+
+let drainLastBeat = 0;
+async function drainLoop() {
+  if (DRAIN_ENABLED) {
+    // 每 5 分钟留一行心跳，否则"排空一声不响"时无法区分是让路还是卡住了
+    if (Date.now() - drainLastBeat > 5 * 60 * 1000) {
+      drainLastBeat = Date.now();
+      console.log(new Date().toISOString(), 'drain tick | refreshing', refreshing, '| working', working,
+        '| queue', detailQueue.length, '| resigns', pendingResigns, '| cursor', drainCursor, '| until', drainUntil > Date.now() ? 'backoff' : '-');
+    }
+    try { await drainOnce(); } catch (e) { console.log('drain error', String((e && e.stack) || e).slice(0, 300)); }
+  }
+  setTimeout(drainLoop, DRAIN_GAP_MS);
+}
+
+if (DRAIN_ENABLED) {
+  setTimeout(drainLoop, 90 * 1000);
+  console.log('detail drain on (batch ' + DRAIN_BATCH + ' / gap ' + DRAIN_GAP_MS + 'ms)');
 }
 
 // ---- 视频入库（下载到本地）----
