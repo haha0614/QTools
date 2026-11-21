@@ -121,13 +121,29 @@ for (const row of posts) {
         try { raw = (await resp.text()) || ''; } catch (e) { raw = ''; }
       } catch (e) { if (attempt === 3) throw e; await p.waitForTimeout(1200); }
     }
+    // 原来这里固定等 800ms + 滚动 4×250ms + 500ms ≈ 2.3 秒。实测帖图是内联 data URI，
+    // DOMContentLoaded 后 0.5~0.9 秒由页面脚本注入；但个别帖（228293）不滚就一张都不注入，
+    // 所以滚动照旧保留（只是把 250ms 的步间隔压到 120ms），等图改为"数到稳定为止"：
+    // 连续 3 次读数不变即视为就绪，上限 1500ms。实测每条约省 0.9~1.0 秒。
+    const countInline = () => p.evaluate(() => {
+      let k = 0;
+      for (const el of document.querySelectorAll('.post-content img')) {
+        const s = el.getAttribute('src') || '';
+        if (s.startsWith('data:image/') && s.length > 20000) k++;
+      }
+      return k;
+    });
     if (SKIP_IMAGES) {
       // 不抓图就不用滚动催加载：正文/标签在首屏 DOM 里就有
       await p.waitForTimeout(400);
     } else {
-      await p.waitForTimeout(800);
-      for (let i = 0; i < 4; i++) { await p.mouse.wheel(0, 1600); await p.waitForTimeout(250); }
-      await p.waitForTimeout(500);
+      for (let i = 0; i < 4; i++) { await p.mouse.wheel(0, 1600); await p.waitForTimeout(120); }
+      let ready = -1, same = 0;
+      for (let waited = 0; waited < 1500 && same < 3; waited += 120) {
+        const n = await countInline();
+        if (n === ready) same++; else { ready = n; same = 0; }
+        await p.waitForTimeout(120);
+      }
     }
     // ★ 源站的帖图不是外链，而是把整张 JPEG 以 base64 data URI 直接内联在 <img src> 里
     //   （data-xkrkllgl 那个 https://pic.gyezbp.cn/... 地址对外只返回加密的 binary/octet-stream，
