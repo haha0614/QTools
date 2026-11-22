@@ -86,7 +86,9 @@ public class TokenService
             }
             catch (Exception e)
             {
-                log.error("获取用户信息异常'{}'", e.getMessage());
+                // 登录态过期/被登出是日常事件（前端会弹「登录状态已过期」），记 debug 即可；
+                // 原先的 log.error 会把正常过期写进 sys-error.log，把 doctor 的 errors 项点成假警报
+                log.debug("登录态解析失败（多为过期或已登出）'{}'", e.getMessage());
             }
         }
         return null;
