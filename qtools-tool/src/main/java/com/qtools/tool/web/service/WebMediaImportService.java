@@ -910,38 +910,22 @@ public class WebMediaImportService
             return false;
         }
         String id = String.valueOf(rows.get(0).get("id"));
-        String safeRating = normalizeRating(rating);
-        if (safeRating != null)
+        // 多段帖只有第 1 段是裸 <名>.mp4，其余是 <名>-2.mp4 … <名>-N.mp4。
+        // 分级 / 人物 / 标签 / 工作室是「整帖」的属性，只写给第 1 段会让同帖其余段在媒体库里标签全空
+        List<String> ids = new java.util.ArrayList<>();
+        ids.add(id);
+        for (String sib : jdbc.queryForList("select id from media_video where rel_path like ? escape '!'",
+                String.class, segmentLike(rel)))
         {
-            jdbc.update("update media_video set content_rating = ? where id = ?", safeRating, id);
-        }
-        else if (rating != null && !rating.isBlank())
-        {
-            log.warn("忽略未知分级值 {}，保持扫描器默认", rating);
-        }
-        // 源站标签直接复用（媒体站没有的自动建字典）
-        applySourceTags(jdbc, id, sourceTags);
-        // 封面直接用源站那张（用户端卡片上的同一张图），不必等抽帧
-        applySourceCover(jdbc, id, videoRel);
-        // 多人物 + 角色：先清空再按本次设置写入（与管理端"整条覆盖"语义一致）
-        if (persons != null && !persons.isEmpty())
-        {
-            jdbc.update("delete from media_video_actor where video_id = ?", id);
-            for (String[] p : persons)
+            if (!ids.contains(sib))
             {
-                String name = p[0];
-                String role = p.length > 1 && p[1] != null && !p[1].isBlank() ? p[1] : "actor";
-                if (name == null || name.isBlank())
-                {
-                    continue;
-                }
-                jdbc.update("insert into media_video_actor (video_id, name, person_id, role) values (?, ?, ?, ?)",
-                        id, name, personId(jdbc, name), role);
+                ids.add(sib);
             }
         }
+        String safeRating = normalizeRating(rating);
+        Long sid = null;
         if (studio != null && !studio.isBlank())
         {
-            Long sid = null;
             try
             {
                 List<Long> studioRows = jdbc.queryForList("select id from media_studio where name = ? limit 1",
@@ -952,13 +936,62 @@ public class WebMediaImportService
             {
                 sid = null;
             }
+        }
+        for (String vid : ids)
+        {
+            if (safeRating != null)
+            {
+                jdbc.update("update media_video set content_rating = ? where id = ?", safeRating, vid);
+            }
+            // 源站标签直接复用（媒体站没有的自动建字典）
+            applySourceTags(jdbc, vid, sourceTags);
+            // 多人物 + 角色：先清空再按本次设置写入（与管理端"整条覆盖"语义一致）
+            if (persons != null && !persons.isEmpty())
+            {
+                jdbc.update("delete from media_video_actor where video_id = ?", vid);
+                for (String[] p : persons)
+                {
+                    String name = p[0];
+                    String role = p.length > 1 && p[1] != null && !p[1].isBlank() ? p[1] : "actor";
+                    if (name == null || name.isBlank())
+                    {
+                        continue;
+                    }
+                    jdbc.update("insert into media_video_actor (video_id, name, person_id, role) values (?, ?, ?, ?)",
+                            vid, name, personId(jdbc, name), role);
+                }
+            }
             if (sid != null)
             {
-                jdbc.update("delete from media_video_studio where video_id = ?", id);
-                jdbc.update("insert into media_video_studio (video_id, studio_id) values (?, ?)", id, sid);
+                jdbc.update("delete from media_video_studio where video_id = ?", vid);
+                jdbc.update("insert into media_video_studio (video_id, studio_id) values (?, ?)", vid, sid);
             }
         }
+        if (safeRating == null && rating != null && !rating.isBlank())
+        {
+            log.warn("忽略未知分级值 {}，保持扫描器默认", rating);
+        }
+        // 封面是第 1 段那张源站图，其余段的封面交给抽帧
+        applySourceCover(jdbc, id, videoRel);
+        log.info("回填帖元数据 rel={} 覆盖 {} 段", videoRel, ids.size());
         return true;
+    }
+
+    /** <名>.mp4 → <名>-%（% _ ! 都转义：标题里的下划线很常见，不能当通配符） */
+    private static String segmentLike(String rel)
+    {
+        String stem = rel.endsWith(".mp4") ? rel.substring(0, rel.length() - 4) : rel;
+        StringBuilder sb = new StringBuilder(stem.length() + 8);
+        for (int i = 0; i < stem.length(); i += 1)
+        {
+            char c = stem.charAt(i);
+            if (c == '!' || c == '%' || c == '_')
+            {
+                sb.append('!');
+            }
+            sb.append(c);
+        }
+        return sb.append("-%").toString();
     }
 
     /** 目标已存在、与源同尺寸且不比源旧 → 说明上次已拷过，直接跳过：
