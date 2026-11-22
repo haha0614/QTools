@@ -538,12 +538,15 @@ async function downloadOne(id, index) {
   const row = await sqlOne('select source_id, ifnull(video_url,\'\'), ifnull(video_urls,\'\') from tool_web_post where id=' + id + ';');
   if (!row) return;
   const [sid, mainUrl, urlsJson] = row.split('\t');
-  let videoUrl = mainUrl;
+  // index>0 时绝不退回主地址：主地址是第 1 段，退回去就会把第 1 段存成第 N 段
+  // （f15913319102 与 base/-11 三份字节相同就是这么来的）
+  let videoUrl = index > 0 ? '' : mainUrl;
   if (index > 0 && urlsJson) {
-    try { videoUrl = (JSON.parse(urlsJson)[index] || '').replace(/\\\//g, '/') || mainUrl; } catch (e) { /* 保持主地址 */ }
+    try { videoUrl = (JSON.parse(urlsJson)[index] || '').replace(/\\\//g, '/'); } catch (e) { /* 保持空 */ }
   }
   if (!sid || !videoUrl) {
-    await sqlOne("update tool_web_post set download_state='error', download_error='没有可下载地址' where id=" + id + ';');
+    const why = sid ? '第' + (index + 1) + '段没有可下载地址（源站已删或只解析到部分段）' : '没有可下载地址';
+    await sqlOne("update tool_web_post set download_state='error', download_error='" + why + "' where id=" + id + ';');
     return;
   }
   const dir = WEBROOT + '/' + sid;
@@ -563,7 +566,9 @@ async function downloadOne(id, index) {
         const fresh = await resign(pageUrl);
         const list = Array.isArray(fresh) ? fresh : (fresh ? [fresh] : []);
         if (list.length && list.every((u) => typeof u === 'string' && u.indexOf('http') === 0)) {
-          videoUrl = list[index] || list[0] || videoUrl;
+          // 同样不许退回第 1 段：重签只解析到部分段时，第 N 段就是没有地址
+          const picked = index > 0 ? list[index] : list[0];
+          if (picked) videoUrl = picked;
           // 段数以库里为准：重签有时只解析到部分播放器，
           // 直接用短数组覆盖会把 12 段写成 10 段（实测过）。
           const prevCount = Number((await sqlOne('select ifnull(json_length(video_urls),0) from tool_web_post where id=' + id + ';')).trim()) || 0;
@@ -575,6 +580,10 @@ async function downloadOne(id, index) {
         }
       }
     } catch (e) { /* 重签失败就按原地址试 */ }
+    // 第 N 段在源站已经没有了：宁可报错，也不能拿第 1 段冒充（会存出一份重复文件）
+    if (!videoUrl) {
+      throw new Error('第' + (index + 1) + '段没有可用地址（源站已删或重签只解析到部分段）');
+    }
     // 时长用于算进度（ffprobe 很快，失败就按未知处理）
     let duration = 0;
     try {

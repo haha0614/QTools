@@ -370,56 +370,32 @@ public class WebMediaImportService
             req.setPipeline(Boolean.TRUE);
             // 媒体站同一时刻只允许一个扫描任务；撞上了就等它跑完再起，
             // 否则这次导入会直接失败（表现为"分级/人物没回填、封面没生成"）
-            String jobId = null;
-            for (int attempt = 0; attempt < 30 && jobId == null; attempt += 1)
-            {
-                try
-                {
-                    Map<String, Object> job = scanIngestService.start(req);
-                    jobId = String.valueOf(job.get("jobId"));
-                }
-                catch (RuntimeException e)
-                {
-                    String msg = String.valueOf(e.getMessage());
-                    if (msg.contains("已有扫描入库任务") || msg.contains("在运行"))
-                    {
-                        log.info("扫描任务占用中，等待后重试（第 {} 次）", attempt + 1);
-                        try
-                        {
-                            Thread.sleep(10000);
-                        }
-                        catch (InterruptedException ie)
-                        {
-                            Thread.currentThread().interrupt();
-                            break;
-                        }
-                        continue;
-                    }
-                    throw e;
-                }
-            }
-            if (jobId == null)
-            {
-                out.put("ok", false);
-                out.put("message", "扫描任务长时间占用，稍后再试");
-                return out;
-            }
+            String jobId = tryStartScan(req);
 
-            // 扫描是异步的：起个后台线程等它跑完，再回填分级与人物
+            // 扫描是异步的：起个后台线程等它跑完，再回填分级与人物。
+            // 撞上别的扫描任务时「排队 + 等它让位」也在这个线程里做 —— 以前在请求线程里
+            // sleep(10s)×30，前端早超时了，这条帖子的锁也白占 5 分钟。
             final int imgs = imageCount;
             final String videoRel = wantVideo ? safe + ".mp4" : null;
+            final Long rec = recordId;
             final String finalJobId = jobId;
-            Thread t = new Thread(() -> awaitAndTag(finalJobId, videoRel, safeName(album == null ? safe : album),
-                    rating, persons, studio, sourceTags, recordId),
-                    "web-media-import-" + finalJobId);
+            Thread t = new Thread(() -> {
+                String id = finalJobId != null ? finalJobId : awaitScanFree(req, postId, rec);
+                if (id == null)
+                {
+                    return;
+                }
+                awaitAndTag(id, videoRel, safeName(album == null ? safe : album),
+                        rating, persons, studio, sourceTags, rec);
+            }, "web-media-import-" + postId);
             t.setDaemon(true);
             t.start();
 
             out.put("ok", true);
-            out.put("jobId", jobId);
+            out.put("jobId", jobId == null ? "" : jobId);
             out.put("folder", LIB_FOLDER);
             out.put("images", imgs);
-            out.put("message", "已放入媒体库，正在扫描入库");
+            out.put("message", jobId != null ? "已放入媒体库，正在扫描入库" : "已放入媒体库，扫描排队中");
             return out;
         }
         catch (IOException e)
@@ -440,6 +416,88 @@ public class WebMediaImportService
         {
             busyPosts.remove(postId);
         }
+    }
+
+    /** 试着立刻起扫描；撞上别的扫描任务返回 null（调用方转后台排队） */
+    private String tryStartScan(MediaScanIngestRequest req)
+    {
+        try
+        {
+            Map<String, Object> job = scanIngestService.start(req);
+            return String.valueOf(job.get("jobId"));
+        }
+        catch (RuntimeException e)
+        {
+            String msg = String.valueOf(e.getMessage());
+            if (msg.contains("已有扫描入库任务") || msg.contains("在运行"))
+            {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * 后台排队：每 10 秒试一次，等前一个扫描任务跑完再起本次扫描。
+     *
+     * <p>媒体站同一时刻只允许一个扫描任务（{@code MediaScanIngestService} 用信号量互斥），
+     * 一次扫描动辄几分钟。以前在请求线程里等，最长占 300 秒且前端早超时；
+     * 现在请求立刻返回「扫描排队中」，排队与等待都在这里做（上限 30 分钟）。</p>
+     *
+     * @return 起成功的 jobId；超时或起不来返回 null（并把导入记录标成失败）
+     */
+    private String awaitScanFree(MediaScanIngestRequest req, Long postId, Long recordId)
+    {
+        log.info("扫描任务占用中，转后台排队 postId={}", postId);
+        if (segmentProgress(postId) == null)
+        {
+            // 单段帖子没有补段线程，用它把「在排队」显示出来；多段帖子的补段进度更具体，别覆盖
+            markSegment(postId, 0, 0, "queued");
+        }
+        for (int attempt = 0; attempt < 180; attempt += 1)
+        {
+            try
+            {
+                Thread.sleep(10000);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+            try
+            {
+                Map<String, Object> job = scanIngestService.start(req);
+                String jobId = String.valueOf(job.get("jobId"));
+                log.info("排队扫描已启动 postId={} job={} 第 {} 次重试", postId, jobId, attempt + 1);
+                return jobId;
+            }
+            catch (RuntimeException e)
+            {
+                String msg = String.valueOf(e.getMessage());
+                if (msg.contains("已有扫描入库任务") || msg.contains("在运行"))
+                {
+                    continue;
+                }
+                log.warn("排队扫描启动失败 postId={} err={}", postId, e.toString());
+                failRecord(recordId, "触发扫描失败：" + msg);
+                return null;
+            }
+        }
+        log.warn("排队扫描超时放弃 postId={}", postId);
+        failRecord(recordId, "扫描任务长时间占用，稍后再试");
+        return null;
+    }
+
+    private void failRecord(Long recordId, String reason)
+    {
+        if (recordId == null)
+        {
+            return;
+        }
+        new JdbcTemplate(dataSource).update(
+                "update tool_web_download set state = ?, percent = 0, finished_at = now(), error = ? where id = ?",
+                "error", reason, recordId);
     }
 
     /** 等扫描结束，然后给新入库的视频补分级 / 人物 */

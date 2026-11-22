@@ -436,12 +436,33 @@ public class WebPlayController
             {
                 return null;
             }
-            // 整组回写，下次播放就不用再重签
-            toolWebPostMapper.updateVideoUrls(id, list.get(0), com.alibaba.fastjson2.JSON.toJSONString(list),
-                    list.size());
-            String url = index < list.size() ? list.get(index) : list.get(0);
-            log.info("重签成功 id={} 共{}段 取第{}段", id, list.size(), index);
-            return url;
+            // 重签有时只解析到部分播放器，数组会变短（实测把 12 段写成 10 段，
+            // 后两段就此 404 且再也补不回来）。库里的段数更长时保留原数组，只更新首地址。
+            Integer prevRaw = toolWebPostMapper.countVideoUrls(id);
+            int prevCount = prevRaw == null ? 0 : prevRaw;
+            if (prevCount > list.size())
+            {
+                log.warn("重签段数变少，保留原数组 id={} 库里={} 新={}", id, prevCount, list.size());
+                toolWebPostMapper.updateVideoUrl(id, list.get(0));
+            }
+            else
+            {
+                // 整组回写，下次播放就不用再重签
+                toolWebPostMapper.updateVideoUrls(id, list.get(0), com.alibaba.fastjson2.JSON.toJSONString(list),
+                        list.size());
+            }
+            if (index <= 0)
+            {
+                return list.get(0);
+            }
+            if (index < list.size())
+            {
+                log.info("重签成功 id={} 共{}段 取第{}段", id, list.size(), index);
+                return list.get(index);
+            }
+            // 这一段源站已经没有了：不能退回第 1 段，否则会拿第 1 段冒充第 N 段
+            log.warn("重签结果里没有第{}段 id={} 共{}段 库里{}段", index, id, list.size(), prevCount);
+            return null;
         }
         catch (Exception e)
         {

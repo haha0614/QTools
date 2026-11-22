@@ -200,6 +200,10 @@
         from tool_web_post where id = #{id} limit 1
     </select>
 
+    <select id="countVideoUrls" resultType="java.lang.Integer">
+        select ifnull(json_length(video_urls), 0) from tool_web_post where id = #{id}
+    </select>
+
     <update id="updateVideoUrls">
         update tool_web_post
         set video_url = #{videoUrl},

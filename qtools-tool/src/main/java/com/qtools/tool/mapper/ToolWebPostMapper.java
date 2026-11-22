@@ -59,6 +59,9 @@ public interface ToolWebPostMapper
     /** 多视频：取第 index 个播放地址（video_urls 里没有就退回 video_url） */
     String selectVideoUrl(@Param("id") Long id, @Param("index") int index);
 
+    /** 库里已有几段播放地址（重签结果变短时要靠它兜住） */
+    Integer countVideoUrls(@Param("id") Long id);
+
     /** 源站详情页 URL（签名过期时交给重签 sidecar 用） */
     String selectSourceUrl(@Param("id") Long id);
 

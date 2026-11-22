@@ -531,6 +531,7 @@ public class WebDownloadController
                 case "done" -> "补段完成 " + count + "/" + count;
                 case "timeout" -> "补段超时 " + seg + "/" + count;
                 case "failed" -> "补段失败 " + seg + "/" + count;
+                case "queued" -> "排队等扫描";
                 default -> "补段 " + seg + "/" + count;
             };
             row.put("note", note);
