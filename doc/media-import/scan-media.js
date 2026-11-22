@@ -1569,9 +1569,16 @@ function buildSql(model, o) {
     lines.push('INSERT INTO media_video (id,folder,rel_path,title,size,dur,w,h,vcodec,browser_ok,poster_path,hidden,mtime,content_hash,root_id' +
       missingCols(o, true) + posterCols(o) + ') VALUES ' +
       part.join(',') +
-      // dur/w/h/vcodec 不覆盖：本脚本不跑 ffprobe，别把别的工具填好的元数据清空
+      // dur/w/h/vcodec 不覆盖：本脚本不跑 ffprobe，别把别的工具填好的元数据清空。
+      // 例外：同一个 rel_path 被「内容不同的文件」覆盖（重新下载某一段）时，旧的 dur/w/h/vcodec
+      // 属于上一个文件，必须清空交给 enrich-meta.js 重探 —— 否则会出现「文件 4 分钟、库里 3 分 39 秒」。
+      // 这几项必须写在 content_hash=n.content_hash 之前：MySQL 逐项赋值，写在后面读到的已是新哈希。
       ' AS n ON DUPLICATE KEY UPDATE folder=n.folder,rel_path=n.rel_path,title=n.title,' +
       'size=n.size,browser_ok=n.browser_ok,poster_path=n.poster_path,mtime=n.mtime,' +
+      'dur=IF(media_video.content_hash<=>n.content_hash,media_video.dur,NULL),' +
+      'w=IF(media_video.content_hash<=>n.content_hash,media_video.w,NULL),' +
+      'h=IF(media_video.content_hash<=>n.content_hash,media_video.h,NULL),' +
+      'vcodec=IF(media_video.content_hash<=>n.content_hash,media_video.vcodec,NULL),' +
       'content_hash=n.content_hash,root_id=n.root_id' + posterTouch(o) + missingTouch(o) + ';');
   }
 

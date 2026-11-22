@@ -122,7 +122,9 @@ function pickAllM3u8(html) {
     const url = m[1].replace(/\\\//g, '/');
     if (!out.includes(url)) out.push(url);
   }
-  return out.slice(0, 10);
+  // 上限只是防「匹配到推荐位/其它帖」的保险，别当成业务规则：
+  // 源站多集帖实测 12 条（archives/202112），原来写死 10 会把第 11、12 集直接截掉
+  return out.slice(0, 50);
 }
 
 // ---- 定时拉最新 ----
@@ -544,8 +546,10 @@ async function downloadOne(id, index) {
   if (index > 0 && urlsJson) {
     try { videoUrl = (JSON.parse(urlsJson)[index] || '').replace(/\\\//g, '/'); } catch (e) { /* 保持空 */ }
   }
-  if (!sid || !videoUrl) {
-    const why = sid ? '第' + (index + 1) + '段没有可下载地址（源站已删或只解析到部分段）' : '没有可下载地址';
+  // 库里存的段数可能比源站少（旧解析上限 10 段）：index 越界时先别判死刑，
+  // 下面重签拿到完整列表后再决定有没有这一段
+  if (!sid) {
+    const why = '没有可下载地址';
     await sqlOne("update tool_web_post set download_state='error', download_error='" + why + "' where id=" + id + ';');
     return;
   }
