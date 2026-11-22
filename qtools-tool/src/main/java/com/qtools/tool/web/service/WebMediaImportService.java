@@ -8,8 +8,8 @@ import java.nio.file.StandardCopyOption;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -74,8 +74,8 @@ public class WebMediaImportService
     @Autowired
     private DataSource dataSource;
 
-    /** 同一时刻只跑一个导入，避免扫描器抢锁 */
-    private final AtomicBoolean busy = new AtomicBoolean(false);
+    /** 按帖加锁：同一条帖子同时只跑一个导入（扫描任务在后端本就串行，不靠这把锁互斥） */
+    private final Set<Long> busyPosts = ConcurrentHashMap.newKeySet();
 
     /**
      * 补段进度（内存态）：postId → {@code {seg, count, phase, at}}。
@@ -195,8 +195,11 @@ public class WebMediaImportService
                     Path extra = srcDir.resolve("v" + (seg + 1) + ".mp4");
                     if (Files.exists(extra))
                     {
-                        Files.copy(extra, targetDir.resolve(safe + "-" + (seg + 1) + ".mp4"),
-                                StandardCopyOption.REPLACE_EXISTING);
+                        Path segTarget = targetDir.resolve(safe + "-" + (seg + 1) + ".mp4");
+                        if (!alreadyCopied(extra, segTarget))
+                        {
+                            Files.copy(extra, segTarget, StandardCopyOption.REPLACE_EXISTING);
+                        }
                         copied += 1;
                     }
                 }
@@ -260,10 +263,10 @@ public class WebMediaImportService
             String imageFile)
     {
         Map<String, Object> out = new LinkedHashMap<>();
-        if (!busy.compareAndSet(false, true))
+        if (!busyPosts.add(postId))
         {
             out.put("ok", false);
-            out.put("message", "已有导入任务在跑，稍后再试");
+            out.put("message", "这条帖子正在导入中，稍后再试");
             return out;
         }
         try
@@ -303,7 +306,10 @@ public class WebMediaImportService
                     out.put("message", "服务端还没有这条的视频文件");
                     return out;
                 }
-                Files.copy(videoSrc, videoTarget, StandardCopyOption.REPLACE_EXISTING);
+                if (!alreadyCopied(videoSrc, videoTarget))
+                {
+                    Files.copy(videoSrc, videoTarget, StandardCopyOption.REPLACE_EXISTING);
+                }
                 // 多段视频：video.mp4 只是第一段，v2.mp4 / v3.mp4 … 也要一起搬进去，
                 // 否则 12 段只入库 1 段（用户看到的就是"管理端只有一条视频"）
                 java.util.List<Integer> copied = new java.util.ArrayList<>();
@@ -315,8 +321,11 @@ public class WebMediaImportService
                     {
                         break;
                     }
-                    Files.copy(extra, targetDir.resolve(safe + "-" + seg + ".mp4"),
-                            StandardCopyOption.REPLACE_EXISTING);
+                    Path segTarget = targetDir.resolve(safe + "-" + seg + ".mp4");
+                    if (!alreadyCopied(extra, segTarget))
+                    {
+                        Files.copy(extra, segTarget, StandardCopyOption.REPLACE_EXISTING);
+                    }
                     copied.add(seg);
                 }
                 out.put("videoSegments", copied.size());
@@ -429,7 +438,7 @@ public class WebMediaImportService
         }
         finally
         {
-            busy.set(false);
+            busyPosts.remove(postId);
         }
     }
 
@@ -892,6 +901,22 @@ public class WebMediaImportService
             }
         }
         return true;
+    }
+
+    /** 目标已存在、与源同尺寸且不比源旧 → 说明上次已拷过，直接跳过：
+     *  省一次整段复制（12 段约 800MB），也避开「文件被扫描/播放占用」导致的拷贝失败 */
+    private boolean alreadyCopied(Path src, Path target)
+    {
+        try
+        {
+            return Files.exists(target)
+                    && Files.size(src) == Files.size(target)
+                    && Files.getLastModifiedTime(target).toMillis() >= Files.getLastModifiedTime(src).toMillis();
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
     }
 
     /** 文件名清洗：去掉路径分隔与非法字符，限制长度 */
