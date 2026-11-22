@@ -480,6 +480,7 @@ public class WebDownloadController
     public Map<String, Object> records(@RequestParam(value = "limit", required = false, defaultValue = "20") int limit)
     {
         List<Map<String, Object>> rows = toolWebPostMapper.selectDownloads(Math.min(Math.max(limit, 1), 100));
+        attachSegmentProgress(rows);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("rows", rows);
         return out;
@@ -489,7 +490,59 @@ public class WebDownloadController
     @GetMapping("/download-record")
     public Map<String, Object> record(@RequestParam("id") Long id)
     {
-        return toolWebPostMapper.selectDownload(id);
+        Map<String, Object> row = toolWebPostMapper.selectDownload(id);
+        if (row != null)
+        {
+            attachSegmentProgress(java.util.List.of(row));
+        }
+        return row;
+    }
+
+    /**
+     * 把后台补段进度并进导入记录（P6.116 补段可见）
+     *
+     * <p>多段帖子的补段在后台上线程里一段段等 sidecar 下载（一整条 8~10 分钟），
+     * 进度只存在 {@code WebMediaImportService} 的内存里（不落库 —— 它活到这段跑完就没意义了）。
+     * 这里合并成 {@code note}（"补段 3/12"）与推进过的 {@code percent}，前端「下载记录」直接显示。</p>
+     */
+    private void attachSegmentProgress(List<Map<String, Object>> rows)
+    {
+        if (rows == null)
+        {
+            return;
+        }
+        for (Map<String, Object> row : rows)
+        {
+            if (row == null || row.get("postId") == null)
+            {
+                continue;
+            }
+            Long postId = Long.valueOf(String.valueOf(row.get("postId")));
+            Map<String, Object> p = webMediaImportService.segmentProgress(postId);
+            if (p == null)
+            {
+                continue;
+            }
+            int seg = p.get("seg") instanceof Number n ? n.intValue() : 0;
+            int count = p.get("count") instanceof Number n ? n.intValue() : 0;
+            String phase = String.valueOf(p.get("phase"));
+            String note = switch (phase)
+            {
+                case "done" -> "补段完成 " + count + "/" + count;
+                case "timeout" -> "补段超时 " + seg + "/" + count;
+                case "failed" -> "补段失败 " + seg + "/" + count;
+                default -> "补段 " + seg + "/" + count;
+            };
+            row.put("note", note);
+            row.put("seg", seg);
+            row.put("segTotal", count);
+            row.put("segPhase", phase);
+            if ("importing".equals(String.valueOf(row.get("state"))) && count > 0)
+            {
+                // 补段占 60%→95%，收尾的「扫库回填」留给 awaitAndTag
+                row.put("percent", Math.min(95, 60 + (int) Math.round(35.0 * seg / count)));
+            }
+        }
     }
 
     /**

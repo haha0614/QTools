@@ -397,82 +397,40 @@ public class WebPlayController
             }
             String json = resp.body();
             // sidecar 现在回 { url, urls:[…] }：多视频必须按段取，
-            // 只取 url[0] 会让"第 2 段过期"的时候错播成第 1 段（实测过）
+            // 只取 url[0] 会让"第 2 段过期"的时候错播成第 1 段（实测过）。
+            // 用 fastjson2 解析：原来手搓的 indexOf 扫描曾因 +9/+8 偏移把 "]}"
+            // 这类碎片写进 video_url（HANDOFF §10.2 的"脏数据"），结构化解析不会再出这种事；
+            // 下面还留一条 warn，真出现非 URL 值时带 id 留证据。
             java.util.List<String> list = new java.util.ArrayList<>();
-            int arr = json.indexOf("\"urls\":[");
-            if (arr >= 0)
+            try
             {
-                // "urls":[ 共 8 个字符，+8 才落在第一个元素的左引号上；
-                // 曾写成 +9 会跳过引号，导致解析出来的是 "]}" 这种垃圾并回写进库
-                // （HANDOFF 里"脏数据源头未定位"就是这里）。
-                int p = arr + 8;
-                while (p < json.length())
+                com.alibaba.fastjson2.JSONObject obj = com.alibaba.fastjson2.JSON.parseObject(json);
+                Object rawUrls = obj == null ? null : obj.get("urls");
+                if (rawUrls instanceof java.util.List<?> arrList)
                 {
-                    int q1 = json.indexOf('"', p);
-                    if (q1 < 0)
+                    for (Object o : arrList)
                     {
-                        break;
-                    }
-                    StringBuilder sb = new StringBuilder();
-                    int i = q1 + 1;
-                    for (; i < json.length(); i++)
-                    {
-                        char c = json.charAt(i);
-                        if (c == '"')
+                        if (o != null)
                         {
-                            break;
-                        }
-                        if (c == '\\' && i + 1 < json.length())
-                        {
-                            i++;
-                            sb.append(json.charAt(i));
-                        }
-                        else
-                        {
-                            sb.append(c);
+                            list.add(String.valueOf(o));
                         }
                     }
-                    if (sb.length() > 0)
-                    {
-                        list.add(sb.toString());
-                    }
-                    if (i + 1 < json.length() && json.charAt(i + 1) == ']')
-                    {
-                        break;
-                    }
-                    p = i + 2;
+                }
+                if (list.isEmpty() && obj != null && obj.get("url") != null)
+                {
+                    list.add(String.valueOf(obj.get("url")));
                 }
             }
-            if (list.isEmpty())
+            catch (Exception e)
             {
-                int k = json.indexOf("\"url\":\"");
-                if (k < 0)
-                {
-                    return null;
-                }
-                int start = k + 7;
-                StringBuilder sb = new StringBuilder();
-                for (int i = start; i < json.length(); i++)
-                {
-                    char c = json.charAt(i);
-                    if (c == '"')
-                    {
-                        break;
-                    }
-                    if (c == '\\' && i + 1 < json.length())
-                    {
-                        i++;
-                        sb.append(json.charAt(i));
-                    }
-                    else
-                    {
-                        sb.append(c);
-                    }
-                }
-                if (sb.length() > 0)
-                {
-                    list.add(sb.toString());
-                }
+                log.warn("重签结果不是合法 JSON id={} body={}", id, head(json));
+                return null;
+            }
+            int beforeFilter = list.size();
+            list.removeIf(u -> !(u.startsWith("http://") || u.startsWith("https://")));
+            if (list.size() != beforeFilter)
+            {
+                log.warn("重签结果里有非 URL 值，已丢弃 id={} 丢弃={} 保留={}", id, beforeFilter - list.size(), list.size());
             }
             if (list.isEmpty())
             {
@@ -490,6 +448,16 @@ public class WebPlayController
             log.warn("重签 sidecar 调用失败 id={} err={}", id, e.toString());
             return null;
         }
+    }
+
+    /** 日志用：截断长文本，避免把整段 JSON 打进日志 */
+    private static String head(String s)
+    {
+        if (s == null)
+        {
+            return "";
+        }
+        return s.length() <= 160 ? s : s.substring(0, 160) + "…";
     }
 
     /**

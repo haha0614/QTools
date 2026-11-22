@@ -8,6 +8,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -77,6 +78,32 @@ public class WebMediaImportService
     private final AtomicBoolean busy = new AtomicBoolean(false);
 
     /**
+     * 补段进度（内存态）：postId → {@code {seg, count, phase, at}}。
+     *
+     * <p>补段是后台线程里逐段等 sidecar 下载（每段几十秒、一整条 8~10 分钟），
+     * 只活在这个 JVM 里就够：导入记录被 {@code /tool/web/download-records} 读到时会合并它，
+     * 用户在「下载记录」里就能看到「补段 3/12」。重启后丢进度不影响任何数据。</p>
+     */
+    private final Map<Long, Map<String, Object>> segmentProgress = new ConcurrentHashMap<>();
+
+    /** 补段进度快照；没有记录时返回 null */
+    public Map<String, Object> segmentProgress(Long postId)
+    {
+        return postId == null ? null : segmentProgress.get(postId);
+    }
+
+    private void markSegment(Long postId, int seg, int count, String phase)
+    {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("seg", seg);
+        m.put("count", count);
+        m.put("phase", phase);
+        m.put("at", System.currentTimeMillis());
+        segmentProgress.put(postId, m);
+        log.info("补段进度 postId={} {}/{} phase={}", postId, seg, count, phase);
+    }
+
+    /**
      * 导入一条内容到媒体站
      *
      * @return {@code {ok, folder, videoFile, jobId, message}}
@@ -113,8 +140,10 @@ public class WebMediaImportService
             if (System.currentTimeMillis() > deadline)
             {
                 log.warn("分段补齐超时 postId={} 已到第 {} 段", postId, seg + 1);
+                markSegment(postId, seg + 1, count, "timeout");
                 return;
             }
+            markSegment(postId, seg + 1, count, "downloading");
             triggerSegmentDownload(postId, seg);
             long until = Math.min(deadline, System.currentTimeMillis() + 120_000L);
             while (!Files.exists(f) && System.currentTimeMillis() < until)
@@ -129,8 +158,11 @@ public class WebMediaImportService
                     return;
                 }
             }
-            log.info("分段 {}/{} 就绪={} postId={}", seg + 1, count, Files.exists(f), postId);
+            boolean ready = Files.exists(f);
+            log.info("分段 {}/{} 就绪={} postId={}", seg + 1, count, ready, postId);
+            markSegment(postId, seg + 1, count, ready ? "ready" : "missing");
         }
+        markSegment(postId, count, count, "done");
     }
 
     /** 后台补齐剩余分段并追加入库（不阻塞保存请求） */
@@ -152,6 +184,7 @@ public class WebMediaImportService
         {
             return;
         }
+        markSegment(postId, 1, count, "waiting");
         Thread t = new Thread(() -> {
             try
             {
@@ -180,6 +213,7 @@ public class WebMediaImportService
                         {
                             scanIngestService.start(req);
                             log.info("分段补录完成 postId={} 追加 {} 段，已触发扫描", postId, copied);
+                            markSegment(postId, count, count, "done");
                             return;
                         }
                         catch (RuntimeException e)
@@ -192,6 +226,7 @@ public class WebMediaImportService
             catch (Exception e)
             {
                 log.warn("分段后台补录失败 postId={} err={}", postId, e.toString());
+                markSegment(postId, count, count, "failed");
             }
         }, "seg-backfill-" + postId);
         t.setDaemon(true);
