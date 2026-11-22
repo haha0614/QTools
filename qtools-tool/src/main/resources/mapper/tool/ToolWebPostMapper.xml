@@ -190,6 +190,12 @@
                  when #{index} &gt; 0 and ifnull(json_length(video_urls), 0) &gt; #{index}
                    then json_unquote(json_extract(video_urls, concat('$[', #{index}, ']')))
                  when #{index} &gt; 0 then null
+                 <!-- 第 1 段一律以数组第 0 条为准：video_url 只是它的缓存列，
+                      下载器把正在下的第 N 段写进去过（148950 第 1 段播成第 12 段就是这么来的），
+                      读的时候不能让第 1 段跟着错 -->
+                 when ifnull(json_length(video_urls), 0) &gt; 0
+                      and json_unquote(json_extract(video_urls, '$[0]')) like 'http%'
+                   then json_unquote(json_extract(video_urls, '$[0]'))
                  <!-- 单列 video_url 可能为空（只有多段数组时没回填），此时退回数组第 0 条，
                       否则播放器拿不到地址会直接 manifestLoadError -->
                  <!-- 空串或脏数据（历史 bug 写成过 ","）都退回数组第一条，读的时候就自愈 -->

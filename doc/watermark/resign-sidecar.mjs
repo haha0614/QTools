@@ -576,10 +576,13 @@ async function downloadOne(id, index) {
           // 段数以库里为准：重签有时只解析到部分播放器，
           // 直接用短数组覆盖会把 12 段写成 10 段（实测过）。
           const prevCount = Number((await sqlOne('select ifnull(json_length(video_urls),0) from tool_web_post where id=' + id + ';')).trim()) || 0;
+          // video_url 是「第 1 段」的专用列（selectVideoUrl 的 index=0 读它），
+          // 不能写成正在下载的那一段：否则第 1 段播成第 N 段（实测 148950 第 1 段成了第 12 段）
+          const mainHref = String(list[0]).replace(/'/g, "''");
           if (list.length >= prevCount) {
-            await sqlOne("update tool_web_post set video_url='" + String(videoUrl).replace(/'/g, "''") + "', video_urls='" + JSON.stringify(list).replace(/'/g, "''") + "', video_count=" + list.length + ", has_video=1 where id=" + id + ';');
-          } else {
-            await sqlOne("update tool_web_post set video_url='" + String(videoUrl).replace(/'/g, "''") + "' where id=" + id + ';');
+            await sqlOne("update tool_web_post set video_url='" + mainHref + "', video_urls='" + JSON.stringify(list).replace(/'/g, "''") + "', video_count=" + list.length + ", has_video=1 where id=" + id + ';');
+          } else if (index === 0) {
+            await sqlOne("update tool_web_post set video_url='" + mainHref + "' where id=" + id + ';');
           }
         }
       }

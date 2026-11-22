@@ -82,6 +82,7 @@ public class WebPostVideoUrlSelfCheck
 
     private void repairOnce()
     {
+        alignVideoUrl();
         try
         {
             List<Map<String, Object>> rows = jdbc.queryForList(
@@ -119,6 +120,35 @@ public class WebPostVideoUrlSelfCheck
         {
             // 自检失败不能挡住启动
             log.warn("启动自检（播放地址）失败：{}", e.toString());
+        }
+    }
+
+    /**
+     * video_url 必须等于 video_urls[0]：它只是「第 1 段」的缓存列，下载器却把正在下载的
+     * 第 N 段写进去过（148950 第 1 段播成第 12 段）。每 5 分钟对一次，对齐后条件不再命中，自动收敛。
+     */
+    private void alignVideoUrl()
+    {
+        try
+        {
+            List<Map<String, Object>> rows = jdbc.queryForList(
+                    "select id, json_unquote(json_extract(video_urls, '$[0]')) first_url from tool_web_post "
+                            + "where video_urls is not null and json_length(video_urls) > 0 "
+                            + "and json_unquote(json_extract(video_urls, '$[0]')) like 'http%' "
+                            + "and (video_url is null or video_url <> json_unquote(json_extract(video_urls, '$[0]')))");
+            for (Map<String, Object> row : rows)
+            {
+                jdbc.update("update tool_web_post set video_url = ? where id = ?",
+                        row.get("first_url"), ((Number) row.get("id")).longValue());
+            }
+            if (!rows.isEmpty())
+            {
+                log.info("播放地址自检：把 video_url 对齐到第 1 段 {} 条", rows.size());
+            }
+        }
+        catch (Exception e)
+        {
+            log.warn("播放地址自检（对齐第 1 段）失败：{}", e.toString());
         }
     }
 
