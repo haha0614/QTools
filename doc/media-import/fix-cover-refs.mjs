@@ -27,7 +27,7 @@ const rows = sql("select source_id, cover from tool_web_post where cover like '/
 const fix = [];
 let ok = 0, noP1 = 0;
 for (const [sid, cover] of rows) {
-  if (!/^\/web\/[^/]+\//.test(cover)) continue;
+  if (!/\/cover\.jpg$/.test(cover)) continue; // 已经改指 p1.jpg 的行不再计入
   const dir = path.join(WEBROOT, sid);
   if (fs.existsSync(path.join(dir, 'cover.jpg'))) { ok++; continue; }
   if (fs.existsSync(path.join(dir, 'p1.jpg'))) fix.push(sid);
