@@ -16,7 +16,7 @@ const log = (msg) => {
 
 const run = (script, env) => {
   try {
-    const out = execFileSync(NODE, [DIR + script], { cwd: DIR, env: { ...process.env, ...env }, encoding: 'utf8', maxBuffer: 1 << 26, timeout: 5 * 60 * 1000 });
+    const out = execFileSync(NODE, [DIR + script], { cwd: DIR, env: { ...process.env, ...env }, encoding: 'utf8', maxBuffer: 1 << 26, timeout: 5 * 60 * 1000, windowsHide: true });
     return out.trim().split('\n').slice(-1)[0];
   } catch (e) {
     return 'FAILED: ' + String((e && e.message) || e).slice(0, 140);

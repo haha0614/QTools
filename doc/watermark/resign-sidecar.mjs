@@ -155,6 +155,7 @@ async function syncSourceHost() {
     const out = await new Promise((resolve, reject) => {
       execFile(process.execPath, [new URL('./sync-source-host.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')], {
         cwd: new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
+        windowsHide: true,
         env: {
           ...process.env,
         },
@@ -189,6 +190,7 @@ async function runRefresh(quick) {
     const out = await new Promise((resolve, reject) => {
       execFile(process.execPath, [new URL(script, import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')], {
         cwd: new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
+        windowsHide: true,
         env: { ...process.env, HEADLESS: '1', ...(base ? { BASE: base } : {}) },
         encoding: 'utf8',
         maxBuffer: 1 << 26,
@@ -267,6 +269,7 @@ async function pumpDetail() {
         const out = await new Promise((resolve, reject) => {
           execFile(process.execPath, [new URL('./refetch-images.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')], {
             cwd: new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
+            windowsHide: true,
             // HEADLESS=1：后台抓取绝不弹窗抢焦点（以前每抓一条就新开一个可见窗口）
             env: {
               ...process.env,
@@ -354,7 +357,9 @@ if (BG_ENABLED) {
 // 风控闸门（宁可慢也不要被拦）：连续整批一条都没成 → 退避，累计 3 次停 30 分钟；
 // 输出里出现 Cloudflare 挑战或 429/403 → 立刻停 2 小时并留日志。
 const DRAIN_ENABLED = process.env.DETAIL_DRAIN !== '0';
-const DRAIN_BATCH = Number(process.env.DETAIL_DRAIN_BATCH || 40);
+// 40 条 × 老帖最坏 12 秒 goto + 12 秒重试 + 探活，会撞下面 pumpDetail 的 12 分钟外层超时、整批白跑；
+// 24 条 × 最坏 24 秒 ≈ 10 分钟，留出余量。
+const DRAIN_BATCH = Number(process.env.DETAIL_DRAIN_BATCH || 24);
 const DRAIN_GAP_MS = Number(process.env.DETAIL_DRAIN_GAP_MS || 10000);
 const DRAIN_BLOCK_STOP_MS = 2 * 60 * 60 * 1000;
 // refresh-latest.mjs 在源站面（归档/分类/详情/精选）跑完后写这个文件，排空据此判断能否开工
@@ -412,6 +417,7 @@ async function drainOnce() {
     out = await new Promise((resolve, reject) => {
       execFile(process.execPath, [new URL('./refetch-images.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')], {
         cwd: new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
+        windowsHide: true,
         env: {
           ...process.env,
           IDS: ids.join(','),
@@ -490,7 +496,7 @@ const sqlOne = (query) => sqlAsync(query, { maxBuffer: 1 << 24 }).then((s) => St
 function probeRatio(url) {
   return new Promise((resolve) => {
     execFile(FFPROBE, ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height',
-      '-of', 'csv=p=0', url], { encoding: 'utf8', timeout: 25000, maxBuffer: 1 << 20 }, (err, stdout) => {
+      '-of', 'csv=p=0', url], { encoding: 'utf8', timeout: 25000, maxBuffer: 1 << 20, windowsHide: true }, (err, stdout) => {
       if (err) return resolve('');
       const m = /^(\d+),(\d+)/.exec(String(stdout || '').trim());
       if (!m) return resolve('');
@@ -610,7 +616,7 @@ async function downloadOne(id, index) {
     try {
       duration = await new Promise((resolve) => {
         execFile(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', videoUrl],
-          { encoding: 'utf8', timeout: 30000 }, (err, stdout) => resolve(err ? 0 : Number(String(stdout || '').trim()) || 0));
+          { encoding: 'utf8', timeout: 30000, windowsHide: true }, (err, stdout) => resolve(err ? 0 : Number(String(stdout || '').trim()) || 0));
       });
     } catch (e) { duration = 0; }
 
@@ -621,7 +627,7 @@ async function downloadOne(id, index) {
         '-i', videoUrl, '-c', 'copy', '-bsf:a', 'aac_adtstoasc',
         '-progress', 'pipe:1', '-nostats', '-y', out
       ];
-      const child = execFile(FFMPEG, args, { maxBuffer: 1 << 22, timeout: 60 * 60 * 1000 }, (err) => (err ? reject(err) : resolve()));
+      const child = execFile(FFMPEG, args, { maxBuffer: 1 << 22, timeout: 60 * 60 * 1000, windowsHide: true }, (err) => (err ? reject(err) : resolve()));
       let lastPct = 0;
       if (child.stdout) {
         child.stdout.on('data', (buf) => {

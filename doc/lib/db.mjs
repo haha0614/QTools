@@ -61,6 +61,8 @@ export function dbPassword() {
 
 const opts = (o = {}) => ({
   encoding: 'utf8',
+  // 定时任务/后台抓取会频繁起 mysql.exe：不隐藏窗口的话每查一次就在桌面上闪一个黑框
+  windowsHide: true,
   env: { ...process.env, MYSQL_PWD: dbPassword() },
   maxBuffer: o.maxBuffer || 1 << 28,
   timeout: o.timeout,

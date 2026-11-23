@@ -20,6 +20,7 @@ const run = (script, env) => {
       cwd: DIR,
       env: { ...process.env, ...env },
       encoding: 'utf8',
+      windowsHide: true,
       maxBuffer: 1 << 26,
       timeout: 10 * 60 * 1000,
     });

@@ -32,8 +32,22 @@ async function entries(url) {
       // 广告位的 <a> 常常没有文字（整块是背景图），所以退回用卡片文本判断
       const rawText = (a.getAttribute('title') || a.textContent || card.innerText || '').replace(/\s+/g, ' ').trim();
       const title = rawText.slice(0, 160);
-      const dm = rawText.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
-      const dateKey = dm ? dm[1] + '-' + String(dm[2]).padStart(2, '0') + '-' + String(dm[3]).padStart(2, '0') : '';
+      // 源站新帖只渲染「11 月 21 日」，没有年份：按今年推断（跨年往前推一年），
+      // 否则这些帖 dateKey 为空，会被当成广告位、也被时间单调切分打断。
+      const dm = rawText.match(/(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+      let dateKey = '';
+      if (dm) {
+        const now = new Date();
+        const mo = String(dm[2]).padStart(2, '0');
+        const dd = String(dm[3]).padStart(2, '0');
+        let y = dm[1] ? Number(dm[1]) : now.getFullYear();
+        if (!dm[1]) {
+          const n = y * 10000 + Number(mo) * 100 + Number(dd);
+          const today = y * 10000 + (now.getMonth() + 1) * 100 + now.getDate();
+          if (n > today + 7) y -= 1;
+        }
+        dateKey = y + '-' + mo + '-' + dd;
+      }
       out.push({ id: m[1], title, hasCover, dateKey });
     }
     return out;
@@ -76,12 +90,11 @@ const noCover = new Set(
 const notAd = (e) => isReal(e) && !noCover.has(e.id);
 const homeSplit = splitPromoBlock(homeRaw.filter(notAd));
 // 分类页结构实测是「置顶 N 条 → 广告位 → 内容流」，所以用第一个广告位当分隔符，
-// 比"取前 3"稳；没有广告位时退回按时间单调性切
-const firstAd = catRaw.findIndex((e) => !notAd(e));
-const catPromoRaw = firstAd > 0 ? catRaw.slice(0, firstAd) : null;
-const catSplit = catPromoRaw
-  ? { promo: catPromoRaw, feed: catRaw.slice(firstAd) }
-  : splitPromoBlock(catRaw.filter(notAd));
+// 比"取前 3"稳；没有广告位时退回按时间单调性切。
+// 注意：分类页这里只能用标题判广告（isReal），不能带上 noCover —— 置顶帖里常有一条
+// 当初导入时 cover 没落到本地（DB cover 为空），用 noCover 会在第 2 条就截断，
+// 结果「源站置顶 3 条、我们只有 1 条」（2026-11-23 实测：cat 只剩 202958 一条）。
+const catSplit = splitPromoBlock(catRaw.filter(isReal));
 let home = homeSplit.promo.map((e) => e.id);
 let cat = catSplit.promo.map((e) => e.id);
 const homeFeed = homeSplit.feed.map((e) => e.id);
@@ -91,9 +104,24 @@ console.log('首页推广位', home.length, '条，内容流首条', homeFeed[0]
 // 兜底：真过滤光了说明判据出问题，宁可不过滤也不要清空精选带
 if (!home.length) home = homeRaw.map((e) => e.id);
 if (!cat.length) cat = catRaw.map((e) => e.id);
-// 分类页顶部置顶：日期比本页最新日期旧的连续前几条（最多 3 条）
-const maxCatId = Math.max.apply(null, cat.map(Number).filter((n) => n > 0));
-const pinned = cat.slice(0, Math.max(0, cat.length));
+// 分类页顶部置顶：与 crawl-feeds 同一口径 —— 从第一张卡往下扫，
+// 日期比本页最新的旧的即置顶，遇到最新的那条就是内容流开始；广告位没有日期（整块背景图，抓不到文字）直接跳过。
+// 上限 3 条：源站实测 mrds 分类就是 3 条，放宽会把内容流顶端误算进来。
+const dnum = (e) => {
+  const m = (e.dateKey || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? Number(m[1]) * 10000 + Number(m[2]) * 100 + Number(m[3]) : 0;
+};
+const dated = catRaw.map(dnum).filter((n) => n > 0);
+const maxCatDate = dated.length ? Math.max.apply(null, dated) : 0;
+const pinned = [];
+for (const e of catRaw) {
+  const n = dnum(e);
+  if (n === 0) continue;                     // 广告位
+  if (n >= maxCatDate) break;                // 内容流第一条
+  if (!isReal(e)) continue;
+  pinned.push(e.id);
+  if (pinned.length >= 3) break;
+}
 console.log('home', home.length, '| cat', cat.length, '| pinned', pinned.join(','), '| 跳过广告', skipped.join(','));
 await b.close();
 

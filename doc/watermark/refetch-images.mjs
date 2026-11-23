@@ -191,7 +191,7 @@ async function probeDead(url) {
   for (let hop = 0; hop < 4; hop++) {
     let r;
     try {
-      r = await fetch(cur, { redirect: 'manual', headers: { 'user-agent': UA }, signal: AbortSignal.timeout(15000) });
+      r = await fetch(cur, { redirect: 'manual', headers: { 'user-agent': UA }, signal: AbortSignal.timeout(5000) });
     } catch (e) { return ''; }
     const loc = r.headers.get('location') || '';
     if (r.status >= 300 && r.status < 400 && loc) {

@@ -49,3 +49,26 @@ if (!DRY) {
 } else {
   console.log('DRY：将改写', fix.length, '条');
 }
+
+// 第二段：cover 还空着、但本地已经有 cover.jpg 的行（封面早就下下来了，只是没写回库里）。
+// 成因：crawl-feeds 用 insert ignore 入库，已存在的行不会被更新；而封面文件是这一轮才补下的。
+const blank = sql('select source_id from tool_web_post where cover is null or cover=\'\';')
+  .trim().split(/\r?\n/).filter(Boolean).map((s) => s.trim());
+const fill = [];
+for (const sid of blank) {
+  if (fs.existsSync(path.join(WEBROOT, sid, 'cover.jpg'))) fill.push(sid);
+}
+console.log('封面为空的', blank.length, '| 已有 cover.jpg 可回填', fill.length);
+if (DRY) {
+  console.log('DRY：将回填', fill.length, '条');
+} else {
+  let filled = 0;
+  for (let i = 0; i < fill.length; i += 500) {
+    const chunk = fill.slice(i, i + 500);
+    const inList = chunk.map((s) => "'" + s.replace(/'/g, "''") + "'").join(',');
+    sql("update tool_web_post set cover = concat('/web/', source_id, '/cover.jpg')"
+      + " where (cover is null or cover='') and source_id in (" + inList + ");");
+    filled += chunk.length;
+  }
+  console.log('已回填', filled, '条');
+}

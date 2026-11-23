@@ -86,7 +86,17 @@ for (const feed of list) {
     });
     // 分类页顶部会插「精选/置顶」若干条：它们日期比后面更旧，且列表中段还会插无标题无日期的广告位。
     // 判定：先算出本页最新日期，再把「出现在第一条最新日期之前的更旧条目」标记为 featured。
-    const toNum = (s) => { const m = (s || '').match(/(\d{4}) 年 (\d{1,2}) 月 (\d{1,2}) 日/); return m ? Number(m[1]) * 10000 + Number(m[2]) * 100 + Number(m[3]) : 0; };
+    // 源站最近的帖子只显示「11 月 21 日」（没有年份），旧帖才带「2026 年」。
+    // 原来强制要求 4 位年份 → 新帖被判成"没有日期"当广告位跳过，连封面都不会下载，
+    // 结果置顶帖里有 2 条 cover 为空、前端只显示得出 1 条（2026-11-23 定位）。
+    const today = (() => { const d = new Date(); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); })();
+    const toNum = (s) => {
+      const m = (s || '').match(/(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+      if (!m) return 0;
+      let n = (m[1] ? Number(m[1]) : new Date().getFullYear()) * 10000 + Number(m[2]) * 100 + Number(m[3]);
+      if (!m[1] && n > today + 7) n -= 10000;   // 跨年：1 月看到「12 月 28 日」按去年算
+      return n;
+    };
     const dated = cards.map((c) => toNum(c.date)).filter((n) => n > 0);
     const maxDate = dated.length ? Math.max.apply(null, dated) : 0;
     // 置顶只在「开头连续几条」且日期明显旧时成立，最多 3 条（实测 mrds 分类正好 3 条）；
