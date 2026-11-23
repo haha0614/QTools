@@ -207,6 +207,11 @@ async function probeDead(url) {
 }
 
 let okCount = 0, imgTotal = 0, noImg = [], goneCount = 0;
+// 「打不开」的名额（每批最多 5 个）：有些老帖不是 302 跳图片，而是连响应都没有 —— goto 每次干等到超时。
+// 这类行在源站侧等同已删（活帖实测 1~2 秒就返回），三次都打不开就记进死链名单，避免它每轮再耗 75 秒。
+// 但整站抖动也会表现成同样症状，所以每批封顶 5 个，超了就不记（宁可慢一轮，也不要一次把活帖全标死）。
+let deadByTimeout = 0;
+const HOPELESS = /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION|ERR_EMPTY_RESPONSE|ERR_TIMED_OUT|ERR_ADDRESS_UNREACHABLE|ERR_CERT|net::|Timeout|timed out/i;
 for (const row of posts) {
   beat();
   try {
@@ -232,6 +237,12 @@ for (const row of posts) {
         why = await probeDead(row.url);
         if (why) { gone = true; break; }
         if (attempt < 3) { await p.waitForTimeout(1200); continue; }
+        if (HOPELESS.test(String((e && e.message) || e)) && deadByTimeout < 5) {
+          deadByTimeout += 1;
+          why = '三次都打不开';
+          gone = true;
+          break;
+        }
         throw e;
       }
     }
@@ -466,5 +477,5 @@ for (const row of posts) {
   await sleep(120);
 }
 await b.close();
-console.log('done', okCount, '/', posts.length, '| images', imgTotal, '| 源站已删', goneCount);
+console.log('done', okCount, '/', posts.length, '| images', imgTotal, '| 源站已删', goneCount, deadByTimeout ? '| 其中打不开 ' + deadByTimeout : '');
 if (noImg.length) console.log('no-image posts:', noImg.join(', '));

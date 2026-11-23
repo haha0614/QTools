@@ -317,7 +317,8 @@ async function bgTick() {
   if (detailQueue.filter((q) => q.priority === 'bg').length >= BG_QUEUE_LIMIT) return;
   const ids = await queryIds(
     // tags is null：详情抓过但标签没抽过的老数据也要补一遍（标签是筛选/黑名单的依据）
-    "select id from tool_web_post where published_full is null or content_text is null or content_text='' or tags is null "
+    // content_text 的空串是「抓过、但这帖本来就没有正文」的完成标记，不再当缺失去重抓（否则永远排在队首）
+    "select id from tool_web_post where published_full is null or content_text is null or tags is null "
     + 'order by cast(source_id as unsigned) desc limit ' + (BG_BATCH + bgTried.size));
   const dead = readDead();
   const pick = ids.filter((id) => !bgTried.has(id) && !dead.has(id)).slice(0, BG_BATCH);
@@ -372,7 +373,7 @@ let drainStrikes = 0;
 // 选行条件与 bgTick 一致（正文 / 真实发布时间 / 标签 任一缺失都要补）：
 // 排空接管后 bgTick 不再跑，所以这里必须覆盖它原来管的三种空洞。
 const pickDrainIds = (after) => queryIds(
-  "select id from tool_web_post where (published_full is null or content_text is null or content_text='' or tags is null) and id > " + Number(after)
+  "select id from tool_web_post where (published_full is null or content_text is null or tags is null) and id > " + Number(after)
   + ' order by id limit ' + DRAIN_BATCH);
 
 async function drainOnce() {
@@ -415,7 +416,11 @@ async function drainOnce() {
           ...process.env,
           IDS: ids.join(','),
           HEADLESS: '1',
-          GOTO_TIMEOUT: '25000',
+          // 活帖实测 1~2 秒就返回；25 秒的 upper bound 会让 40 条一批撞上外层 12 分钟超时，
+          // 整批被 kill 后一条都没落库（历史上反复出现 drain fail 就是这个）。12 秒 + 每批封顶 5 个「打不开」足够。
+          GOTO_TIMEOUT: '12000',
+          EVAL_TIMEOUT: '15000',
+          STALL_MS: '120000',
           // 这一档只要正文（图片由用户点开时补，和 bg 队列同口径）
           SKIP_IMAGES: '1',
         },
