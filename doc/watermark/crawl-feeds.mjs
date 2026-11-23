@@ -97,19 +97,13 @@ for (const feed of list) {
       if (!m[1] && n > today + 7) n -= 10000;   // 跨年：1 月看到「12 月 28 日」按去年算
       return n;
     };
-    const dated = cards.map((c) => toNum(c.date)).filter((n) => n > 0);
-    const maxDate = dated.length ? Math.max.apply(null, dated) : 0;
-    // 置顶只在「开头连续几条」且日期明显旧时成立，最多 3 条（实测 mrds 分类正好 3 条）；
-    // 放宽会把正常的更新序条目误判成置顶（不同分类的最新日期不一样）。
-    let pinnedOpen = true;
-    let pinnedCount = 0;
+    // 这里只标「首页精选」，**不碰分类页置顶**：每个分类页顶部都有自己的置顶块，
+    // 而前端「置顶推荐」只认每日大赛那 3 条 —— 两边都写会出现 5 条置顶（200697/202872 来自别的分类）。
+    // 置顶由 refetch-featured.mjs 单独负责（refresh-latest 里 feeds 之后紧接着跑它）。
     for (const c of cards) {
       const n = toNum(c.date);
       if (n === 0) { c.skip = true; continue; }        // 广告位：没有日期，不是帖子
-      const isPinned = pinnedOpen && n < maxDate && pinnedCount < 3;
-      if (!isPinned && n >= maxDate) pinnedOpen = false;
-      if (isPinned) pinnedCount += 1;
-      c.featured = feed.name === '首页' || isPinned ? 1 : 0;
+      c.featured = feed.name === '首页' ? 1 : 0;
     }
     let fresh = 0;
     let homePos = 0;   // 首页 feed 里的位次（编辑排序）
@@ -128,7 +122,7 @@ for (const feed of list) {
         }
       }
       if (!DRY) {
-        const kind = c.featured ? (feed.name === '首页' ? 'home' : 'pinned') : null;
+        const kind = c.featured ? 'home' : null;
         const insSql = 'insert ignore into tool_web_post (source, source_id, title, category, cover, published_at, url, source_rank, featured, featured_kind)'
           + " values ('mrds','" + esc(c.id) + "','" + esc(c.title) + "','" + esc(c.category) + "','" + esc(coverPath) + "','"
           + esc(c.date) + "','" + esc(BASE + '/archives/' + c.id + '/') + "'," + rank + ',' + (c.featured ? 1 : 0) + ','
