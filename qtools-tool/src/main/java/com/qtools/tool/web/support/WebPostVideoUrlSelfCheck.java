@@ -38,6 +38,12 @@ public class WebPostVideoUrlSelfCheck
     /** 下载/重签 sidecar */
     private static final String SIDECAR = "http://127.0.0.1:8765";
 
+    /** 对齐第 1 段时每轮扫多少个 id（见 {@link #alignVideoUrl()} 的注释） */
+    private static final int HEAL_BATCH = 20000;
+
+    /** 分批游标：本进程内累计，重启从头开始 */
+    private long healCursor = 0L;
+
     private final JdbcTemplate jdbc;
 
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
@@ -126,24 +132,40 @@ public class WebPostVideoUrlSelfCheck
     /**
      * video_url 必须等于 video_urls[0]：它只是「第 1 段」的缓存列，下载器却把正在下载的
      * 第 N 段写进去过（148950 第 1 段播成第 12 段）。每 5 分钟对一次，对齐后条件不再命中，自动收敛。
+     *
+     * <p>按 id 区间分批扫（每轮 {@link #HEAL_BATCH} 个 id）：全表 5.8 万行一次扫完要 1.3~1.7 秒，
+     * 会被 Druid 记成 slow sql / ERROR（doctor 的 errors 项因此长期亮黄，真故障被噪音淹没）。
+     * 游标走到表尾就归零。实测单轮 105~256ms（覆盖索引 range 扫），主键最大 43 万，
+     * 2 万个 id 一轮 → 22 轮、每 5 分钟一轮 ≈ 110 分钟覆盖一遍全库。</p>
      */
     private void alignVideoUrl()
     {
         try
         {
+            // 按 id 区间扫，不能用「扫到 5000 条命中为止」：绝大多数行早已对齐，
+            // 命中稀少时那样子句会一路扫到表尾，仍是全表扫描。
+            long maxId = jdbc.queryForObject("select ifnull(max(id), 0) from tool_web_post", Long.class);
+            if (healCursor >= maxId)
+            {
+                healCursor = 0L;
+            }
+            long from = healCursor;
+            long to = from + HEAL_BATCH;
             List<Map<String, Object>> rows = jdbc.queryForList(
                     "select id, json_unquote(json_extract(video_urls, '$[0]')) first_url from tool_web_post "
-                            + "where video_urls is not null and json_length(video_urls) > 0 "
+                            + "where id > ? and id <= ? and video_urls is not null and json_length(video_urls) > 0 "
                             + "and json_unquote(json_extract(video_urls, '$[0]')) like 'http%' "
-                            + "and (video_url is null or video_url <> json_unquote(json_extract(video_urls, '$[0]')))");
+                            + "and (video_url is null or video_url <> json_unquote(json_extract(video_urls, '$[0]'))) "
+                            + "order by id limit " + HEAL_BATCH, from, to);
             for (Map<String, Object> row : rows)
             {
                 jdbc.update("update tool_web_post set video_url = ? where id = ?",
                         row.get("first_url"), ((Number) row.get("id")).longValue());
             }
+            healCursor = to;
             if (!rows.isEmpty())
             {
-                log.info("播放地址自检：把 video_url 对齐到第 1 段 {} 条", rows.size());
+                log.info("播放地址自检：把 video_url 对齐到第 1 段 {} 条（id {}~{}）", rows.size(), from, to);
             }
         }
         catch (Exception e)
