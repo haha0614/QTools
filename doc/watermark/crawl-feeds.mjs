@@ -4,7 +4,10 @@ import path from 'node:path';
 import { sql } from '../lib/db.mjs';
 
 const exe = ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'].find((p) => { try { return fs.existsSync(p); } catch { return false; } });
-const WEBROOT = process.env.QTOOLS_WEBROOT || 'D:/project/QTools-All/data/media/web';
+// 默认跟着脚本走（本机便携布局：<根>/data/media/web）；原来写死 D:/project/QTools-All/...，
+// B 机（E 盘）上会把封面写到 D 盘旧树里，站上全是 404（2026-11-23 修）。
+const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+const WEBROOT = process.env.QTOOLS_WEBROOT || path.resolve(HERE, '../../../data/media/web');
 // 源站域名会轮换（见 gitlab.com/mrds/mrds 的 README，或跑 sync-source-host.mjs 同步库里地址）
 const BASE = process.env.BASE || 'https://able.nwfuhxhj.cc';
 const PAGES = Number(process.env.PAGES || 3);
