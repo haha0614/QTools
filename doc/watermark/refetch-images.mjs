@@ -8,6 +8,16 @@ const WEBROOT = process.env.QTOOLS_WEBROOT || path.resolve(path.dirname(new URL(
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36';
 const LIMIT = Number(process.env.LIMIT || 40);
 const DRY = process.env.DRY === '1';
+// 源站已删的老帖（302 跳到宣传图）：id 记进这个文件，排空与后台补详情跳过它们。
+// 用文件而不是加列 —— tool_web_post.published_ts 是 str_to_date 生成列，表里有 published_at 脏值
+// （'5-25'），ALTER TABLE 会整表重建、当场 ERROR 1411（详见 HANDOFF §6.7）。
+const DEAD_FILE = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '../../../data/detail-dead.json');
+const DEAD_IDS = (() => { try { return new Set(JSON.parse(fs.readFileSync(DEAD_FILE, 'utf8'))); } catch (e) { return new Set(); } })();
+function markDead(id) {
+  if (DRY || DEAD_IDS.has(id)) return;
+  DEAD_IDS.add(id);
+  try { fs.writeFileSync(DEAD_FILE, JSON.stringify([...DEAD_IDS])); } catch (e) { /* 写不进去不影响本轮 */ }
+}
 
 /** 从 JPEG 缓冲区读宽高（只扫 SOF 段，不引第三方库） */
 function jpegDims(buf) {
@@ -109,22 +119,129 @@ const posts = rows('select id, source_id, url, video_url from tool_web_post' + W
   .map(([id, sid, url, video]) => ({ id, sid, url, video: video || '' }));
 console.log('rows', posts.length, DRY ? '(dry)' : '');
 
-const b = await chromium.launch({ executablePath: C, headless: process.env.HEADLESS === '1', args: ['--mute-audio','--window-position=-32000,-32000','--window-size=1200,900','--disable-blink-features=AutomationControlled'] });
-const ctx = await b.newContext({ userAgent: UA, viewport: { width: 1280, height: 900 } });
-const p = await ctx.newPage();
+// ── 页面卡死的兜底（2026-11-23） ──────────────────────────────────
+// Playwright 的 evaluate 没有内置超时；源站个别帖子的脚本会进死循环，一条帖就能把整批拖死，
+// 而且卡住的渲染器会一直满速空转（2026-11-23 那次 4 个 E 核被打满就是这一类，见 HANDOFF §15.2）。
+// 做法：给页面调用套一层超时；超时后整只浏览器回收重开（close 内部会走 taskkill /T /F）。
+// 整批卡死的第二道兜底：页面里的死循环能被上面的 evaluate 超时兜住，但「页面不报错、也没任何回应」
+// （浏览器进程挂着、源站不回包、mysql CLI 不返回）照样能让这一批永不结束，sidecar 就一直卡在
+// refreshing true 里等（2026-11-23 11:31 实测：整批 10 分钟零输出、零请求、CPU 也不涨）。
+// 心跳超时自己退出，让 sidecar 记一次 fail 并按退避重试 —— 卡死变可重试，而不是永久停摆。
+const STALL_MS = Number(process.env.STALL_MS || 180000);
+let lastBeat = Date.now();
+function beat() { lastBeat = Date.now(); }
+const stallTimer = setInterval(() => {
+  if (Date.now() - lastBeat < STALL_MS) return;
+  console.log('  stall 超过 ' + Math.round(STALL_MS / 1000) + ' 秒没有任何进度，退出让 sidecar 重试');
+  process.exit(2);
+}, 5000);
+stallTimer.unref();
+const EVAL_TIMEOUT = Number(process.env.EVAL_TIMEOUT || 25000);
+let pageHung = false;
+let curPage = null;
+const timed = (fn, ms, tag) => (...args) => {
+  let timer;
+  const guard = new Promise((_, rej) => {
+    timer = setTimeout(() => { pageHung = true; rej(new Error('页面无响应：' + tag + ' 超过 ' + ms + 'ms')); }, ms);
+  });
+  const call = Promise.resolve().then(() => fn(...args));
+  call.catch(() => {});
+  return Promise.race([call, guard]).finally(() => { clearTimeout(timer); beat(); });
+};
+const p = new Proxy({}, {
+  get(_, key) {
+    if (!curPage) throw new Error('页面尚未创建');
+    const v = curPage[key];
+    if (typeof v !== 'function') return v;
+    const bound = v.bind(curPage);
+    if (key === 'evaluate') return timed(bound, EVAL_TIMEOUT, 'evaluate');
+    if (key === 'goto') return timed(bound, Number(process.env.GOTO_TIMEOUT || 45000) + 5000, 'goto');
+    return bound;
+  },
+});
+let b = null;
+async function openBrowser() {
+  if (b) {
+    // 卡死的渲染器可能连 close 都不理，最多等 8 秒就走下一步（Playwright 自己会降级到 taskkill /T /F）
+    await Promise.race([b.close().catch(() => {}), new Promise((r) => setTimeout(r, 8000))]);
+  }
+  b = await chromium.launch({ executablePath: C, headless: process.env.HEADLESS === '1', args: ['--mute-audio','--window-position=-32000,-32000','--window-size=1200,900','--disable-blink-features=AutomationControlled'] });
+  const ctx = await b.newContext({ userAgent: UA, viewport: { width: 1280, height: 900 } });
+  // 只补正文时把图片/媒体/字体直接掐断：源站详情页是被重定向到的新域名在扛，落地页的图片资源
+  // 常常让 domcontentloaded 干等 25 秒（实测 curl 拿首跳 1 秒、Chromium 等整页 24.8 秒）。
+  // 正文/标签在 DOM 里，掐掉这些不影响解析，反而把每条从 ~25 秒压回几秒（2026-11-23 实测）。
+  if (SKIP_IMAGES) {
+    await ctx.route('**/*', (route) => {
+      const t = route.request().resourceType();
+      if (t === 'image' || t === 'media' || t === 'font') return route.abort();
+      return route.continue();
+    });
+  }
+  curPage = await ctx.newPage();
+}
+await openBrowser();
 
-let okCount = 0, imgTotal = 0, noImg = [];
+// 源站删帖的第二种形态：页面不是 200 而是 30x 跳到宣传图，Chromium 会报
+// ERR_NAME_NOT_RESOLVED / ERR_INVALID_RESPONSE 之类（重定向目标的域名常常已经不解析），
+// 拿不到 content-type 就没法判断。这里用一次手动跟跳的 HTTP 探测补判：
+// 跳到图片、或落地不是 html → 死链；探测本身失败（真网络抖动）→ 不下结论，仍算失败重试。
+const IMG_LOC = /\.(jpe?g|png|gif|webp|bmp|avif)(\?|#|$)/i;
+async function probeDead(url) {
+  let cur = url;
+  for (let hop = 0; hop < 4; hop++) {
+    let r;
+    try {
+      r = await fetch(cur, { redirect: 'manual', headers: { 'user-agent': UA }, signal: AbortSignal.timeout(15000) });
+    } catch (e) { return ''; }
+    const loc = r.headers.get('location') || '';
+    if (r.status >= 300 && r.status < 400 && loc) {
+      if (IMG_LOC.test(loc)) return '跳到图片';
+      try { cur = new URL(loc, cur).toString(); } catch (e) { return ''; }
+      continue;
+    }
+    const ct = String(r.headers.get('content-type') || '').toLowerCase();
+    if (r.ok && ct && !ct.includes('html')) return '落地是 ' + ct;
+    return '';
+  }
+  return '';
+}
+
+let okCount = 0, imgTotal = 0, noImg = [], goneCount = 0;
 for (const row of posts) {
+  beat();
   try {
     let nav = false;
     let raw = '';
+    let gone = false;
+    let why = '';
     for (let attempt = 1; attempt <= 3 && !nav; attempt++) {
       try {
         // GOTO_TIMEOUT：后台排空用更短的超时 —— 源站偶发 DNS/证书失败，45 秒白等一条会拖垮整批
         const resp = await p.goto(row.url, { waitUntil: 'domcontentloaded', timeout: Number(process.env.GOTO_TIMEOUT || 45000) });
         nav = true;
-        try { raw = (await resp.text()) || ''; } catch (e) { raw = ''; }
-      } catch (e) { if (attempt === 3) throw e; await p.waitForTimeout(1200); }
+        // 源站删掉的老帖不是 404，而是 302 跳到一张宣传图（Content-Type: image/jpeg）——
+        // 这种行重试再多次也拿不到正文，记一次 detail_checked_at 让排空跳过它；
+        // 不记的话 9.8k 条死链会把队列永远占住，每条还要白等 goto 超时（实测整批卡 10 分钟零输出）。
+        const ct = String((resp && resp.headers && resp.headers()['content-type']) || '').toLowerCase();
+        if (ct && !ct.includes('html')) { gone = true; why = '落地是 ' + ct; }
+        try { raw = gone ? '' : ((await resp.text()) || ''); } catch (e) { raw = ''; }
+      } catch (e) {
+        // 死链的导航失败形态两种：立刻报 ERR_NAME_NOT_RESOLVED，或一直等到 GOTO_TIMEOUT（25s）。
+        // 后者重试 3 次就要白等 75 秒/条，一批 40 条能耗掉十几分钟 → 第一次失败就先探一次：
+        // 探测确认是死链就当场收工，只有"探测也说不清"才走重试。
+        why = await probeDead(row.url);
+        if (why) { gone = true; break; }
+        if (attempt < 3) { await p.waitForTimeout(1200); continue; }
+        throw e;
+      }
+    }
+    if (gone) {
+      goneCount += 1;
+      markDead(row.id);
+      console.log('  gone', row.sid, '| 源站已删' + (why ? '（' + why + '）' : '（跳到图片）'));
+      beat();
+      await sleep(120);
+      continue;
     }
     // 原来这里固定等 800ms + 滚动 4×250ms + 500ms ≈ 2.3 秒。实测帖图是内联 data URI，
     // DOMContentLoaded 后 0.5~0.9 秒由页面脚本注入；但个别帖（228293）不滚就一张都不注入，
@@ -340,8 +457,14 @@ for (const row of posts) {
     if (!local.length) noImg.push(row.sid + (row.video ? '(vid)' : ''));
     console.log('  ok', row.sid, '| imgs', local.length, '| text', texts.length, '| cat', meta.category || '-', '| vid', videoUrls.length);
   } catch (e) { console.log('  fail', row.sid, String(e.message).slice(0, 100)); }
+  if (pageHung) {
+    pageHung = false;
+    console.log('  recycle 页面卡死，回收浏览器 | post', row.sid);
+    await openBrowser();
+  }
+  beat();
   await sleep(120);
 }
 await b.close();
-console.log('done', okCount, '/', posts.length, '| images', imgTotal);
+console.log('done', okCount, '/', posts.length, '| images', imgTotal, '| 源站已删', goneCount);
 if (noImg.length) console.log('no-image posts:', noImg.join(', '));

@@ -319,7 +319,8 @@ async function bgTick() {
     // tags is null：详情抓过但标签没抽过的老数据也要补一遍（标签是筛选/黑名单的依据）
     "select id from tool_web_post where published_full is null or content_text is null or content_text='' or tags is null "
     + 'order by cast(source_id as unsigned) desc limit ' + (BG_BATCH + bgTried.size));
-  const pick = ids.filter((id) => !bgTried.has(id)).slice(0, BG_BATCH);
+  const dead = readDead();
+  const pick = ids.filter((id) => !bgTried.has(id) && !dead.has(id)).slice(0, BG_BATCH);
   if (!pick.length) return;
   for (const id of pick) bgTried.add(id);
   enqueueDetail(pick, 'bg');
@@ -357,6 +358,13 @@ const DRAIN_GAP_MS = Number(process.env.DETAIL_DRAIN_GAP_MS || 10000);
 const DRAIN_BLOCK_STOP_MS = 2 * 60 * 60 * 1000;
 // refresh-latest.mjs 在源站面（归档/分类/详情/精选）跑完后写这个文件，排空据此判断能否开工
 const SOURCE_DONE_MARK = new URL('../../../data/refresh-source-done', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+// 源站已删的老帖（302 跳到宣传图）：refetch-images 会把 id 记进这个文件，排空与后台补详情跳过它们。
+// 用文件而不是加列，原因见 HANDOFF §6.7：tool_web_post.published_ts 是 str_to_date 生成列，
+// 表里有 published_at 脏值（'5-25'），ALTER TABLE 会整表重建、当场 ERROR 1411。
+const DEAD_FILE = new URL('../../../data/detail-dead.json', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+const readDead = () => {
+  try { return new Set(JSON.parse(fs.readFileSync(DEAD_FILE, 'utf8'))); } catch (e) { return new Set(); }
+};
 let drainCursor = 0;      // 已排到哪个 id（重启归零，那一轮会重看一遍抓不动的行）
 let drainUntil = 0;
 let drainStrikes = 0;
@@ -378,7 +386,8 @@ async function drainOnce() {
     try { doneAt = Number(fs.readFileSync(SOURCE_DONE_MARK, 'utf8').trim()) || 0; } catch (e) { doneAt = 0; }
     if (Date.now() - doneAt > 15 * 60 * 1000) return;   // 标记是上一轮留下的 → 源站面还在跑
   }
-  let ids = await pickDrainIds(drainCursor);
+  const dead = readDead();
+  let ids = (await pickDrainIds(drainCursor)).filter((id) => !dead.has(id));
   let wrapped = false;
   if (!ids.length) {
     if (drainCursor === 0) {
@@ -389,7 +398,7 @@ async function drainOnce() {
     // 一轮走完：回到开头，这一轮只为把新出现的空洞补上
     drainCursor = 0;
     wrapped = true;
-    ids = await pickDrainIds(0);
+    ids = (await pickDrainIds(0)).filter((id) => !dead.has(id));
     if (!ids.length) {
       console.log(new Date().toISOString(), 'drain idle（正文已补全）');
       drainUntil = Date.now() + 10 * 60 * 1000;
