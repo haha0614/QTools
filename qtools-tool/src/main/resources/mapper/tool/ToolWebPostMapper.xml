@@ -125,7 +125,8 @@
                content, content_text as contentText, image_count as imageCount, video_count as videoCount,
                video_url as videoUrl, video_urls as videoUrls, video_ratios as videoRatios,
                video_file as videoFile, download_state as downloadState, download_percent as downloadPercent,
-               download_error as downloadError
+               download_error as downloadError,
+               archive_state as archiveState, archive_percent as archivePercent, archived_at as archivedAt
         from tool_web_post
         where id = #{id}
         limit 1

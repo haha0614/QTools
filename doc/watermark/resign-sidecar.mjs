@@ -2,6 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chromium } from 'playwright-core';
 import { sqlAsync } from '../lib/db.mjs';
 
@@ -257,6 +258,8 @@ async function pumpDetail() {
   working = true;
   try {
     while (detailQueue.length) {
+      // 归档独占浏览器期间让路：归档一条要跑完整帖（详情+全段视频），插进来只会互相拖慢
+      while (archiveBusy) await sleep(1000);
       const gap = DETAIL_MIN_GAP_MS - (Date.now() - lastWorkAt);
       if (gap > 0) await new Promise((r) => setTimeout(r, gap));
       // 优先级：open(用户点开) > view(当前页预取) > bg(后台补齐)
@@ -386,7 +389,7 @@ async function drainOnce() {
   // 有一方在等源站就让路：用户重签 > 前台点开/翻页 > 定时 refresh 的「源站面」阶段。
   // refresh 的源站面 = 归档 / 分类 / 详情 / 精选（refresh-latest 在 featured 之后写标记文件），
   // 之后只剩 clean-noise / trim 这类纯库内维护，那段（实测 3~5 分钟）可以让排空同时跑。
-  if (working || detailQueue.length || pendingResigns > 0) return;
+  if (working || archiveBusy || detailQueue.length || pendingResigns > 0) return;
   if (refreshing) {
     let doneAt = 0;
     try { doneAt = Number(fs.readFileSync(SOURCE_DONE_MARK, 'utf8').trim()) || 0; } catch (e) { doneAt = 0; }
@@ -546,6 +549,7 @@ async function pumpDownload() {
   dlWorking = true;
   try {
     while (dlQueue.length) {
+      while (archiveBusy) await sleep(1000);
       const key = dlQueue.shift();
       const [idStr, idxStr] = String(key).split(':');
       await downloadOne(Number(idStr), Number(idxStr) || 0);
@@ -653,6 +657,312 @@ async function downloadOne(id, index) {
   }
 }
 
+// ---- 整帖归档（/archive）----
+// 一条帖子的「归档」= 详情（正文/图集/封面/播放地址）+ 源页指纹 + 全部视频段落地。
+// 全流程串行：同一时刻只跑一个归档，且不和 pumpDetail / pumpDownload 抢浏览器
+// （源站有 Cloudflare，多路并发只会互相拖慢）。archiveBusy 期间那两个泵让路。
+// 这 8 列是归档专用的（archive_state/percent/error/archived_at + source_etag/len/hash/checked_at），
+// 与「单段下载」语义的 download_* 列互不混用。
+const ARCHIVE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36';
+const ARCHIVE_FETCH_MS = Number(process.env.ARCHIVE_FETCH_MS || 20000);
+const ARCHIVE_DETAIL_MS = Number(process.env.ARCHIVE_DETAIL_MS || 10 * 60 * 1000);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let archiveQueue = [];
+let archiveWorking = false;
+let archiveBusy = false;
+let archiveRunningId = 0;
+let archiveDoneCount = 0;
+let archiveFailedCount = 0;
+
+/** SQL 字面量：截断到 200 字符（archive_error 是 varchar(255)），转义反斜杠与单引号 */
+const sqlLit = (s) => String(s == null ? '' : s).slice(0, 200).replace(/\\/g, '\\\\').replace(/'/g, "''");
+
+const sqlSet = async (id, cols) => {
+  try {
+    await sqlOne('update tool_web_post set ' + cols + ' where id=' + Number(id) + ';');
+  } catch (e) {
+    console.log(new Date().toISOString(), 'archive', id, 'db fail', String((e && e.message) || e).slice(0, 120));
+  }
+};
+
+/**
+ * 正文容器判据（/archive 与 /check 共用，不开浏览器）：
+ * 选择器 + 打分与 refetch-images.mjs:332-335 完全一致 —— 候选是 class 里恰好含
+ * post-content / post / article / entry-content 之一的元素，取「<p> 数 + 2×<img> 数」最大者。
+ * 区别只是那边在浏览器 DOM 上做，这里在原始 HTML 上按标签配对做。
+ */
+const BODY_CLASSES = ['post-content', 'post', 'article', 'entry-content'];
+
+function classList(attrs) {
+  const m = /class\s*=\s*"([^"]*)"/i.exec(attrs) || /class\s*=\s*'([^']*)'/i.exec(attrs);
+  return m ? m[1].split(/\s+/).filter(Boolean) : [];
+}
+
+/** 找正文容器：返回 { tag, inner, score }，找不到返回 null */
+function findBodyBox(html) {
+  const re = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)([^>]*)>/g;
+  let best = null;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    if (m[1]) continue;                       // 闭合标签跳过
+    const tag = m[2].toLowerCase();
+    if (!classList(m[3]).some((c) => BODY_CLASSES.includes(c))) continue;
+    const innerStart = re.lastIndex;
+    const open = new RegExp('<' + tag + '\\b', 'gi');
+    const close = new RegExp('</' + tag + '\\s*>', 'gi');
+    let depth = 1;
+    let end = -1;
+    let at = innerStart;
+    while (depth > 0) {
+      open.lastIndex = at;
+      close.lastIndex = at;
+      const o = open.exec(html);
+      const c = close.exec(html);
+      if (!c) break;                          // 标签没闭合：这个候选不可用
+      if (o && o.index < c.index) { depth += 1; at = open.lastIndex; }
+      else { depth -= 1; at = close.lastIndex; if (depth === 0) end = c.index; }
+    }
+    if (end < 0) continue;
+    const inner = html.slice(innerStart, end);
+    const score = (inner.match(/<p[\s>]/gi) || []).length + 2 * (inner.match(/<img[\s>]/gi) || []).length;
+    if (!best || score > best.score) best = { tag, inner, score };
+  }
+  return best;
+}
+
+const decodeEntities = (s) => String(s)
+  .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<')
+  .replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'");
+
+// 去噪口径同 refetch-images.mjs:336-340（正则 + 关键词收尾标记）
+const BODY_NOISE = /在线约炮|同城约炮|广告|最新地址|自动回复|推荐浏览器|邮箱自动|热门大赛|重磅热瓜|温馨提示|重要提示|点击可下载|官方网址|分享每日大赛|复制最新网址|谨防假冒|永久有效|点我查看详情帖|大赛家族期待|欢迎加入每日大赛|官方Github|gitlab\.com/;
+const BODY_PROMO = /^https?:\/\/|^www\.|gitlab\.com|aff\d+\.|\.org\/\?code=/;
+const BODY_TAIL = /(关键词|关键字)\s*[:：]/;
+
+/** 容器内按段落取正文（同 refetch-images.mjs:347-358：p/h2/h3/blockquote，去噪，遇「关键词：」收尾） */
+function bodyTextOf(inner) {
+  const out = [];
+  const seen = new Set();
+  const re = /<(p|h2|h3|blockquote)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi;
+  let m;
+  while ((m = re.exec(inner)) !== null) {
+    const t = decodeEntities(m[2].replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+    if (!t || t.length < 10 || BODY_NOISE.test(t) || BODY_PROMO.test(t) || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+    if (BODY_TAIL.test(t)) break;             // 「关键词：#…」之后全是推荐位
+  }
+  return out.join('\n');
+}
+
+/** 兜底：容器抽不出来时，取页面里最长的那一段文本（按块级标签切段后取最长行） */
+function longestTextRun(html) {
+  const flat = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<\/(p|div|li|h\d|article|section|td|tr)\s*>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+  let best = '';
+  for (const line of decodeEntities(flat).split('\n')) {
+    const t = line.replace(/\s+/g, ' ').trim();
+    if (t.length > best.length) best = t;
+  }
+  return best;
+}
+
+/**
+ * 抓一次源页并算指纹：返回 { len, etag, hash, text }。
+ * 用 fetch 而不是浏览器（/check 明确不许启浏览器），AF 一律用与爬虫一致的 UA，超时 <= 20s。
+ * len = HTML 字节数；etag = ETag，没有就 Last-Modified，都没有则空串（落库时写 NULL）；
+ * hash = 正文容器文本的 sha256 hex（小写 64 位）。
+ */
+async function fetchSourceFingerprint(url) {
+  const resp = await fetch(url, {
+    redirect: 'follow',
+    headers: { 'user-agent': ARCHIVE_UA, 'accept-language': 'zh-CN,zh;q=0.9' },
+    signal: AbortSignal.timeout(ARCHIVE_FETCH_MS),
+  });
+  if (!resp.ok) throw new Error('HTTP ' + resp.status);
+  const buf = Buffer.from(await resp.arrayBuffer());
+  const html = buf.toString('utf8');
+  if (/Just a moment|challenge-platform|cf-challenge|__cf_chl/i.test(html)) throw new Error('源站返回 Cloudflare 挑战页');
+  const box = findBodyBox(html);
+  let text = box ? bodyTextOf(box.inner) : '';
+  if (!text) text = longestTextRun(html);
+  if (text.length < 20) throw new Error('页面没有正文（可能被拦或已删）');
+  const etag = resp.headers.get('etag') || resp.headers.get('last-modified') || '';
+  return { len: buf.length, etag, hash: createHash('sha256').update(text, 'utf8').digest('hex'), text };
+}
+
+function enqueueArchive(id) {
+  const n = Number(id);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  if (archiveRunningId === n || archiveQueue.includes(n)) return false;
+  archiveQueue.push(n);
+  // 和 enqueueDetail 同理：先让 /archive 的响应发出去，再跑（详情/下载会阻塞事件循环十几秒）
+  setImmediate(() => {
+    pumpArchive().catch((e) => console.log(new Date().toISOString(), 'archive pump error', String((e && e.stack) || e).slice(0, 300)));
+  });
+  return true;
+}
+
+async function pumpArchive() {
+  if (archiveWorking) return;
+  archiveWorking = true;
+  try {
+    while (archiveQueue.length) {
+      const id = archiveQueue.shift();
+      // 等现有抓取/下载让出浏览器（它们看到 archiveBusy 后不会再开始新任务）
+      while (working || dlWorking) await sleep(1000);
+      archiveBusy = true;
+      archiveRunningId = id;
+      try {
+        await archiveOne(id);
+      } catch (e) {
+        archiveFailedCount += 1;
+        console.log(new Date().toISOString(), 'archive', id, 'crash', String((e && e.stack) || e).slice(0, 200));
+        await sqlSet(id, "archive_state='failed', archive_error='" + sqlLit('归档异常：' + String((e && e.message) || e)) + "'");
+      } finally {
+        archiveBusy = false;
+        archiveRunningId = 0;
+      }
+    }
+  } finally {
+    archiveWorking = false;
+  }
+}
+
+/** 归档一条帖子。任何异常都在这里兜住，绝不冒到进程顶层。 */
+async function archiveOne(id) {
+  const t0 = Date.now();
+  const secs = () => ((Date.now() - t0) / 1000).toFixed(0) + 's';
+  const say = (...parts) => console.log(new Date().toISOString(), 'archive', id, ...parts);
+  await sqlSet(id, "archive_state='running', archive_percent=0, archive_error=null");
+  say('start');
+
+  // 1) 详情：与 pumpDetail 同一调法（execFile + ROWID），但 SKIP_IMAGES=0 —— 归档必须连图集一起收
+  let detailOk = false;
+  let detailLine = '';
+  try {
+    const out = await new Promise((resolve, reject) => {
+      execFile(process.execPath, [new URL('./refetch-images.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')], {
+        cwd: new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
+        windowsHide: true,
+        env: { ...process.env, ROWID: String(id), HEADLESS: '1', SKIP_IMAGES: '0' },
+        encoding: 'utf8',
+        maxBuffer: 1 << 26,
+        timeout: ARCHIVE_DETAIL_MS,
+      }, (err, stdout) => (err ? reject(err) : resolve(stdout || '')));
+    });
+    const m = /done (\d+) \/ (\d+)/.exec(out);
+    detailOk = !!(m && Number(m[1]) > 0);
+    detailLine = out.trim().split('\n').filter(Boolean).slice(-1)[0] || '';
+  } catch (e) {
+    detailLine = String((e && e.message) || e).slice(0, 120);
+  }
+  say('detail', detailOk ? 'ok' : 'fail', detailLine.slice(0, 120));
+  if (!detailOk) {
+    archiveFailedCount += 1;
+    await sqlSet(id, "archive_state='failed', archive_error='" + sqlLit('详情抓取失败：' + detailLine) + "'");
+    say('failed（详情）', secs());
+    return;
+  }
+
+  // 2) 指纹：按 url 取一次 HTML（fetch，不开浏览器）
+  const row = await sqlOne("select ifnull(url,''), ifnull(video_count,0), ifnull(source_id,'') from tool_web_post where id=" + id + ';');
+  const [url, countStr, sid] = String(row).split('\t');
+  if (url) {
+    try {
+      const fp = await fetchSourceFingerprint(url);
+      await sqlSet(id, 'source_len=' + fp.len
+        + ', source_etag=' + (fp.etag ? "'" + sqlLit(fp.etag) + "'" : 'NULL')
+        + ", source_hash='" + fp.hash + "'");
+      say('fingerprint', fp.len + 'B', fp.hash.slice(0, 12) + '…', fp.etag ? 'etag' : 'no-etag');
+    } catch (e) {
+      // 指纹失败不判死：详情与视频仍然可以归档，下次 /check 会再验
+      say('fingerprint fail', String((e && e.message) || e).slice(0, 120));
+    }
+  }
+
+  // 3) 视频：按 index 顺序逐段调已有的 downloadOne（它自己重签、落盘、更新 video_count）
+  const count = Number(countStr) || 0;
+  if (count <= 0) {
+    archiveDoneCount += 1;
+    await sqlSet(id, "archive_state='done', archive_percent=100, archive_error=null, archived_at=now(), source_checked_at=now()");
+    say('done（无视频段）', secs());
+    return;
+  }
+  if (!sid) {
+    archiveFailedCount += 1;
+    await sqlSet(id, "archive_state='failed', archive_error='缺少 source_id，无法定位视频目录'");
+    say('failed（无 source_id）', secs());
+    return;
+  }
+  let ok = 0;
+  let firstFail = '';
+  for (let i = 0; i < count; i += 1) {
+    const segStart = Date.now();
+    try {
+      await downloadOne(id, i);
+    } catch (e) {
+      say('segment', (i + 1) + '/' + count, 'throw', String((e && e.message) || e).slice(0, 100));
+    }
+    // 成败以「文件这次真的被重写且够大」为准（downloadOne 内部自己 catch，返回值不可靠）
+    const file = i > 0 ? path.join(WEBROOT, sid, 'v' + (i + 1) + '.mp4') : path.join(WEBROOT, sid, 'video.mp4');
+    let good = false;
+    try {
+      const st = fs.statSync(file);
+      good = st.size >= 1024 * 1024 && st.mtimeMs >= segStart - 1000;
+    } catch (e) { good = false; }
+    if (good) ok += 1;
+    else if (!firstFail) {
+      const err = String(await sqlOne("select ifnull(download_error,'') from tool_web_post where id=" + id + ';')).trim();
+      firstFail = '第' + (i + 1) + '段失败' + (err ? '：' + err : '');
+    }
+    const pct = Math.round((ok / count) * 100);
+    await sqlSet(id, 'archive_percent=' + pct);
+    say('segment', (i + 1) + '/' + count, good ? 'ok' : 'fail', pct + '%');
+  }
+
+  // 4) 收尾
+  if (ok === count) {
+    archiveDoneCount += 1;
+    await sqlSet(id, "archive_state='done', archive_percent=100, archive_error=null, archived_at=now(), source_checked_at=now()");
+    say('done', ok + '/' + count, secs());
+  } else if (ok > 0) {
+    archiveFailedCount += 1;
+    await sqlSet(id, "archive_state='partial', archive_error='" + sqlLit(firstFail) + "'");
+    say('partial', ok + '/' + count, secs());
+  } else {
+    archiveFailedCount += 1;
+    await sqlSet(id, "archive_state='failed', archive_error='" + sqlLit('全段失败：' + firstFail) + "'");
+    say('failed（全段失败）', secs());
+  }
+}
+
+/**
+ * /check：取一次 HTML 算同样的指纹并与库里比。
+ * 变了（库里 hash 非空且不同）→ archive_state='pending'，后端泵会重新归档。
+ * 抓不到 / 被 CF 拦 → 直接返回 ok:false，不写 source_checked_at、不改 archive_state。
+ */
+async function checkSource(id) {
+  const row = await sqlOne("select ifnull(url,''), ifnull(source_hash,'') from tool_web_post where id=" + Number(id) + ';');
+  if (!String(row).length) return { ok: false, error: 'no such id' };
+  const [url, prevHash] = String(row).split('\t');
+  if (!url) return { ok: false, error: 'no url' };
+  let fp;
+  try {
+    fp = await fetchSourceFingerprint(url);
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e).slice(0, 200) };
+  }
+  const changed = !!prevHash && prevHash !== fp.hash;
+  await sqlSet(id, 'source_checked_at=now()' + (changed ? ", archive_state='pending'" : ''));
+  console.log(new Date().toISOString(), 'archive check', id, changed ? 'changed' : 'same', fp.len + 'B', fp.hash.slice(0, 12) + '…');
+  return { ok: true, changed, hash: fp.hash, len: fp.len, checkedAt: new Date().toISOString() };
+}
+
 /**
  * 存量补比例：库里已有播放地址但还没 video_ratios 的帖子，直接对存的 m3u8 跑 ffprobe。
  * 地址多半已过期（403）→ 测不出就跳过，等它下次重签时自然补上。
@@ -678,6 +988,40 @@ async function ratioTick() {
 
 const server = http.createServer((req, res) => {
   const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+  // ---- 整帖归档 ----
+  const pathname = String(req.url || '').split('?')[0];
+  if (req.method === 'POST' && pathname === '/archive') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let payload = {};
+      try { payload = JSON.parse(body || '{}'); } catch (e) { return send(400, { error: 'bad json' }); }
+      const id = Number(payload.id);
+      if (!Number.isFinite(id) || id <= 0) return send(400, { error: 'missing id' });
+      enqueueArchive(id);
+      console.log(new Date().toISOString(), 'archive', id, 'queued | queue', archiveQueue.length, '| working', archiveWorking);
+      return send(200, { ok: true, queued: true });
+    });
+    return undefined;
+  }
+  if (req.method === 'GET' && pathname === '/archive/status') {
+    return send(200, { pending: archiveQueue.length, working: archiveWorking, done: archiveDoneCount, failed: archiveFailedCount });
+  }
+  if (req.method === 'POST' && pathname === '/check') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let payload = {};
+      try { payload = JSON.parse(body || '{}'); } catch (e) { return send(400, { error: 'bad json' }); }
+      const id = Number(payload.id);
+      if (!Number.isFinite(id) || id <= 0) return send(400, { error: 'missing id' });
+      // 同步语义（不开浏览器）：等算完再应答；fetch 自带 ARCHIVE_FETCH_MS 超时
+      checkSource(id)
+        .then((out) => send(out.ok ? 200 : 502, out))
+        .catch((e) => send(502, { ok: false, error: String((e && e.message) || e).slice(0, 200) }));
+    });
+    return undefined;
+  }
   if (req.method === 'POST' && req.url.startsWith('/download')) {
     let body = '';
     req.on('data', (c) => { body += c; });

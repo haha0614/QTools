@@ -44,6 +44,9 @@ public class WebPostVideoUrlSelfCheck
     /** 分批游标：本进程内累计，重启从头开始 */
     private long healCursor = 0L;
 
+    /** 第二个游标：补 video_url 的那条查询也按 id 区间扫（见 {@link #repairOnce()}） */
+    private long fillCursor = 0L;
+
     private final JdbcTemplate jdbc;
 
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
@@ -91,10 +94,21 @@ public class WebPostVideoUrlSelfCheck
         alignVideoUrl();
         try
         {
+            // 同 alignVideoUrl：按 id 区间扫。原本无 id 条件，6 万行全表扫 3~3.8 秒，
+            // 被 Druid 记成 slow sql / ERROR。命中本就稀少，游标一轮轮推过去即可。
+            long maxId = jdbc.queryForObject("select ifnull(max(id), 0) from tool_web_post", Long.class);
+            if (fillCursor >= maxId)
+            {
+                fillCursor = 0L;
+            }
+            long from = fillCursor;
+            long to = from + HEAL_BATCH;
+            fillCursor = to;
             List<Map<String, Object>> rows = jdbc.queryForList(
                     "select id, video_url, video_urls from tool_web_post "
-                            + "where (video_url is null or video_url not like 'http%') "
-                            + "and video_urls is not null and video_urls <> ''");
+                            + "where id > ? and id <= ? "
+                            + "and (video_url is null or video_url not like 'http%') "
+                            + "and video_urls is not null and video_urls <> ''", from, to);
             if (rows.isEmpty())
             {
                 return;

@@ -44,6 +44,10 @@ public class WebUserItemController
     @Autowired
     private ToolWebPostMapper toolWebPostMapper;
 
+    /** 收藏触发整帖归档 */
+    @Autowired
+    private com.qtools.tool.web.support.WebArchiveService webArchiveService;
+
     /** 用户端 token 校验（qtools-common 的接口，实现由 qtools-app 提供）；容器里没有时按匿名处理 */
     @Autowired(required = false)
     private com.qtools.common.security.IAppTokenVerifier appTokenVerifier;
@@ -118,6 +122,8 @@ public class WebUserItemController
         if (on > 0)
         {
             toolWebPostMapper.addUserItem(owner, postId, KIND_FAV);
+            // 收藏即整帖归档（视频全段＋图集＋封面＋正文），由后台泵串行执行
+            webArchiveService.enqueueArchive(postId);
         }
         else
         {
