@@ -373,7 +373,9 @@
     <select id="selectDownloads" resultType="java.util.LinkedHashMap">
         select d.id, d.post_id as postId, d.mode, d.state, d.percent, d.size_bytes as sizeBytes,
                d.params, d.error, d.created_at as createdAt, d.finished_at as finishedAt,
-               p.title, p.source_id as sourceId, p.video_file as videoFile, p.cover
+               p.title, p.source_id as sourceId, p.video_file as videoFile, p.cover,
+               (select count(*) from tool_web_download q where q.mode = 'auto'
+                  and q.state in ('queued','running') and q.id &lt; d.id) as queueAhead
         from tool_web_download d left join tool_web_post p on p.id = d.post_id
         order by d.id desc
         limit #{limit}

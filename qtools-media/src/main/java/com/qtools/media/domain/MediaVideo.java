@@ -143,6 +143,46 @@ public class MediaVideo
      */
     private String synopsis;
 
+    /**
+     * 作品归属（不落 media_video 表，索引构建时按 media_work_segment 填）：
+     * 一个帖子 = 一个作品，作品下面按 seq 挂 N 段视频。
+     */
+    private String workId;
+
+    private Integer segmentSeq;
+
+    private Integer workSegCount;
+
+    public String getWorkId()
+    {
+        return workId;
+    }
+
+    public void setWorkId(String workId)
+    {
+        this.workId = workId;
+    }
+
+    public Integer getSegmentSeq()
+    {
+        return segmentSeq;
+    }
+
+    public void setSegmentSeq(Integer segmentSeq)
+    {
+        this.segmentSeq = segmentSeq;
+    }
+
+    public Integer getWorkSegCount()
+    {
+        return workSegCount;
+    }
+
+    public void setWorkSegCount(Integer workSegCount)
+    {
+        this.workSegCount = workSegCount;
+    }
+
     public String getId()
     {
         return id;

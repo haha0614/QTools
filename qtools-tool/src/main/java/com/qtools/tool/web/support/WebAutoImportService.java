@@ -56,6 +56,9 @@ public class WebAutoImportService
     /** 等媒体站扫描入库的上限：扫描一次几分钟，10 分钟够；超时就先写 partial */
     private static final long LIBRARY_TIMEOUT_MS = 10L * 60_000L;
 
+    /** 扫描入库后等 awaitAndTag 回填封面/标签的上限（它的 3 秒等待 + 打标签，正常 10~30 秒） */
+    private static final long TAG_TIMEOUT_MS = 3L * 60_000L;
+
     /** 一段 mp4 小于 1MB 视为还没下完（sidecar 的 downloadOne 用同一个阈值） */
     private static final long SEGMENT_MIN_BYTES = 1024L * 1024L;
 
@@ -84,6 +87,15 @@ public class WebAutoImportService
             if (n > 0)
             {
                 log.info("收藏归档：{} 条中断的作业退回队列", Integer.valueOf(n));
+            }
+            // 其它模式（local / media）的进度只活在当时的线程里，进程一重启就是僵尸行：
+            // 界面上永远「排队中 0%」「入库中 60%」，点删还删不掉旧状态。开机一次性标掉。
+            int stale = jdbc.update("update tool_web_download set state='error', finished_at=now(),"
+                    + " error='流程已中断（旧版本或后端重启前遗留），这条不会再推进，需要重新发起'"
+                    + " where mode <> 'auto' and state in ('queued','preparing','importing','pending_import')");
+            if (stale > 0)
+            {
+                log.info("收藏归档：{} 条遗留记录标记为中断", Integer.valueOf(stale));
             }
         }
         catch (RuntimeException e)
@@ -381,15 +393,15 @@ public class WebAutoImportService
     private void waitLibrary(String title, int count, Long recordId) throws InterruptedException
     {
         String base = "每日大赛/" + safeName(title);
+        String match = "v.root_id=1 and (v.rel_path in (?,?) or v.rel_path like ?)";
+        Object[] args = { base + ".mp4", base + "-2.mp4", base + "-%" };
         long deadline = System.currentTimeMillis() + LIBRARY_TIMEOUT_MS;
         while (System.currentTimeMillis() < deadline)
         {
-            Integer hit = jdbc.queryForObject(
-                    "select count(*) from media_video where root_id=1 and (rel_path in (?,?) or rel_path like ?)",
-                    Integer.class, base + ".mp4", base + "-2.mp4", base + "-%");
+            Integer hit = jdbc.queryForObject("select count(*) from media_video v where " + match, Integer.class, args);
             if (hit != null && hit.intValue() >= count)
             {
-                return;
+                break;
             }
             if (recordId != null)
             {
@@ -397,7 +409,27 @@ public class WebAutoImportService
             }
             Thread.sleep(5000L);
         }
-        log.warn("等媒体站扫描超时 title={} 段={}", title, Integer.valueOf(count));
+        // 扫描只写 media_video 行；封面与人物标签是 importPost 的 awaitAndTag 线程在扫描结束后才回填的。
+        // done 必须等这一步：否则用户端已经显示「已保存到视频站」，管理端却还没封面/人物。
+        // 等待信号就是那条下载记录本身 —— awaitAndTag 回填完会把它写成 done/error（见
+        // WebMediaImportService.awaitAndTag 末尾），所以这里只看状态，不去猜标签 → 没人物的帖子（写真/ASMR）
+        // 也能正常收尾，不会因为「必须有 人物 标签」白等三分钟。
+        long tagDeadline = System.currentTimeMillis() + TAG_TIMEOUT_MS;
+        while (System.currentTimeMillis() < tagDeadline)
+        {
+            String state = recordId == null ? null
+                    : jdbc.queryForObject("select state from tool_web_download where id = ?", String.class, recordId);
+            if ("done".equals(state) || "error".equals(state))
+            {
+                return;
+            }
+            if (recordId != null)
+            {
+                markState(recordId.longValue(), "running", 95, null);
+            }
+            Thread.sleep(3000L);
+        }
+        log.warn("等封面/人物超时 title={} 段={}", title, Integer.valueOf(count));
     }
 
     /** 删掉镜像目录里已经进了媒体库的段 mp4；任何一段删失败都不影响导入结果 */

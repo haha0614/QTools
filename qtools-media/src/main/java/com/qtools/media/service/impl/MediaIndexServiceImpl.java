@@ -16,7 +16,9 @@ import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.qtools.common.utils.StringUtils;
 import com.qtools.media.config.MediaProperties;
@@ -77,6 +79,10 @@ public class MediaIndexServiceImpl implements IMediaIndexService
 
     @Autowired
     private MediaVideoMapper mediaVideoMapper;
+
+    /** 作品表只有站外保存才会写；老库没有这张表时下面的归并全部跳过，不影响索引 */
+    @Autowired
+    private JdbcTemplate jdbc;
 
     @Autowired
     private MediaAlbumMapper mediaAlbumMapper;
@@ -220,8 +226,151 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         {
             actors.add(actor.getName());
         }
-        return toVideoNode(video, tags, actors, videoPersons(id),
+        Map<String, Object> node = toVideoNode(video, tags, actors, videoPersons(id),
                 studioNodes(mediaStudioMapper.selectStudioNodesByVideoId(id)));
+        // 这一段属于某个作品时，把作品层（正文图文 + 逐段播放地址）一起带上：
+        // 站端视频库里一个作品看起来就是一条视频，点开才看到 N 段。
+        Map<String, Object> work = workPayload(id);
+        if (work != null)
+        {
+            node.put("work", work);
+        }
+        return node;
+    }
+
+    /** 给作品里的每一段挂上作品 id / 段序 / 段数（索引条目不删段） */
+    private void annotateWorkSegments(List<MediaVideo> videos)
+    {
+        if (videos == null || videos.isEmpty())
+        {
+            return;
+        }
+        Map<String, Object[]> segmentOf = new HashMap<>();
+        try
+        {
+            for (Map<String, Object> row : jdbc.queryForList(
+                    "select s.video_id, s.seq, w.id as work_id, w.seg_count"
+                            + " from media_work_segment s join media_work w on w.id = s.work_id"))
+            {
+                if (row.get("video_id") != null)
+                {
+                    segmentOf.put(String.valueOf(row.get("video_id")),
+                            new Object[] { row.get("seq"), String.valueOf(row.get("work_id")), row.get("seg_count") });
+                }
+            }
+        }
+        catch (RuntimeException e)
+        {
+            log.debug("作品归并跳过（media_work 不可用）：{}", e.toString());
+            return;
+        }
+        if (segmentOf.isEmpty())
+        {
+            return;
+        }
+        int tagged = 0;
+        for (MediaVideo video : videos)
+        {
+            Object[] seg = segmentOf.get(video.getId());
+            if (seg == null)
+            {
+                continue;
+            }
+            int seq = seg[0] == null ? 0 : ((Number) seg[0]).intValue();
+            video.setWorkId((String) seg[1]);
+            video.setSegmentSeq(Integer.valueOf(seq));
+            video.setWorkSegCount(seg[2] == null ? null : Integer.valueOf(((Number) seg[2]).intValue()));
+            tagged += 1;
+        }
+        log.debug("作品标注：{} / {} 个媒体行属于作品", Integer.valueOf(tagged), Integer.valueOf(videos.size()));
+    }
+
+    /**
+     * 作品层：{@code {id,postId,title,segCount,state,blocks[],segments[]}}
+     *
+     * <p>段地址是 {@code /api/media/file?p=<rel_path>&r=<root_id>}（MediaFileController 的原生 Range，
+     * 200/206/416），不是 {@code /api/media/stream} —— 后者是按需转码，播整段不该走它。</p>
+     */
+    private Map<String, Object> workPayload(String videoId)
+    {
+        List<Map<String, Object>> rows;
+        try
+        {
+            rows = jdbc.queryForList(
+                    "select w.id, w.post_id, w.title, w.synopsis_blocks, w.seg_count, w.state"
+                            + " from media_work_segment s join media_work w on w.id = s.work_id"
+                            + " where s.video_id = ? limit 1",
+                    videoId);
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+        if (rows.isEmpty())
+        {
+            return null;
+        }
+        Map<String, Object> w = rows.get(0);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", w.get("id"));
+        out.put("postId", w.get("post_id"));
+        out.put("title", w.get("title"));
+        out.put("segCount", w.get("seg_count"));
+        out.put("state", w.get("state"));
+        out.put("blocks", parseBlocks(w.get("synopsis_blocks")));
+        List<Map<String, Object>> segments = new ArrayList<>();
+        for (Map<String, Object> row : jdbc.queryForList(
+                "select s.seq, s.video_id, v.rel_path, ifnull(v.root_id, 1) as root_id,"
+                        + " ifnull(v.dur, 0) as dur, v.w, v.h, v.poster_path"
+                        + " from media_work_segment s join media_video v on v.id = s.video_id"
+                        + " where s.work_id = ? order by s.seq",
+                w.get("id")))
+        {
+            Map<String, Object> seg = new LinkedHashMap<>();
+            seg.put("seq", row.get("seq"));
+            seg.put("videoId", row.get("video_id"));
+            seg.put("relPath", row.get("rel_path"));
+            seg.put("dur", row.get("dur"));
+            seg.put("w", row.get("w"));
+            seg.put("h", row.get("h"));
+            seg.put("poster", row.get("poster_path"));
+            seg.put("streamUrl", "/api/media/file?p="
+                    + java.net.URLEncoder.encode(String.valueOf(row.get("rel_path")), java.nio.charset.StandardCharsets.UTF_8)
+                    + "&r=" + row.get("root_id"));
+            segments.add(seg);
+        }
+        out.put("segments", segments);
+        return out;
+    }
+
+    /** 正文 blocks：库里是 JSON 数组；解析不了就降级成一段纯文本，别让详情整页 500 */
+    private List<Map<String, Object>> parseBlocks(Object raw)
+    {
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (raw == null)
+        {
+            return out;
+        }
+        String text = String.valueOf(raw).trim();
+        if (text.isEmpty())
+        {
+            return out;
+        }
+        try
+        {
+            List<Map<String, Object>> list = objectMapper.readValue(text, new TypeReference<List<Map<String, Object>>>()
+            {
+            });
+            return list == null ? out : list;
+        }
+        catch (Exception e)
+        {
+            Map<String, Object> one = new LinkedHashMap<>();
+            one.put("type", "text");
+            one.put("text", text);
+            out.add(one);
+            return out;
+        }
     }
 
     /**
@@ -439,6 +588,10 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         {
             log.debug("索引筛除：视频 {}/{} 可见（审核 / 根 / 分级）", videos.size(), videoRows.size());
         }
+        // 作品标注：给属于作品的媒体行挂上 workId / segSeq / segCount（media_video 一列不改）。
+        // 第 2 段起的行仍在索引里 —— 站端「一张卡 = 一个作品」由前端按 segSeq 过滤，
+        // 这样段播放可以直接复用视频库现成的播放页（按 videoId 打开），不必另造一条链路。
+        annotateWorkSegments(videos);
         Map<String, List<String[]>> tagsByVideo = new HashMap<>();
         Set<String> facets = new LinkedHashSet<>();
         for (MediaVideoTag tag : mediaVideoMapper.selectTagList())
@@ -967,6 +1120,13 @@ public class MediaIndexServiceImpl implements IMediaIndexService
         node.put("title", video.getTitle());
         node.put("folder", video.getFolder());
         node.put("rel", video.getRelPath());
+        // 作品（帖）聚合：只有站外保存进来的视频才有，老库一个键都不多
+        if (video.getWorkId() != null)
+        {
+            node.put("workId", video.getWorkId());
+            node.put("segSeq", video.getSegmentSeq());
+            node.put("segCount", video.getWorkSegCount());
+        }
         node.put("size", video.getSize());
         node.put("dur", video.getDur());
         node.put("w", video.getW());
