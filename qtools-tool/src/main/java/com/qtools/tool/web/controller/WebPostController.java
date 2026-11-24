@@ -45,7 +45,7 @@ public class WebPostController
 
     /** 整帖归档的后台泵（收藏入队、本地分段列表、源站变更检查） */
     @Autowired
-    private com.qtools.tool.web.support.WebArchiveService webArchiveService;
+    private com.qtools.tool.web.support.WebAutoImportService webAutoImportService;
 
     /**
      * 条目分页：{@code GET /api/tool/web/posts?source=mrds&page=1&size=24&q=&category=&tag=}
@@ -194,19 +194,9 @@ public class WebPostController
             }
         }
         row.put("videos", videos);
-        // 整帖归档：本地分段齐全时前端直接播本地 mp4（nginx 的 /web/** 已支持 Range 206）。
-        // 数量对不上时不返回半套：半套本地半套代理会出现"第 3 段起跳回源站"的诡异行为。
-        row.putIfAbsent("archiveState", "none");
-        row.putIfAbsent("archivePercent", 0);
-        int segCount = videos.size();
-        Object countInDb = row.get("videoCount");
-        if (countInDb instanceof Number && ((Number) countInDb).intValue() > segCount)
-        {
-            segCount = ((Number) countInDb).intValue();
-        }
-        row.put("videoFiles", webArchiveService.localFiles(home(),
-                row.get("sourceId") == null ? null : String.valueOf(row.get("sourceId")), segCount));
-        webArchiveService.maybeCheckSource(id);
+        // 「保存到视频站」的作业状态与作品：收藏和手动保存共用同一条导入流程，
+        // 进度直接读 tool_web_download，作品读 media_work（流地址是 /api/media/file 的 Range 206）。
+        row.putAll(webAutoImportService.describe(id));
         // 播放器尺寸兜底：库里没有 ffprobe 比例时，用图集第一张的比例
         Object sourceId = row.get("sourceId");
         if (sourceId != null && row.get("imageRatio") == null)
