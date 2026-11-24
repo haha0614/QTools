@@ -192,7 +192,9 @@ async function runRefresh(quick) {
       execFile(process.execPath, [new URL(script, import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')], {
         cwd: new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
         windowsHide: true,
-        env: { ...process.env, HEADLESS: '1', ...(base ? { BASE: base } : {}) },
+        // DETAIL_N=0：refresh-latest 的详情阶段与后台 detail drain 抢浏览器（源站有 Cloudflare，并发只会互相拖慢），
+        // 实测该阶段 spawnSync 撞 10 分钟 timeout 28 次、成功 0 次；补详情统一由后台 drain 串行做。
+        env: { ...process.env, HEADLESS: '1', DETAIL_N: '0', ...(base ? { BASE: base } : {}) },
         encoding: 'utf8',
         maxBuffer: 1 << 26,
         timeout: 15 * 60 * 1000,
