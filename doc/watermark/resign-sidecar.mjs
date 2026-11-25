@@ -133,14 +133,42 @@ const REFRESH_MINUTES = Number(process.env.REFRESH_MINUTES || 20);
 let refreshing = false;
 
 /** 库里的主域名：换域名后这里会跟着变，子进程继承 BASE 就不用手改脚本 */
+// 带 TTL：sidecar 是常驻进程，源站换域名后缓存永远不刷新就会一直用死主机。
 let cachedBase = '';
+let cachedBaseAt = 0;
+const BASE_TTL_MS = Number(process.env.SOURCE_BASE_TTL_MS || 600000);
 async function sourceBase() {
-  if (cachedBase) return cachedBase;
+  if (cachedBase && Date.now() - cachedBaseAt < BASE_TTL_MS) return cachedBase;
   try {
     const h = await sqlOne("select substring_index(substring_index(url,'//',-1),'/',1) from tool_web_post group by 1 order by count(*) desc limit 1;");
-    if (h) cachedBase = 'https://' + String(h).trim();
+    if (h) {
+      cachedBase = 'https://' + String(h).trim();
+      cachedBaseAt = Date.now();
+    }
   } catch (e) { /* 查不到就用脚本里的默认值 */ }
   return cachedBase;
+}
+
+/**
+ * 把文章页地址换到库里当前主域名（只换主机，路径不动）。
+ *
+ * 源站域名轮换后，老行 url 里的主机就死了：真浏览器 goto 只会
+ * ERR_CONNECTION_TIMED_OUT（实测 able.akmevtunk.cc 连不上、abcarrier.nfuwinwd.cc 200），
+ * 于是重签永远失败、播放一直 502。历次轮换漏迁的旧主机只占几十行，
+ * 靠 sync-source-host.mjs 追不到，这里兜一层。
+ */
+async function livePageUrl(url) {
+  if (!url) return url;
+  const base = await sourceBase();
+  if (!base) return url;
+  try {
+    const u = new URL(url);
+    const live = new URL(base);
+    if (u.host === live.host) return url;
+    return live.origin + u.pathname + u.search;
+  } catch (e) {
+    return url;
+  }
 }
 
 /**
@@ -590,9 +618,17 @@ async function downloadOne(id, index) {
     // 地址经常已过期（源站 auth_key 有时效）：下载前先重签一次拿最新地址，
     // 否则 ffmpeg 直接 403，用户只看到"下载失败"却不知道是签名问题。
     try {
-      const pageUrl = await sqlOne('select url from tool_web_post where id=' + id + ';');
+      const storedPageUrl = await sqlOne('select url from tool_web_post where id=' + id + ';');
+      const pageUrl = await livePageUrl(storedPageUrl);
       if (pageUrl) {
-        const fresh = await resign(pageUrl);
+        let fresh = null;
+        try {
+          fresh = await resign(pageUrl);
+        } catch (e) {
+          // 主域名也打不开时退回原地址：总比直接放弃多一次机会
+          if (storedPageUrl && pageUrl !== storedPageUrl) fresh = await resign(storedPageUrl);
+          else throw e;
+        }
         const list = Array.isArray(fresh) ? fresh : (fresh ? [fresh] : []);
         if (list.length && list.every((u) => typeof u === 'string' && u.indexOf('http') === 0)) {
           // 同样不许退回第 1 段：重签只解析到部分段时，第 N 段就是没有地址
@@ -741,7 +777,13 @@ const server = http.createServer((req, res) => {
       const t0 = Date.now();
       try {
         const cacheBefore = resignCache.has(payload.url) && (Date.now() - resignCache.get(payload.url).at) < RESIGN_CACHE_MS;
-        const fresh = await resign(payload.url);
+        // 先按库里当前主域名打开（老行的 url 可能还是已经死掉的旧主机）
+        const target = await livePageUrl(payload.url);
+        let fresh = await resign(target);
+        if ((!fresh || !fresh.length) && target !== payload.url) {
+          console.log(new Date().toISOString(), 'resign 主域名打不开，退回原地址重试', payload.url.slice(-24));
+          fresh = await resign(payload.url);
+        }
         const list = Array.isArray(fresh) ? fresh : (fresh ? [fresh] : []);
         const cached = cacheBefore;
         console.log(new Date().toISOString(), 'resign', payload.url.slice(-24), '->', list.length ? list.length + ' 条' : 'empty', (Date.now() - t0) + 'ms', cached ? '(cache)' : '');

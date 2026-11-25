@@ -131,6 +131,64 @@ async function discoverHostLegacy() {
   return null;
 }
 
+/**
+ * 残党迁移：历次轮换漏掉的旧主机（每个只剩几十行）不会跟着主域名一起迁走，
+ * 它们留着死域名 → 重签（真浏览器打开文章页）必定 ERR_CONNECTION_TIMED_OUT。
+ * 判据逐主机实测：跟随 301 后落到活着的主机，就把这一批整批换掉。
+ * @returns 迁移（或预演）的行数
+ */
+async function migrateStragglers(current) {
+  let groups = [];
+  try {
+    const raw = await sql("select substring_index(substring_index(url,'//',-1),'/',1) as h, count(*) c, min(url) u from qtools.tool_web_post group by h having h <> '" + current + "' order by c desc;");
+    groups = (raw || '').split('\n').map((line) => line.split('\t')).filter((c) => c[0]);
+  } catch (e) {
+    console.log('[host] 残党统计失败:', String(e.message).slice(0, 100));
+    return 0;
+  }
+  if (!groups.length) return 0;
+  console.log('[host] 残党主机:', groups.length, '个，共', groups.reduce((n, c) => n + Number(c[1] || 0), 0), '条');
+  let moved = 0;
+  for (const [host, count, sampleUrl] of groups) {
+    let finalHost = '';
+    let status = 0;
+    try {
+      const res = await fetch(sampleUrl, { redirect: 'follow', headers: UA, signal: AbortSignal.timeout(15000) });
+      status = res.status;
+      finalHost = new URL(res.url).host.toLowerCase();
+    } catch (e) {
+      status = 0;
+    }
+    // 兜底：主机整台连不上时（实测 able.akmevtunk.cc 直接超时），
+    // 源站还给同一前缀在新家族上的兄弟主机（able.akmevtunk.cc → able.nfuwinwd.cc）
+    if (status !== 200 || !finalHost || finalHost === host.toLowerCase()) {
+      const parts = host.split('.');
+      const fam = current.split('.').slice(-2).join('.');
+      const sibling = parts.length === 3 ? parts[0] + '.' + fam : '';
+      if (sibling && sibling !== host && (await verifyHost(sibling, sampleSid))) {
+        finalHost = sibling;
+        status = 200;
+        console.log('[host] ' + host + ' 连不上，兄弟主机 ' + sibling + ' 可用');
+      }
+    }
+    if (status !== 200 || !finalHost || finalHost.toLowerCase() === host.toLowerCase()) {
+      console.log('[host] 跳过', host, '(' + count + ' 条)', status ? '最终主机 ' + (finalHost || '?') : '连不上');
+      continue;
+    }
+    if (DRY) {
+      console.log('[host] --dry，将把', count, '条', host, '改成', finalHost);
+      moved += Number(count);
+      continue;
+    }
+    const stmt = "update qtools.tool_web_post set url = replace(url, '" + host + "', '" + finalHost + "') where url like '%" + host + "%';";
+    await sql("insert into qtools.tool_web_post_url_bak select id, url, now() from qtools.tool_web_post where url like '%" + host + "%';");
+    await sql(stmt);
+    console.log('[host] 残党迁移', host, '->', finalHost, count, '条');
+    moved += Number(count);
+  }
+  return moved;
+}
+
 const FROM = (() => {
   const i = process.argv.indexOf('--from');
   return i > 0 ? String(process.argv[i + 1] || '').trim() : '';
@@ -162,8 +220,12 @@ try {
 }
 console.log('[host] 健康检查:', status, '  最终主机:', finalHost || '(取不到)', '  ←', sample);
 
+// 主域名自己没问题也要顺手清一遍残党：轮换是一个主机一个主机死的，
+// 主域名早就迁好了，残党还停在多年前的主机上（实测 able.akmevtunk.cc 30 条、h4ppz1.dcupekeza.cc 30 条）
+const stragglers = await migrateStragglers(current);
+
 if (status === 200 && finalHost && finalHost === current.toLowerCase()) {
-  console.log('[host] 已是最新，无需迁移');
+  console.log('[host] 已是最新' + (stragglers ? '（顺带迁走残党 ' + stragglers + ' 条）' : '') + '，无需迁移');
   process.exit(0);
 }
 
@@ -196,3 +258,6 @@ await sql("insert into qtools.tool_web_post_url_bak select id, url, now() from q
 await sql(stmt);
 const after = await sql("select substring_index(substring_index(url,'//',-1),'/',1) as h, count(*) c from qtools.tool_web_post group by h order by c desc limit 1;");
 console.log('[host] 迁移完成 ->', after.replace('\t', ' 条 '));
+// 换完主域名再清一遍：刚才可能还有主机正在轮换中途，现在应该都指到新主机了
+const rest = await migrateStragglers(target);
+if (rest) console.log('[host] 顺带迁走残党', rest, '条');
