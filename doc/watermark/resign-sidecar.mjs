@@ -165,6 +165,7 @@ async function livePageUrl(url) {
     const u = new URL(url);
     const live = new URL(base);
     if (u.host === live.host) return url;
+    console.log(new Date().toISOString(), '主机已换', u.host, '->', live.host, u.pathname);
     return live.origin + u.pathname + u.search;
   } catch (e) {
     return url;
