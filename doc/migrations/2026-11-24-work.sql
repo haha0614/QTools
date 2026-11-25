@@ -1,8 +1,9 @@
 -- 作品层：一个源站帖子 = 一个作品，含 N 段视频（多段帖在视频站不再是一堆孤立文件）
 -- 为什么加：视频站实体是单个视频文件；多段帖（现在 5,393 帖）进库后无法归组、
 --   也没有 post_id 映射，无法回跳源帖/判断哪边新。见 HANDOFF §24。
--- 谁在用：qtools-tool 的 WebMediaImportService.linkWork()（导入时写），
---   qtools-media 的 MediaWorkController（读），前端 WorkPage.vue。
+-- 谁在用：qtools-tool 的 WebAutoImportService.linkWork()（收藏即归档批完段后写），
+--   qtools-media 的 MediaWorkController（读），前端合在媒体站「视频库」页（VideoPage.vue）里——
+--   原本单独的 works/WorkListPage.vue 已被 c926041 删掉并入视频库，别去找 WorkPage.vue。
 -- 约定：media_video 不动（扫描器零改动）；段关联靠 content_hash 稳定的 id，文件改名不断线。
 
 use qtools;
