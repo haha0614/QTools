@@ -650,6 +650,36 @@ public class MediaTranscribeMaterial
         return "";
     }
 
+    /**
+     * 从本地 wav 切一段（毫秒）出来，给分片转写用：一次把整片喂给 whisper.cpp 会在中途收尾
+     *
+     * @return 成功返回空串
+     */
+    public String sliceWav(Path src, Path out, long startMs, long durMs, long timeoutMs)
+    {
+        String ffmpeg = mediaProperties.getFfmpeg();
+        if (ffmpeg == null || ffmpeg.trim().isEmpty())
+        {
+            return "未配置 ffmpeg（qtools.media.ffmpeg）";
+        }
+        if (src == null || out == null)
+        {
+            return "切分音频参数为空";
+        }
+        Path parent = out.toAbsolutePath().getParent();
+        Run run = exec(ffmpegCommand(ffmpeg.trim(), src, new Win(startMs / 1000.0, durMs / 1000.0), out),
+                timeoutMs, parent);
+        if (run.timedOut)
+        {
+            return "切分音频超时";
+        }
+        if (!run.ok || !Files.isRegularFile(out) || sizeOf(out) < 1000)
+        {
+            return "切分音频失败（ffmpeg 返回 " + run.exit + " " + tail(run.err) + "）";
+        }
+        return "";
+    }
+
     /** 一段音频的转写结果：cue 已经 {@link #clean(List)} 清洗过 */
     public static final class Transcript
     {

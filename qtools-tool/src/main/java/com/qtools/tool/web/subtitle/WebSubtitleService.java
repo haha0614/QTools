@@ -55,14 +55,22 @@ public class WebSubtitleService
     /** 抽完音轨 */
     private static final int P_AUDIO = 10;
 
-    /** 转写完 */
-    private static final int P_TRANSCRIBED = 15;
+    /** 分片转写进度区间：每转完一片推进一段，前端能看到真实进度 */
+    private static final int P_TRANSCRIBE_START = 15;
+
+    private static final int P_TRANSCRIBE_END = 60;
 
     /** 翻译完 */
-    private static final int P_TRANSLATED = 55;
+    private static final int P_TRANSLATED = 85;
 
     /** 写文件完 */
-    private static final int P_WRITTEN = 90;
+    private static final int P_WRITTEN = 92;
+
+    /**
+     * 单片转写时长：整片一次喂 whisper 会退化成除噪标记（实测 80 分钟窗口后半段只剩「(息を吹き出す)」），
+     * 120 秒窗口在同一段能正常出日语台词，所以按小片切开、各片独立转写
+     */
+    private static final long CHUNK_MS = 2 * 60000L;
 
     /** err 列宽 */
     private static final int ERR_MAX = 500;
@@ -227,24 +235,17 @@ public class WebSubtitleService
             }
             subtitleMapper.updateProgress(postId, seg, P_AUDIO);
 
-            MediaTranscribeMaterial.Transcript transcript = transcribeMaterial.transcribeWav(wav,
-                    properties.getWhisperModel(), properties.getWhisperLang(), properties.getThreads(),
-                    properties.getEffectiveTimeoutMs());
-            if (!transcript.ok)
+            List<String> notes = new ArrayList<>(2);
+            List<SubtitleParser.Cue> cues = transcribeChunks(wav, postId, seg, notes);
+            if (cues.isEmpty())
             {
-                fail(postId, seg, transcript.reason);
+                fail(postId, seg, notes.isEmpty() ? "没有识别出任何字幕内容" : String.join("；", notes));
                 return;
             }
-            if (transcript.cues.isEmpty())
-            {
-                fail(postId, seg, "没有识别出任何字幕内容");
-                return;
-            }
-            subtitleMapper.updateProgress(postId, seg, P_TRANSCRIBED);
 
-            List<String> ja = new ArrayList<>(transcript.cues.size());
+            List<String> ja = new ArrayList<>(cues.size());
             long durMs = 0;
-            for (SubtitleParser.Cue cue : transcript.cues)
+            for (SubtitleParser.Cue cue : cues)
             {
                 ja.add(cue.text);
                 durMs = Math.max(durMs, cue.endMs);
@@ -252,10 +253,10 @@ public class WebSubtitleService
             SubtitleTranslateService.Result translated = translateService.translate(ja);
             subtitleMapper.updateProgress(postId, seg, P_TRANSLATED);
 
-            List<SubtitleVtt.Line> lines = new ArrayList<>(transcript.cues.size());
-            for (int i = 0; i < transcript.cues.size(); i++)
+            List<SubtitleVtt.Line> lines = new ArrayList<>(cues.size());
+            for (int i = 0; i < cues.size(); i++)
             {
-                SubtitleParser.Cue cue = transcript.cues.get(i);
+                SubtitleParser.Cue cue = cues.get(i);
                 String zh = i < translated.zh.size() ? translated.zh.get(i) : "";
                 lines.add(new SubtitleVtt.Line(cue.startMs, cue.endMs, cue.text, zh));
             }
@@ -267,7 +268,11 @@ public class WebSubtitleService
             subtitleMapper.markDone(postId, seg, durMs, cueCount, target.toString(), engine());
             if (!translated.err.isEmpty())
             {
-                subtitleMapper.markErrNote(postId, seg, truncate(translated.err));
+                notes.add(translated.err);
+            }
+            if (!notes.isEmpty())
+            {
+                subtitleMapper.markErrNote(postId, seg, truncate(String.join("；", notes)));
             }
             log.info("字幕生成完成 postId={} seg={} cues={} durMs={} ms={}", postId, seg, cueCount, durMs,
                     System.currentTimeMillis() - started);
@@ -281,6 +286,68 @@ public class WebSubtitleService
         {
             deleteTree(work);
             running.remove(key(postId, seg));
+        }
+    }
+
+    /**
+     * 分片转写：一片一片喂 whisper，cue 时间轴按片起点平移；单片失败只记 note，不整集失败
+     *
+     * @return 全片 cue（按时间升序）
+     */
+    private List<SubtitleParser.Cue> transcribeChunks(Path wav, Long postId, int seg, List<String> notes)
+            throws IOException
+    {
+        long totalMs = wavDurationMs(wav);
+        int chunks = (int)Math.max(1L, (totalMs + CHUNK_MS - 1) / CHUNK_MS);
+        List<SubtitleParser.Cue> all = new ArrayList<>(1024);
+        for (int i = 0; i < chunks; i++)
+        {
+            long from = (long)i * CHUNK_MS;
+            long dur = totalMs > 0 ? Math.min(CHUNK_MS, totalMs - from) : CHUNK_MS;
+            Path part = wav.getParent().resolve("chunk-" + i + ".wav");
+            String reason = transcribeMaterial.sliceWav(wav, part, from, dur, properties.getEffectiveTimeoutMs());
+            if (reason.isEmpty())
+            {
+                MediaTranscribeMaterial.Transcript piece = transcribeMaterial.transcribeWav(part,
+                        properties.getWhisperModel(), properties.getWhisperLang(), properties.getThreads(),
+                        properties.getEffectiveTimeoutMs());
+                if (piece.ok)
+                {
+                    for (SubtitleParser.Cue cue : piece.cues)
+                    {
+                        all.add(new SubtitleParser.Cue(cue.startMs + from, cue.endMs + from, cue.text));
+                    }
+                }
+                else
+                {
+                    reason = piece.reason;
+                }
+            }
+            if (!reason.isEmpty())
+            {
+                log.warn("分片转写失败 postId={} seg={} chunk={}/{} {}", postId, seg, i + 1, chunks, reason);
+                notes.add("第 " + (i + 1) + "/" + chunks + " 片转写失败（" + reason + "）");
+            }
+            Files.deleteIfExists(part);
+            subtitleMapper.updateProgress(postId, seg,
+                    P_TRANSCRIBE_START + (int)((long)(P_TRANSCRIBE_END - P_TRANSCRIBE_START) * (i + 1) / chunks));
+            log.info("分片转写 postId={} seg={} chunk={}/{} 累计cue={} 到={}ms", postId, seg, i + 1, chunks,
+                    all.size(), all.isEmpty() ? 0 : all.get(all.size() - 1).endMs);
+        }
+        return all;
+    }
+
+    /** wav 时长：16k 单声道 pcm_s16le = 每秒 32000 字节（44 字节文件头）；估不出来返回 0 */
+    private static long wavDurationMs(Path wav)
+    {
+        try
+        {
+            long bytes = Files.size(wav) - 44;
+            return bytes > 0 ? bytes * 1000L / 32000L : 0L;
+        }
+        catch (IOException e)
+        {
+            return 0L;
         }
     }
 
