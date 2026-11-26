@@ -67,12 +67,15 @@ set @s := if(@need, 'alter table tool_web_post_swap add fulltext key ft_web_text
 prepare st from @s; execute st; deallocate prepare st;
 
 -- 7) 核对：两行数字必须完全一致，再执行第 8 步
-select 'old' as side, count(*) as rows, sum(id) as id_sum,
-       sum(length(content_text)) as text_len, sum(crc32(coalesce(title, ''))) as title_crc
-from tool_web_post
-union all
-select 'new', count(*), sum(id), sum(length(content_text)), sum(crc32(coalesce(title, '')))
-from tool_web_post_swap;
+--    （跳过路径上没有 tool_web_post_swap，这条 select 也必须跟着跳过，否则整份文件在 no-op 时报 1146）
+set @s := if(@need,
+  concat('select ''old'' as side, count(*) as ', char(96), 'rows', char(96), ', sum(id) as id_sum, ',
+         'sum(length(content_text)) as text_len, sum(crc32(coalesce(title, ''''))) as title_crc from tool_web_post ',
+         'union all ',
+         'select ''new'' as side, count(*) as ', char(96), 'rows', char(96), ', sum(id) as id_sum, ',
+         'sum(length(content_text)) as text_len, sum(crc32(coalesce(title, ''''))) as title_crc from tool_web_post_swap'),
+  'select ''归档列已存在，无需核对'' as note');
+prepare st from @s; execute st; deallocate prepare st;
 
 -- 8) 换名（默认注释掉，人工核对第 7 步两行一致后再单独执行）
 --    rename table tool_web_post to tool_web_post_old20261125,
