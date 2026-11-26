@@ -71,6 +71,27 @@ qtools:
         threads: 8
         headSeconds: 300
         tailSeconds: 60
+    # ---- 视频双语字幕（VTT）：抽音轨 → whisper → 批量翻译 → 写 VTT ----
+    # 文件落在 <qtools.home>/data/subtitles/{postId}/{seg}.vtt
+    # 需要 translate.apiKey（OpenAI 兼容端点，如 DeepSeek），留空则翻译步骤失败并落 err
+    subtitle:
+      enabled: true
+      # 并发任务数：whisper 已吃满 CPU，默认 1
+      workers: 1
+      whisperModel: 'ggml-small.bin'
+      whisperLang: ja
+      threads: 6
+      # 单个任务总时限（分钟）
+      timeoutMinutes: 40
+      # 留空 = <qtools.home>/data/subtitles
+      dir: ''
+      translate:
+        provider: 'openai'
+        baseUrl: 'https://api.deepseek.com/v1/chat/completions'
+        model: 'deepseek-chat'
+        apiKey: ''
+        batch: 40
+        timeoutMs: 60000
   web:
     userDist: 'D:/project/QTools-All/QTools-C/dist'
     adminDist: 'D:/project/QTools-All/QTools-M/dist'

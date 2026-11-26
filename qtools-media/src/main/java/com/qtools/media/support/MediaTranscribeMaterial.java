@@ -304,7 +304,18 @@ public class MediaTranscribeMaterial
     /** 定位模型：绝对路径 → {@code <home>/data/models/whisper/} → {@code <home>/tools/whisper/models/} */
     private String resolveModel(MediaProperties.Transcribe cfg)
     {
-        String model = cfg.getModel() == null ? "" : cfg.getModel().trim();
+        return resolveModelNamed(cfg.getModel());
+    }
+
+    /**
+     * 按名字 / 绝对路径定位模型（字幕链路只拿到一个模型文件名，没有转写配置对象）
+     *
+     * <p>候选顺序与 {@link #resolveModel(MediaProperties.Transcribe)} 一致：
+     * 绝对或带分隔符的直接判定，否则 {@code <home>/data/models/whisper/} → {@code <home>/tools/whisper/models/}。</p>
+     */
+    private String resolveModelNamed(String name)
+    {
+        String model = name == null ? "" : name.trim();
         if (model.isEmpty())
         {
             return "";
@@ -591,10 +602,143 @@ public class MediaTranscribeMaterial
         return pass;
     }
 
+    // ------------------------------------------------------------------ 字幕链路
+
+    /**
+     * 抽 16k 单声道音轨（字幕链路）：源可以是 http(s)（HLS 清单）也可以是本地文件
+     *
+     * <p>失败返回可读原因而不是抛异常——调用方要把原因写进 {@code tool_web_subtitle.err}。</p>
+     *
+     * @return 成功返回空串
+     */
+    public String extractAudio(String source, Path out, long timeoutMs)
+    {
+        if (source == null || source.trim().isEmpty())
+        {
+            return "音频来源为空";
+        }
+        String ffmpeg = mediaProperties.getFfmpeg();
+        if (ffmpeg == null || ffmpeg.trim().isEmpty())
+        {
+            return "未配置 ffmpeg（qtools.media.ffmpeg）";
+        }
+        if (out == null)
+        {
+            return "音频输出路径为空";
+        }
+        Path parent = out.toAbsolutePath().getParent();
+        try
+        {
+            if (parent != null)
+            {
+                Files.createDirectories(parent);
+            }
+        }
+        catch (IOException e)
+        {
+            return "无法创建临时目录";
+        }
+        Run run = exec(ffmpegCommand(ffmpeg.trim(), source.trim(), new Win(0, 0), out), timeoutMs, parent);
+        if (run.timedOut)
+        {
+            return "音频抽取超时";
+        }
+        if (!run.ok || !Files.isRegularFile(out) || sizeOf(out) < 1000)
+        {
+            return "音频抽取失败（ffmpeg 返回 " + run.exit + " " + tail(run.err) + "）";
+        }
+        return "";
+    }
+
+    /** 一段音频的转写结果：cue 已经 {@link #clean(List)} 清洗过 */
+    public static final class Transcript
+    {
+        public final boolean ok;
+
+        public final String language;
+
+        public final List<SubtitleParser.Cue> cues;
+
+        public final String reason;
+
+        private Transcript(boolean ok, String language, List<SubtitleParser.Cue> cues, String reason)
+        {
+            this.ok = ok;
+            this.language = language == null ? "" : language;
+            this.cues = cues == null ? new ArrayList<>() : cues;
+            this.reason = reason == null ? "" : reason;
+        }
+
+        static Transcript failed(String reason)
+        {
+            return new Transcript(false, "", null, reason);
+        }
+    }
+
+    /**
+     * 对已抽好的 wav 跑一次 whisper 并解析成 cue（字幕链路）
+     *
+     * <p>命令拼装只有 {@link #whisperCommand(String, String, Path, Path, String, int)} 一处，这里只是调用它。</p>
+     */
+    public Transcript transcribeWav(Path wav, String model, String language, int threads, long timeoutMs)
+    {
+        if (wav == null || !Files.isRegularFile(wav))
+        {
+            return Transcript.failed("音频文件不存在");
+        }
+        String whisper = resolveWhisper(mediaProperties.getLlm().getTranscribe());
+        if (whisper.isEmpty())
+        {
+            return Transcript.failed("找不到 whisper-cli：qtools.media.llm.transcribe.whisperPath 为空，"
+                    + "<home>/tools/whisper/ 下没有 " + whisperExeName() + "，PATH 里也没有");
+        }
+        String modelPath = resolveModelNamed(model);
+        if (modelPath.isEmpty())
+        {
+            return Transcript.failed("找不到 whisper 模型 " + (model == null || model.trim().isEmpty() ? "(未配置)" : model)
+                    + "：应为绝对路径，或放在 <home>/data/models/whisper/ 下");
+        }
+        String lang = language == null || language.trim().isEmpty() ? "auto" : language.trim();
+        int worker = threads <= 0 ? 4 : threads;
+        Path dir = wav.toAbsolutePath().getParent();
+        Path outBase = dir == null ? Path.of(wav.toAbsolutePath() + "-out") : dir.resolve(stem(wav.getFileName().toString()) + "-out");
+        Run run = exec(whisperCommand(whisper, modelPath, wav, outBase, lang, worker), timeoutMs, dir);
+        if (run.timedOut)
+        {
+            return Transcript.failed("whisper 转写超时（" + timeoutMs + "ms）");
+        }
+        if (!run.ok)
+        {
+            return Transcript.failed("whisper 转写失败（exit " + run.exit + " " + tail(run.err) + "）");
+        }
+        Path json = Path.of(outBase + ".json");
+        if (!Files.isRegularFile(json))
+        {
+            return Transcript.failed("whisper 没有产出 JSON（" + json.getFileName() + "）");
+        }
+        try
+        {
+            Parsed parsed = parse(Files.readString(json, java.nio.charset.StandardCharsets.UTF_8));
+            String detected = parsed.language == null || parsed.language.trim().isEmpty() ? lang : parsed.language.trim();
+            return new Transcript(true, detected, clean(parsed.cues), "");
+        }
+        catch (IOException | RuntimeException e)
+        {
+            return Transcript.failed("解析 whisper JSON 失败（" + e.getClass().getSimpleName() + "）");
+        }
+    }
+
+    /** 去掉扩展名（whisper 的 {@code -of} 只接受前缀） */
+    private static String stem(String name)
+    {
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(0, dot) : name;
+    }
+
     // ------------------------------------------------------------------ 命令构造
 
     /** ffmpeg：{@code -ss/-t} 输入定位 → 16k 单声道 pcm_s16le wav（whisper.cpp 只吃 wav/flac/mp3/ogg） */
-    private static List<String> ffmpegCommand(String ffmpeg, Path src, Win win, Path out)
+    private static List<String> ffmpegCommand(String ffmpeg, String src, Win win, Path out)
     {
         List<String> cmd = new ArrayList<>(24);
         cmd.add(ffmpeg);
@@ -613,7 +757,7 @@ public class MediaTranscribeMaterial
             cmd.add(MediaFrameGrab.ssArgOf(win.dur));
         }
         cmd.add("-i");
-        cmd.add(src.toString());
+        cmd.add(src);
         cmd.add("-vn");
         cmd.add("-sn");
         cmd.add("-dn");
@@ -628,6 +772,12 @@ public class MediaTranscribeMaterial
         cmd.add("-y");
         cmd.add(out.toString());
         return cmd;
+    }
+
+    /** 本地文件的入口（源用 {@link Path} 传，内部走同一套拼装） */
+    private static List<String> ffmpegCommand(String ffmpeg, Path src, Win win, Path out)
+    {
+        return ffmpegCommand(ffmpeg, src.toString(), win, out);
     }
 
     /** whisper-cli：{@code -oj} 产 JSON（{@code -of} 给前缀），{@code -np} 只留结果 */

@@ -172,6 +172,36 @@ qtools:
         # 只转「开头 + 结尾」两段：片长超过 head+tail 时不整片解码（120s 预算装不下整片）
         headSeconds: 300
         tailSeconds: 60
+    # ---------------- 视频双语字幕（VTT，docs/视频字幕-实施交接.md §T8） ----------------
+    # 链路：ffmpeg 抽 16k 单声道 → whisper-cli → 批量翻译 → 写 VTT
+    # 接口：GET/POST/DELETE /api/tool/web/subtitle/**（加 @Anonymous，<track src> 不带 token）
+    # 文件：<qtools.home>/data/subtitles/{postId}/{seg}.vtt（不放 data/media/，免得被转码/扫描扫到）
+    # 隐私：字幕原文只落文件，日志与库里的 err 都不打原文
+    subtitle:
+      # 总开关：false 时 build 直接落 status=3 + err「字幕功能未开启」
+      enabled: true
+      # 并发任务数：whisper 已经吃满 CPU，默认 1；调大只会互相拖慢
+      workers: 1
+      # whisper 模型（文件名即可，按 <home>/data/models/whisper/ → <home>/tools/whisper/models/ 找）
+      whisperModel: 'ggml-small.bin'
+      # 源语言：这类内容固定 ja（auto 在音乐/短片上空转，实测会把日语判成韩语）
+      whisperLang: ja
+      # whisper 线程数
+      threads: 6
+      # 单个任务总时限（分钟）：抽音频 + 转写 + 翻译共用
+      timeoutMinutes: 40
+      # 输出目录；留空 = <qtools.home>/data/subtitles
+      dir: ''
+      translate:
+        provider: 'openai'
+        # OpenAI 兼容端点（DeepSeek）；换端点只改这里
+        baseUrl: 'https://api.deepseek.com/v1/chat/completions'
+        model: 'deepseek-chat'
+        # 只从这一项读 key，不做环境变量回退；留空 = 翻译步骤失败（err「翻译未配置（缺少 apiKey）」）
+        apiKey: ''
+        # 每批行数：40 行约 1500 字，再大容易出现漏行/合并
+        batch: 40
+        timeoutMs: 60000
     # 允许的跨域来源，逗号分隔；* 仅用于本地开发
     allowOrigins: '*'
     # ---------------- 自动扫描（文件监听）：两层模型 ----------------

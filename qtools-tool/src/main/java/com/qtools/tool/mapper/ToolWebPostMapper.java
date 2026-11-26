@@ -53,9 +53,6 @@ public interface ToolWebPostMapper
 
     Map<String, Object> selectOne(@Param("id") Long id);
 
-    /** 条目对应的签名 m3u8（抓取时存下的；播放时代理转发，前端不接触源站） */
-    String selectVideoUrl(@Param("id") Long id);
-
     /** 多视频：取第 index 个播放地址（video_urls 里没有就退回 video_url） */
     String selectVideoUrl(@Param("id") Long id, @Param("index") int index);
 

@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.qtools.tool.mapper.ToolWebSubtitleMapper">
+
+    <!-- 视频双语字幕状态（docs/视频字幕-实施交接.md §7.1）：表由 doc/migrations/2026-11-26-web-subtitle.sql 建立（幂等） -->
+    <!-- stale：status=1 且 started_at 超过 2 小时 = 进程中途没了，按「待生成」对待（§7.2） -->
+    <select id="selectOne" resultType="java.util.LinkedHashMap">
+        select id, post_id as postId, seg, lang_src as langSrc, lang_dst as langDst,
+               status, progress, dur_ms as durMs, cue_count as cueCount,
+               engine, file_path as filePath, err,
+               started_at as startedAt, created_at as createdAt, updated_at as updatedAt,
+               (status = 1 and started_at is not null and started_at &lt; (now() - interval 2 hour)) as stale
+        from tool_web_subtitle
+        where post_id = #{postId} and seg = #{seg}
+        limit 1
+    </select>
+
+    <insert id="insertIfAbsent">
+        insert into tool_web_subtitle (post_id, seg)
+        values (#{postId}, #{seg})
+        on duplicate key update id = id
+    </insert>
+
+    <update id="markRunning">
+        update tool_web_subtitle
+        set status = 1,
+            progress = #{progress},
+            engine = #{engine},
+            err = '',
+            started_at = now(),
+            updated_at = now()
+        where post_id = #{postId} and seg = #{seg}
+    </update>
+
+    <update id="updateProgress">
+        update tool_web_subtitle
+        set progress = #{progress},
+            updated_at = now()
+        where post_id = #{postId} and seg = #{seg}
+    </update>
+
+    <update id="markDone">
+        update tool_web_subtitle
+        set status = 2,
+            progress = 100,
+            dur_ms = #{durMs},
+            cue_count = #{cueCount},
+            file_path = #{filePath},
+            engine = #{engine},
+            err = '',
+            updated_at = now()
+        where post_id = #{postId} and seg = #{seg}
+    </update>
+
+    <update id="markFailed">
+        update tool_web_subtitle
+        set status = 3,
+            err = #{err},
+            updated_at = now()
+        where post_id = #{postId} and seg = #{seg}
+    </update>
+
+    <update id="markErrNote">
+        update tool_web_subtitle
+        set err = #{err},
+            updated_at = now()
+        where post_id = #{postId} and seg = #{seg}
+    </update>
+
+    <delete id="deleteByPost">
+        delete from tool_web_subtitle where post_id = #{postId}
+    </delete>
+
+</mapper>

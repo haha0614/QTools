@@ -210,7 +210,8 @@ public class WebPlayController
     public Map<String, Object> play(@PathVariable("id") Long id)
     {
         Map<String, Object> out = new LinkedHashMap<>();
-        String videoUrl = toolWebPostMapper.selectVideoUrl(id);
+        // 必须带 index：XML 里 selectVideoUrl 只有一份、且用到了 #{index}，一参重载会在运行期抛 BindingException
+        String videoUrl = toolWebPostMapper.selectVideoUrl(id, 0);
         if (videoUrl == null || videoUrl.isEmpty())
         {
             out.put("error", "这条没有可播放的视频");
@@ -224,7 +225,8 @@ public class WebPlayController
     /** 播放列表：取源站 m3u8 后把分片/密钥地址全部改写成代理地址 */
     @GetMapping("/hls/{id}/playlist.m3u8")
     public ResponseEntity<byte[]> playlist(@PathVariable("id") Long id,
-            @RequestParam(value = "i", required = false, defaultValue = "0") int index)
+            @RequestParam(value = "i", required = false, defaultValue = "0") int index,
+            @RequestParam(value = "asr", required = false) String asr)
     {
         // 重签已经证明「源站这一帖只有 fresh 段」时，第 fresh 段以后的请求不该再走
         // 「过期 → 502 → 后台重签」：重签结果不会变，前端却要白等 9 次约 55 秒。
@@ -268,6 +270,16 @@ public class WebPlayController
                 return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(new byte[0]);
             }
             String text = new String(resp.body(), StandardCharsets.UTF_8);
+            if ("1".equals(asr))
+            {
+                // 抽音频专用清单：分片必须带 .ts 后缀，否则 ffmpeg 按 URL 后缀判断容器会直接拒收
+                // （docs/视频字幕-实施交接.md §4.3）。不写 playlistCache：那份白名单只服务正常播放。
+                HttpHeaders asrHeaders = new HttpHeaders();
+                asrHeaders.setContentType(MediaType.parseMediaType("application/vnd.apple.mpegurl"));
+                asrHeaders.set(HttpHeaders.CACHE_CONTROL, "no-store");
+                return new ResponseEntity<>(rewriteAsr(text, id).getBytes(StandardCharsets.UTF_8),
+                        asrHeaders, HttpStatus.OK);
+            }
             Set<String> hosts = new LinkedHashSet<>();
             String rewritten = rewrite(text, id, hosts);
             HttpHeaders headers = new HttpHeaders();
@@ -724,6 +736,58 @@ public class WebPlayController
     {
         return "/api/tool/web/hls/" + id + "/part?u="
                 + URLEncoder.encode(absoluteUrl, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * 给 ffmpeg 抽音频的清单：分片地址改成 {@code /part.ts?u=…}。
+     *
+     * <p>ffmpeg 9 按 URL 路径后缀判断容器，{@code /part?u=} 没有后缀会被
+     * {@code allowed_segment_extensions} 挡掉；KEY 行不需要后缀，保持原方式代理。</p>
+     */
+    private static String rewriteAsr(String playlist, Long id)
+    {
+        StringBuilder out = new StringBuilder(playlist.length() + 512);
+        int n = 0;
+        for (String line : playlist.split("\r?\n"))
+        {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty())
+            {
+                continue;
+            }
+            if (trimmed.startsWith("#"))
+            {
+                int at = trimmed.indexOf("URI=\"");
+                if (at >= 0)
+                {
+                    int end = trimmed.indexOf('"', at + 5);
+                    if (end > at)
+                    {
+                        String keyUrl = trimmed.substring(at + 5, end);
+                        if (keyUrl.startsWith("http"))
+                        {
+                            trimmed = trimmed.substring(0, at + 5) + proxyUrl(id, keyUrl) + trimmed.substring(end);
+                        }
+                    }
+                }
+                out.append(trimmed).append('\n');
+                continue;
+            }
+            out.append("/api/tool/web/hls/").append(id).append("/part.ts?n=").append(n++);
+            if (trimmed.startsWith("http"))
+            {
+                out.append("&u=").append(URLEncoder.encode(trimmed, StandardCharsets.UTF_8));
+            }
+            out.append('\n');
+        }
+        return out.toString();
+    }
+
+    /** 只给 ffmpeg 用：与 {@link #part} 同一份转发，仅路径带 .ts 让 HLS 解复用器认出 mpegts */
+    @GetMapping("/hls/{id}/part.ts")
+    public ResponseEntity<byte[]> partTs(@PathVariable("id") Long id, @RequestParam("u") String u)
+    {
+        return part(id, u);
     }
 
     private static void record(Set<String> hosts, String url)
