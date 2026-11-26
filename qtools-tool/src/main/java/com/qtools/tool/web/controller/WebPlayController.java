@@ -1,6 +1,9 @@
 package com.qtools.tool.web.controller;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -357,18 +360,13 @@ public class WebPlayController
         }
         try
         {
-            // 源站 CDN 偶发 5xx/超时：重试一次再放弃（hls.js 收到 5xx 会整段丢弃）
-            HttpResponse<byte[]> resp = http.send(request(target), HttpResponse.BodyHandlers.ofByteArray());
-            if (resp.statusCode() != 200)
+            PartResult part = fetchPart(id, target);
+            if (part.status != 200)
             {
-                resp = http.send(request(target), HttpResponse.BodyHandlers.ofByteArray());
+                return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(new byte[0]);
             }
-            if (resp.statusCode() != 200)
-            {
-                log.warn("分片源站返回 {} id={} u={}", resp.statusCode(), id, abbreviate(target));
-            }
-            byte[] body = resp.body();
-            if (body == null || body.length == 0)
+            byte[] body = part.body;
+            if (body.length == 0)
             {
                 return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(new byte[0]);
             }
@@ -378,16 +376,89 @@ public class WebPlayController
                 return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(new byte[0]);
             }
             HttpHeaders headers = new HttpHeaders();
-            String upstreamType = resp.headers().firstValue("content-type").orElse("");
             headers.setContentType(MediaType.parseMediaType(
-                    upstreamType.isEmpty() ? MediaType.APPLICATION_OCTET_STREAM_VALUE : upstreamType));
-            headers.set(HttpHeaders.CACHE_CONTROL, target.contains("crypt.key") ? "no-store" : "public, max-age=1800");
+                    part.contentType.isEmpty() ? MediaType.APPLICATION_OCTET_STREAM_VALUE : part.contentType));
+            // 截断的分片不进退避缓存：等源站把对象补全后，下次还能拿到完整的那一份
+            headers.set(HttpHeaders.CACHE_CONTROL,
+                    part.truncated || target.contains("crypt.key") ? "no-store" : "public, max-age=1800");
             return new ResponseEntity<>(body, headers, HttpStatus.OK);
         }
         catch (Exception e)
         {
             log.warn("分片转发异常 id={} err={}", id, e.toString());
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(new byte[0]);
+        }
+    }
+
+    /**
+     * 抓一个分片 / 密钥，源站 5xx 时重试一次。
+     *
+     * <p>必须用 {@code ofInputStream()} 而不是 {@code ofByteArray()}：CDN 上有个别对象
+     * 「声明 Content-Length 比实际内容长」，例如 post 18374 第 1 段声明 1,865,904 实发 1,040,384，
+     * JDK 的 byteArray 处理器遇到这种提前关闭会整段抛 IOException → 转发 502 → hls.js 认为分片失败、
+     * 整帖播不了。流式读能保住已经收到的那些字节，截断的 TS 只是丢了尾部几个包。</p>
+     */
+    private PartResult fetchPart(Long id, String target) throws Exception
+    {
+        PartResult last = null;
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            HttpResponse<InputStream> resp = http.send(request(target), HttpResponse.BodyHandlers.ofInputStream());
+            String contentType = resp.headers().firstValue("content-type").orElse("");
+            long declared = resp.headers().firstValueAsLong("content-length").orElse(-1L);
+            ByteArrayOutputStream buf = new ByteArrayOutputStream(
+                    declared > 0 && declared < PART_MAX_BYTES ? (int) declared : 64 * 1024);
+            boolean cut = false;
+            try (InputStream in = resp.body())
+            {
+                byte[] chunk = new byte[64 * 1024];
+                int n;
+                while ((n = in.read(chunk)) > 0 && buf.size() < PART_MAX_BYTES)
+                {
+                    buf.write(chunk, 0, n);
+                }
+            }
+            catch (IOException e)
+            {
+                if (buf.size() == 0)
+                {
+                    throw e;
+                }
+                cut = true;
+            }
+            byte[] body = buf.toByteArray();
+            boolean shortOfDeclared = declared > 0 && body.length < declared;
+            last = new PartResult(resp.statusCode(), body, contentType, cut || shortOfDeclared, declared);
+            if (last.truncated)
+            {
+                log.warn("分片被截断，按实收下发 id={} 声明={} 实收={} u={}",
+                        id, declared, body.length, abbreviate(target));
+            }
+            if (resp.statusCode() == 200)
+            {
+                return last;
+            }
+            log.warn("分片源站返回 {} id={} u={}", resp.statusCode(), id, abbreviate(target));
+        }
+        return last;
+    }
+
+    /** 一次分片抓取的结果 */
+    private static final class PartResult
+    {
+        private final int status;
+        private final byte[] body;
+        private final String contentType;
+        private final boolean truncated;
+        private final long declared;
+
+        private PartResult(int status, byte[] body, String contentType, boolean truncated, long declared)
+        {
+            this.status = status;
+            this.body = body;
+            this.contentType = contentType;
+            this.truncated = truncated;
+            this.declared = declared;
         }
     }
 

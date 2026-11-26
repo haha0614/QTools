@@ -27,13 +27,10 @@
 		<encoder>
 			<pattern>${log.pattern}</pattern>
 		</encoder>
-		<filter class="ch.qos.logback.classic.filter.LevelFilter">
-            <!-- 过滤的级别 -->
+		<!-- 用 ThresholdFilter 而不是 LevelFilter(INFO)：后者只放行 INFO，
+		     warn/error 全丢，「分片被截断」「源站返回 4xx」这类现场日志一条都看不到 -->
+		<filter class="ch.qos.logback.classic.filter.ThresholdFilter">
             <level>INFO</level>
-            <!-- 匹配时的操作：接收（记录） -->
-            <onMatch>ACCEPT</onMatch>
-            <!-- 不匹配时的操作：拒绝（不记录） -->
-            <onMismatch>DENY</onMismatch>
         </filter>
 	</appender>
 	
