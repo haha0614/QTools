@@ -64,6 +64,28 @@ public class WebPlayController
 
     /** 每个条目最近一次播放列表里出现过的域名，用于校验 part 的 u 参数 */
     private final Map<Long, PlaylistCache> playlistCache = new ConcurrentHashMap<>();
+
+    /**
+     * 重签时顺带学到的「源站这一帖现在一共几段」。
+     *
+     * <p>用来把「第 N 段源站已下架」判成 410：库里数组还留着这一段，但源站页面只给 K 段（K&lt;=N），
+     * 重签多少次都还是 K 段 —— 不给结论的话前端要白重试 9 次约 55 秒，而且用户会以为站点坏了。
+     * 只信 30 分钟：源站会补段，一次判死会把能恢复的段封在 410 里。</p>
+     */
+    private static final long FRESH_TTL_MS = 30 * 60 * 1000L;
+    private static final Map<Long, FreshSegments> FRESH_SEGMENTS = new ConcurrentHashMap<>();
+
+    private static final class FreshSegments
+    {
+        final int count;
+        final long at;
+
+        FreshSegments(int count, long at)
+        {
+            this.count = count;
+            this.at = at;
+        }
+    }
     /** 正在后台重签的帖子（避免同一帖子并发开多个浏览器） */
     private final java.util.Set<Long> resignInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
@@ -201,6 +223,18 @@ public class WebPlayController
     public ResponseEntity<byte[]> playlist(@PathVariable("id") Long id,
             @RequestParam(value = "i", required = false, defaultValue = "0") int index)
     {
+        // 重签已经证明「源站这一帖只有 fresh 段」时，第 fresh 段以后的请求不该再走
+        // 「过期 → 502 → 后台重签」：重签结果不会变，前端却要白等 9 次约 55 秒。
+        // 给一个可识别的 410，前端据此立刻停重试并说清原因。
+        if (index > 0)
+        {
+            int fresh = freshSegments(id);
+            if (fresh >= 0 && index >= fresh)
+            {
+                log.info("该段源站已下架 id={} index={} 源站现共{}段", id, index, fresh);
+                return jsonError(HttpStatus.GONE, "segment_gone", fresh);
+            }
+        }
         String videoUrl = toolWebPostMapper.selectVideoUrl(id, index);
         // 历史数据里出现过被写坏的地址（例如只剩 "]}")：这种直接重签，别丢给 HTTP 客户端抛异常
         if (videoUrl != null && (videoUrl.length() < 20 || !videoUrl.startsWith("http")))
@@ -258,6 +292,32 @@ public class WebPlayController
             log.warn("播放列表异常 id={} err={}", id, e.toString());
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(new byte[0]);
         }
+    }
+
+    /** 源站这一帖现在一共几段；没学到过或已过期返回 -1 */
+    private static int freshSegments(Long id)
+    {
+        FreshSegments f = FRESH_SEGMENTS.get(id);
+        if (f == null)
+        {
+            return -1;
+        }
+        if (System.currentTimeMillis() - f.at > FRESH_TTL_MS)
+        {
+            FRESH_SEGMENTS.remove(id, f);
+            return -1;
+        }
+        return f.count;
+    }
+
+    /** 给前端的可识别错误：前端按 code 决定「立刻停重试」还是「继续等重签」 */
+    private static ResponseEntity<byte[]> jsonError(HttpStatus status, String msg, int segments)
+    {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set(HttpHeaders.CACHE_CONTROL, "no-store");
+        String body = "{\"code\":" + status.value() + ",\"msg\":\"" + msg + "\",\"segments\":" + segments + "}";
+        return new ResponseEntity<>(body.getBytes(StandardCharsets.UTF_8), headers, status);
     }
 
     /** 连接级失败（连不上/解析不出/握手失败），与"源站返回 4xx/5xx"区分开 */
@@ -436,6 +496,9 @@ public class WebPlayController
             {
                 return null;
             }
+            // 顺手记下源站这次真正返回了几段：index >= 这个数就是「源站已下架」，
+            // 播放端据此直接 410，不再空转重签。
+            FRESH_SEGMENTS.put(id, new FreshSegments(list.size(), System.currentTimeMillis()));
             // 重签有时只解析到部分播放器，数组会变短（实测把 12 段写成 10 段，
             // 后两段就此 404 且再也补不回来）。库里的段数更长时保留原数组，只覆盖回来的前几段。
             // 注意必须写进数组：第 1 段是从 video_urls[0] 读的，只写 video_url 会让新签名永远用不上。
