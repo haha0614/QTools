@@ -65,8 +65,16 @@ public interface ToolWebPostMapper
     /** 源站详情页 URL（签名过期时交给重签 sidecar 用） */
     String selectSourceUrl(@Param("id") Long id);
 
-    /** 重签成功后回写，下次播放直接用新的 */
-    int updateVideoUrl(@Param("id") Long id, @Param("videoUrl") String videoUrl);
+    /**
+     * 重签结果比库里短时的回写：只覆盖回来的前 N 段，数组尾部原样保留。
+     *
+     * <p>不能只写 video_url —— 播放第 1 段读的是 {@code video_urls[0]}（见 {@link #selectVideoUrl}），
+     * 只更新缓存列等于新签名永远进不了播放路径：每次播放拿陈旧地址 → 源站 400 → 重签 →
+     * 又只写 video_url，死循环（5906 每 10s 转一圈，前端重试 9 次全落空）。</p>
+     *
+     * <p>历史实现还会把 video_count 压成 1，段数就此和数组对不上，这里一并按数组长度校正。</p>
+     */
+    int patchVideoUrls(@Param("id") Long id, @Param("urls") java.util.List<String> urls);
 
     /**
      * 重签后整组回写（多视频）。

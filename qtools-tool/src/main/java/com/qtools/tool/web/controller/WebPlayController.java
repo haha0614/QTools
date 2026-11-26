@@ -437,13 +437,14 @@ public class WebPlayController
                 return null;
             }
             // 重签有时只解析到部分播放器，数组会变短（实测把 12 段写成 10 段，
-            // 后两段就此 404 且再也补不回来）。库里的段数更长时保留原数组，只更新首地址。
+            // 后两段就此 404 且再也补不回来）。库里的段数更长时保留原数组，只覆盖回来的前几段。
+            // 注意必须写进数组：第 1 段是从 video_urls[0] 读的，只写 video_url 会让新签名永远用不上。
             Integer prevRaw = toolWebPostMapper.countVideoUrls(id);
             int prevCount = prevRaw == null ? 0 : prevRaw;
             if (prevCount > list.size())
             {
-                log.warn("重签段数变少，保留原数组 id={} 库里={} 新={}", id, prevCount, list.size());
-                toolWebPostMapper.updateVideoUrl(id, list.get(0));
+                log.warn("重签段数变少，保留原数组只覆盖前{}段 id={} 库里={}", list.size(), id, prevCount);
+                toolWebPostMapper.patchVideoUrls(id, list);
             }
             else
             {

@@ -224,8 +224,19 @@
         select url from tool_web_post where id = #{id} limit 1
     </select>
 
-    <update id="updateVideoUrl">
-        update tool_web_post set video_url = #{videoUrl}, video_count = 1, has_video = 1 where id = #{id}
+    <!-- 重签结果比库里短：只覆盖前 N 段地址，数组尾部保留（少解析出几段不代表后几段没了）。
+         路径必须用 concat 拼，不能写死成 '$[0]' 字面量；video_count 取更新后的数组长度
+         （MySQL 的 SET 从左到右求值，这里拿到的是新的 video_urls）。
+         历史实现只写 video_url + video_count=1：段数被压小，数组里的陈旧签名还留着，
+         于是"库里明明有能用的新地址，播放却永远 502"。 -->
+    <update id="patchVideoUrls">
+        update tool_web_post
+        set video_url = #{urls[0]},
+            video_urls = json_set(coalesce(video_urls, json_array())
+                <foreach item="u" index="i" collection="urls">, concat('$[', #{i}, ']'), #{u}</foreach>),
+            video_count = json_length(video_urls),
+            has_video = 1
+        where id = #{id}
     </update>
 
     <select id="selectCategoryCounts" resultType="java.util.LinkedHashMap">
