@@ -120,8 +120,9 @@ public class WebSubtitleService
     public Map<String, Object> get(Long postId, int seg)
     {
         int useSeg = Math.max(0, seg);
-        Map<String, Object> row = row(postId, useSeg);
-        return data(postId, useSeg, row);
+        // 纯读：没有行就按 status=0 合成返回，不落库。
+        // 前端每开一帖都会 GET 一次，用 insertIfAbsent 会让「只看过没生成过」的帖子无限长行。
+        return data(postId, useSeg, subtitleMapper.selectOne(postId, useSeg));
     }
 
     /** 触发构建；已成功且 force=false 时直接返回现状 */
