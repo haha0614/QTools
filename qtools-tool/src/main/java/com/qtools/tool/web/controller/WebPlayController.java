@@ -273,11 +273,16 @@ public class WebPlayController
             if ("1".equals(asr))
             {
                 // 抽音频专用清单：分片必须带 .ts 后缀，否则 ffmpeg 按 URL 后缀判断容器会直接拒收
-                // （docs/视频字幕-实施交接.md §4.3）。不写 playlistCache：那份白名单只服务正常播放。
+                // （docs/视频字幕-实施交接.md §4.3）。清单正文不进 playlistCache（那是给正常播放的），
+                // 但域名必须并进去：源站换 CDN（2026-11-26 由 hls.ohjzmm.cn 换成 ts.zhixunkeji.xyz）后，
+                // 只走 asr 这条路的帖子没人更新白名单，part.ts 就会 403（实测 Invalid data found）。
+                Set<String> asrHosts = new LinkedHashSet<>();
+                String asrPlaylist = rewriteAsr(text, id, asrHosts);
+                playlistCache.compute(id, (k, old) -> old == null ? new PlaylistCache(asrHosts) : old.merge(asrHosts));
                 HttpHeaders asrHeaders = new HttpHeaders();
                 asrHeaders.setContentType(MediaType.parseMediaType("application/vnd.apple.mpegurl"));
                 asrHeaders.set(HttpHeaders.CACHE_CONTROL, "no-store");
-                return new ResponseEntity<>(rewriteAsr(text, id).getBytes(StandardCharsets.UTF_8),
+                return new ResponseEntity<>(asrPlaylist.getBytes(StandardCharsets.UTF_8),
                         asrHeaders, HttpStatus.OK);
             }
             Set<String> hosts = new LinkedHashSet<>();
@@ -744,7 +749,7 @@ public class WebPlayController
      * <p>ffmpeg 9 按 URL 路径后缀判断容器，{@code /part?u=} 没有后缀会被
      * {@code allowed_segment_extensions} 挡掉；KEY 行不需要后缀，保持原方式代理。</p>
      */
-    private static String rewriteAsr(String playlist, Long id)
+    private static String rewriteAsr(String playlist, Long id, Set<String> hosts)
     {
         StringBuilder out = new StringBuilder(playlist.length() + 512);
         int n = 0;
@@ -766,6 +771,7 @@ public class WebPlayController
                         String keyUrl = trimmed.substring(at + 5, end);
                         if (keyUrl.startsWith("http"))
                         {
+                            record(hosts, keyUrl);
                             trimmed = trimmed.substring(0, at + 5) + proxyUrl(id, keyUrl) + trimmed.substring(end);
                         }
                     }
@@ -776,6 +782,7 @@ public class WebPlayController
             out.append("/api/tool/web/hls/").append(id).append("/part.ts?n=").append(n++);
             if (trimmed.startsWith("http"))
             {
+                record(hosts, trimmed);
                 out.append("&u=").append(URLEncoder.encode(trimmed, StandardCharsets.UTF_8));
             }
             out.append('\n');
