@@ -220,7 +220,10 @@ public class WebSubtitleService
             work = Files.createTempDirectory(dir, "tmp-" + seg + "-");
             Path wav = work.resolve("audio.wav");
             String playlist = "http://127.0.0.1:" + port + "/api/tool/web/hls/" + postId + "/playlist.m3u8?asr=1&i=" + seg;
-            long extractTimeout = Math.min(properties.getEffectiveTimeoutMs(), 15 * 60000L);
+            // 抽取走的是逐段代理（源站 CDN 快时 80 分钟片 5 分钟，慢时 25 分钟以上），
+            // 上限取 40 分钟：15 分钟会在大片 + 慢 CDN 上假超时（2026-11-26 21:05 实测：
+            // 3.2 倍实时，60 秒音频 18.9 秒，全片约 25 分钟）。
+            long extractTimeout = Math.min(properties.getEffectiveTimeoutMs(), 40 * 60000L);
             String reason = transcribeMaterial.extractAudio(playlist, wav, extractTimeout);
             if (!reason.isEmpty())
             {
